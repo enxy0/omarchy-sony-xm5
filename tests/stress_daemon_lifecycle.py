@@ -95,7 +95,7 @@ def test_start_stop_cycles(sbox):
         resp = send_ipc_cmd(sock_path, "status\n")
         try:
             st = json.loads(resp)
-            if st.get("schema_version") != 2 or not st.get("connected"):
+            if st.get("schema_version") != 3 or not st.get("connected") or not st.get("headsets"):
                 print(f"FAIL: Cycle {i} invalid status payload: {resp}")
                 proc.kill()
                 return False

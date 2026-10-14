@@ -55,6 +55,8 @@ constexpr VerbSpec kVerbs[] = {
     {"source", Verb::Source, "source <address>"},
     {"touch-panel", Verb::TouchPanel, "touch-panel on|off"},
     {"quick-access", Verb::QuickAccess, "quick-access double|triple <value>"},
+    {"touch-function", Verb::TouchFunction, "touch-function left|right <value>"},
+    {"sidetone", Verb::Sidetone, "sidetone on|off"},
     {"_set_battery", Verb::TestSetBattery, "_set_battery <level> [charging]"},
     {"_disconnect", Verb::TestDisconnect, "_disconnect"},
     {"_reconnect", Verb::TestReconnect, "_reconnect"},
@@ -82,6 +84,16 @@ std::string Command::line() const {
         out += a;
     }
     return out;
+}
+
+std::string Command::requestLine() const {
+    return selector ? "@" + *selector + " " + line() : line();
+}
+
+bool validSelector(std::string_view selector) {
+    if (selector.empty()) return false;
+    return std::none_of(selector.begin(), selector.end(),
+                        [](char c) { return std::isspace(static_cast<unsigned char>(c)) != 0; });
 }
 
 bool Command::isSetter() const {
@@ -134,16 +146,26 @@ std::string_view usage(Verb verb) {
     return "";
 }
 
-ParseResult parse(const std::vector<std::string>& tokens, bool allowTestVerbs) {
-    if (tokens.empty()) return ParseResult{std::nullopt, "empty command"};
+ParseResult parse(const std::vector<std::string>& allTokens, bool allowTestVerbs) {
+    if (allTokens.empty()) return ParseResult{std::nullopt, "empty command"};
+
+    std::optional<std::string> selector;
+    std::vector<std::string> tokens = allTokens;
+    if (!tokens[0].empty() && tokens[0].front() == '@') {
+        if (tokens[0].size() < 2 || tokens.size() < 2) return usageError(kSelectorUsage);
+        selector = tokens[0].substr(1);
+        tokens.erase(tokens.begin());
+    }
 
     const std::string verbName = lower(tokens[0]);
     const VerbSpec* spec = findVerb(verbName);
     if (!spec || (!allowTestVerbs && verbName.front() == '_')) {
         return ParseResult{std::nullopt, "unknown command '" + verbName + "'"};
     }
+    if (spec->verb == Verb::Status && selector) return usageError(spec->usage);
 
     Command c;
+    c.selector = selector;
     c.verb = spec->verb;
     c.name = std::string(spec->verb == Verb::EarDetect ? "ear-detect" : spec->name);
     const size_t argc = tokens.size() - 1;
@@ -184,6 +206,7 @@ ParseResult parse(const std::vector<std::string>& tokens, bool allowTestVerbs) {
     case Verb::EarDetect:
     case Verb::Multipoint:
     case Verb::TouchPanel:
+    case Verb::Sidetone:
         return single({"on", "off"});
     case Verb::VoiceGuidanceVolume:
         return integer(-2, 2);
@@ -218,6 +241,19 @@ ParseResult parse(const std::vector<std::string>& tokens, bool allowTestVerbs) {
             return usageError(spec->usage);
         }
         c.args = {action, value};
+        return ParseResult{c, {}};
+    }
+
+    case Verb::TouchFunction: {
+        if (argc != 2) return usageError(spec->usage);
+        std::string side = word(1);
+        std::string value = word(2);
+        if (!oneOf(side, {"left", "right"}) ||
+            !oneOf(value, {"ambient_sound_control", "playback_control", "volume_control", "voice_recognition",
+                           "google_assistant", "amazon_alexa", "quick_access", "none"})) {
+            return usageError(spec->usage);
+        }
+        c.args = {side, value};
         return ParseResult{c, {}};
     }
 

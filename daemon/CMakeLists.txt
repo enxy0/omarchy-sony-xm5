@@ -14,6 +14,7 @@ set(PROTOCOL_LIB_SOURCES
     src/HeadphoneState.cpp
     src/MdrLink.cpp
     src/HeadsetSession.cpp
+    src/SessionManager.cpp
     src/Commands.cpp
     src/FakeHeadset.cpp
     src/BluetoothManager.cpp

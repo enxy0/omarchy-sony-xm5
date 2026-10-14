@@ -13,6 +13,8 @@
 
 namespace omarchy::sony {
 
+// One connected headset: its MDR link, sequence number, init sequence, state
+// and request queue (contract 2.1).
 class HeadsetSession {
 public:
     using Clock = protocol::MdrLink::Clock;
@@ -20,9 +22,12 @@ public:
 
     struct Hooks {
         std::function<bool(const protocol::Bytes& bytes)> write;
-        std::function<void(const std::string& statusJson)> stateChanged;
+        std::function<void()> changed;
         std::function<void(const std::string& reason)> dropLink;
+        // The MDR handshake answered: the link is usable.
+        std::function<void()> linkHealthy;
         std::function<void(const std::string& line)> log;
+        std::function<int64_t()> unixNow;
     };
 
     struct Timing {
@@ -43,18 +48,21 @@ public:
     HeadsetSession(const HeadsetSession&) = delete;
     HeadsetSession& operator=(const HeadsetSession&) = delete;
 
-    void onTransportConnected(const std::string& alias, const std::optional<std::string>& address,
-                              Clock::time_point now);
+    void onTransportConnected(const std::string& alias, const std::string& bluezName,
+                              const std::optional<std::string>& address, Clock::time_point now);
     void onTransportDisconnected(Clock::time_point now);
     void onBytes(std::span<const uint8_t> data, Clock::time_point now);
     void tick(Clock::time_point now);
     [[nodiscard]] std::optional<Clock::time_point> nextDeadline() const;
 
+    // Verbs after selector resolution: `probe` and the setters.
     void execute(const cmd::Command& command, Reply done, Clock::time_point now);
 
-    [[nodiscard]] std::string statusJson(int64_t lastUpdated) const;
+    [[nodiscard]] std::string headsetJson() const;
     [[nodiscard]] std::string probeJson() const;
     [[nodiscard]] const protocol::HeadphoneState& state() const noexcept { return state_; }
+    // True while the headset belongs in `headsets[]` (handshake answered).
+    [[nodiscard]] bool listed() const noexcept { return state_.connected; }
     [[nodiscard]] bool initComplete() const noexcept { return initDone_; }
     [[nodiscard]] uint8_t linkSequence() const noexcept { return link_.sequence(); }
 
@@ -77,6 +85,7 @@ private:
     void publishSupported();
     void queueValueReads();
     void queueFallbackReads();
+    void queueTail(const char* doneMessage);
 
     void onPayload(protocol::Table table, const protocol::Bytes& payload);
     void handleEvents(protocol::Table table, const protocol::Bytes& payload, const protocol::InboundEvents& events);
@@ -88,6 +97,7 @@ private:
     void refreshThen(bool needed, protocol::Table table, protocol::Bytes getPayload, std::function<void()> then);
     void runSetter(const cmd::Command& command, Reply done);
     void log(const std::string& line) const;
+    int64_t unixNow() const;
 
     Hooks hooks_;
     Timing timing_;

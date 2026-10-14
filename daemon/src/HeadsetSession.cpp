@@ -10,11 +10,6 @@ using cmd::Verb;
 
 namespace {
 
-int64_t unixNow() {
-    return std::chrono::duration_cast<std::chrono::seconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-}
-
 const char* featureKey(Verb verb) {
     switch (verb) {
         case Verb::Noise:
@@ -30,12 +25,14 @@ const char* featureKey(Verb verb) {
         case Verb::AutoPowerOff:        return "auto_power_off";
         case Verb::NcAmbButton:         return "nc_amb_button";
         case Verb::ButtonFunction:      return "button_function";
+        case Verb::TouchFunction:       return "touch_function";
         case Verb::EarDetect:           return "ear_detection";
         case Verb::Volume:              return "volume";
         case Verb::ConnectionQuality:   return "connection_quality";
         case Verb::Multipoint:          return "multipoint";
         case Verb::Source:              return "source_switch";
         case Verb::TouchPanel:          return "touch_panel";
+        case Verb::Sidetone:            return "sidetone";
         case Verb::QuickAccess:         return "quick_access";
         default:                        return nullptr;
     }
@@ -56,12 +53,14 @@ bool featureEnabled(const Supported& s, Verb verb) {
         case Verb::AutoPowerOff:        return s.auto_power_off;
         case Verb::NcAmbButton:         return s.nc_amb_button;
         case Verb::ButtonFunction:      return s.button_function;
+        case Verb::TouchFunction:       return s.touch_function;
         case Verb::EarDetect:           return s.ear_detection;
         case Verb::Volume:              return s.volume;
         case Verb::ConnectionQuality:   return s.connection_quality;
         case Verb::Multipoint:          return s.multipoint;
         case Verb::Source:              return s.source_switch;
         case Verb::TouchPanel:          return s.touch_panel;
+        case Verb::Sidetone:            return s.sidetone;
         case Verb::QuickAccess:         return s.quick_access;
         default:                        return false;
     }
@@ -70,6 +69,8 @@ bool featureEnabled(const Supported& s, Verb verb) {
 bool contains(const std::vector<std::string>& list, const std::string& value) {
     return std::find(list.begin(), list.end(), value) != list.end();
 }
+
+uint8_t sideKey(const std::string& side) { return side == "left" ? kKeyLeftSide : kKeyRightSide; }
 
 } // namespace
 
@@ -82,18 +83,24 @@ HeadsetSession::HeadsetSession(Hooks hooks, Timing timing)
             [this](Table table, const Bytes& payload) { onPayload(table, payload); },
             [this](const std::string& line) { log(line); }) {}
 
+int64_t HeadsetSession::unixNow() const {
+    if (hooks_.unixNow) return hooks_.unixNow();
+    return std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
 // ---------------------------------------------------------------------------
 // Connection lifecycle
 // ---------------------------------------------------------------------------
 
-void HeadsetSession::onTransportConnected(const std::string& alias, const std::optional<std::string>& address,
-                                          Clock::time_point now) {
+void HeadsetSession::onTransportConnected(const std::string& alias, const std::string& bluezName,
+                                          const std::optional<std::string>& address, Clock::time_point now) {
     now_ = now;
     ++gen_;
     steps_.clear();
     stepRunning_ = false;
     link_.reset();
-    state_.resetForConnection(alias, address);
+    state_.resetForConnection(alias, bluezName, address);
     fallbackPending_ = false;
     initDone_ = false;
     alertWindowUntil_ = {};
@@ -130,7 +137,10 @@ void HeadsetSession::tick(Clock::time_point now) {
     if (initDone_ && state_.connected && state_.supported && link_.idle() && now >= nextSync_) {
         nextSync_ = now + std::chrono::milliseconds(timing_.syncIntervalMs);
         const auto& sup = *state_.supported;
-        if (sup.battery) submitBackground(Table::T1, req::getBattery(state_.variants.batteryType));
+        const Variants& v = state_.variants;
+        if (sup.battery) submitBackground(Table::T1, req::getBattery(v.batteryType));
+        if (sup.battery_lr) submitBackground(Table::T1, req::getBattery(v.lrBatteryType));
+        if (sup.battery_case) submitBackground(Table::T1, req::getBattery(v.caseBatteryType));
         if (sup.volume) submitBackground(Table::T1, req::getVolume());
         if (sup.worn) submitBackground(Table::T2, req::getWornStatus());
     }
@@ -203,6 +213,8 @@ void HeadsetSession::afterHandshake(LinkResult result) {
     }
 
     state_.connected = true;
+    state_.connectedSince = unixNow();
+    if (hooks_.linkHealthy) hooks_.linkHealthy();
     publishIfChanged();
     log("protocol version " + std::to_string(state_.protocolVersion) + ", table1=" +
         (state_.table1Supported ? "yes" : "no") + ", table2=" + (state_.table2Supported ? "yes" : "no"));
@@ -275,6 +287,8 @@ void HeadsetSession::queueValueReads() {
     auto t1 = [this](uint8_t id) { return state_.hasFunction(Table::T1, id); };
 
     if (sup.battery) queueRead(Table::T1, req::getBattery(v.batteryType));
+    if (sup.battery_lr) queueRead(Table::T1, req::getBattery(v.lrBatteryType));
+    if (sup.battery_case) queueRead(Table::T1, req::getBattery(v.caseBatteryType));
     if (t1(fn1::FIXED_MESSAGE)) {
         Step alerts;
         alerts.payload = req::enableFixedMessageAlerts();
@@ -316,37 +330,47 @@ void HeadsetSession::queueValueReads() {
     if (sup.voice_guidance) queueRead(Table::T2, req::getVoiceGuidance(v.voiceGuidanceType));
     if (sup.voice_guidance_volume) queueRead(Table::T2, req::getVoiceGuidanceVolume());
     if (sup.quick_access) queueRead(Table::T1, req::getQuickAccess());
-
-    Step operationLog;
-    operationLog.payload = req::enableOperationLog();
-    queueStep(std::move(operationLog));
-
-    queueLocal([this] {
-        initDone_ = true;
-        nextSync_ = now_ + std::chrono::milliseconds(timing_.syncIntervalMs);
-        log("init sequence complete");
-    });
+    if (t1(fn1::CONNECTION_MODE_CLASSIC_AUDIO_LE_AUDIO)) {
+        queueRead(Table::T1, req::getConnectionModeCapability());
+        queueRead(Table::T1, req::getConnectionModeStatus());
+    }
+    queueTail("init sequence complete");
 }
 
 void HeadsetSession::queueFallbackReads() {
-    queueRead(Table::T1, req::getBattery(0x00));
-    queueRead(Table::T1, req::getNcAsm(0x17));
-    queueRead(Table::T1, req::getEqStatus());
-    queueRead(Table::T1, req::getEqValue());
-    queueRead(Table::T1, req::getSpeakToChat());
-    queueRead(Table::T1, req::getSpeakToChatConfig());
-    if (state_.table2Supported) queueRead(Table::T2, req::getVoiceGuidance(0x01));
-    queueRead(Table::T1, req::getAutoPowerOff(0x05));
-    queueRead(Table::T1, req::getNcAmbButton());
-    queueRead(Table::T1, req::getEarDetection());
-    queueRead(Table::T1, req::getVolume());
+    const auto model = state_.model();
+    if (model == kModelWh || model == kModelWf) {
+        if (model == kModelWh) {
+            queueRead(Table::T1, req::getBattery(0x00));
+        } else {
+            queueRead(Table::T1, req::getBattery(0x09));
+            queueRead(Table::T1, req::getBattery(0x0A));
+        }
+        queueRead(Table::T1, req::getNcAsm(0x17));
+        queueRead(Table::T1, req::getEqStatus());
+        queueRead(Table::T1, req::getEqValue());
+        queueRead(Table::T1, req::getSpeakToChat());
+        queueRead(Table::T1, req::getSpeakToChatConfig());
+        if (state_.table2Supported) {
+            queueRead(Table::T2, req::getVoiceGuidance(0x01));
+            if (model == kModelWf) queueRead(Table::T2, req::getVoiceGuidanceVolume());
+        }
+        queueRead(Table::T1, req::getAutoPowerOff(0x05));
+        if (model == kModelWh) queueRead(Table::T1, req::getNcAmbButton());
+        queueRead(Table::T1, req::getEarDetection());
+        queueRead(Table::T1, req::getVolume());
+    }
+    queueTail("init sequence complete (fallback feature list)");
+}
+
+void HeadsetSession::queueTail(const char* doneMessage) {
     Step operationLog;
     operationLog.payload = req::enableOperationLog();
     queueStep(std::move(operationLog));
-    queueLocal([this] {
+    queueLocal([this, doneMessage] {
         initDone_ = true;
         nextSync_ = now_ + std::chrono::milliseconds(timing_.syncIntervalMs);
-        log("init sequence complete (fallback feature list)");
+        log(doneMessage);
     });
 }
 
@@ -406,6 +430,8 @@ void HeadsetSession::updateLateSupport() {
     Supported& current = *state_.supported;
     if (!current.eq_custom && derived.eq_custom) current.eq_custom = true;
     if (!current.button_function && derived.button_function) current.button_function = true;
+    if (!current.touch_function && derived.touch_function) current.touch_function = true;
+    if (!current.quick_access && derived.quick_access) current.quick_access = true;
     if (!current.multipoint && derived.multipoint) {
         current.multipoint = true;
         selectVariants(state_);
@@ -414,23 +440,21 @@ void HeadsetSession::updateLateSupport() {
         current.touch_panel = true;
         selectVariants(state_);
     }
+    if (!current.sidetone && derived.sidetone) {
+        current.sidetone = true;
+        selectVariants(state_);
+    }
 }
 
 void HeadsetSession::publishIfChanged() {
-    std::string json = statusJson(0);
+    std::string json = state_.connected ? headsetJson() : std::string();
     if (json == lastPublished_) return;
-    lastPublished_ = json;
-    if (!hooks_.stateChanged) return;
-    constexpr std::string_view kPlaceholder = "\"last_updated\":0";
-    auto pos = json.find(kPlaceholder);
-    if (pos != std::string::npos) {
-        json.replace(pos, kPlaceholder.size(), "\"last_updated\":" + std::to_string(unixNow()));
-    }
-    hooks_.stateChanged(json);
+    lastPublished_ = std::move(json);
+    if (hooks_.changed) hooks_.changed();
 }
 
-std::string HeadsetSession::statusJson(int64_t lastUpdated) const {
-    return protocol::statusJson(state_, lastUpdated);
+std::string HeadsetSession::headsetJson() const {
+    return protocol::headsetJson(state_);
 }
 
 std::string HeadsetSession::probeJson() const {
@@ -462,6 +486,10 @@ void HeadsetSession::submitCommand(Table table, Bytes payload, Reply done, std::
     request.maxAttempts = timing_.commandAttempts;
     const uint64_t gen = gen_;
     request.done = [this, gen, done = std::move(done), afterOk = std::move(afterOk)](LinkResult r) {
+        if (r == LinkResult::Cancelled) {
+            done("ERR not connected");
+            return;
+        }
         if (r != LinkResult::Ok) {
             done("ERR device timeout");
             return;
@@ -495,14 +523,12 @@ void HeadsetSession::refreshThen(bool needed, Table table, Bytes getPayload, std
 
 void HeadsetSession::execute(const cmd::Command& command, Reply done, Clock::time_point now) {
     now_ = now;
+    if (!state_.connected) { done("ERR not connected"); return; }
     switch (command.verb) {
-    case Verb::Status:
-        done(statusJson(unixNow()));
-        return;
     case Verb::Probe:
-        if (!state_.connected) { done("ERR not connected"); return; }
         done(probeJson());
         return;
+    case Verb::Status:
     case Verb::TestSetBattery:
     case Verb::TestDisconnect:
     case Verb::TestReconnect:
@@ -512,7 +538,6 @@ void HeadsetSession::execute(const cmd::Command& command, Reply done, Clock::tim
         break;
     }
 
-    if (!state_.connected) { done("ERR not connected"); return; }
     if (!state_.supported) { done("ERR not ready"); return; }
     const char* key = featureKey(command.verb);
     if (!key || !featureEnabled(*state_.supported, command.verb)) {
@@ -537,6 +562,12 @@ void HeadsetSession::execute(const cmd::Command& command, Reply done, Clock::tim
     case Verb::ButtonFunction: {
         auto options = state_.buttonFunctionOptions();
         if (options && !contains(*options, arg)) { unsupportedValue(arg); return; }
+        break;
+    }
+    case Verb::TouchFunction: {
+        const std::string& value = command.args[1];
+        auto options = state_.touchFunctionOptions(sideKey(arg));
+        if (options && !contains(*options, value)) { unsupportedValue(arg + " " + value); return; }
         break;
     }
     case Verb::QuickAccess: {
@@ -575,7 +606,7 @@ void HeadsetSession::runSetter(const cmd::Command& c, Reply done) {
         const uint8_t type = v.ncAsmType.value_or(0x17);
         const bool unknown = !state_.ncTotalEffect || !state_.ncMode || !state_.ncAmbientMode || !state_.ncLevel;
         refreshThen(unknown, Table::T1, req::getNcAsm(type), [this, gen, c, type, done = std::move(done)]() mutable {
-            if (gen != gen_) { done("ERR device timeout"); return; }
+            if (gen != gen_) { done("ERR not connected"); return; }
             NcAsmParams p;
             p.type = type;
             p.totalEffect = state_.ncTotalEffect.value_or(0x01);
@@ -642,7 +673,7 @@ void HeadsetSession::runSetter(const cmd::Command& c, Reply done) {
         const uint8_t type = v.assignableType;
         refreshThen(!state_.assignableValue, Table::T1, req::getAssignableValue(type),
                     [this, gen, arg, type, done = std::move(done)]() mutable {
-            if (gen != gen_) { done("ERR device timeout"); return; }
+            if (gen != gen_) { done("ERR not connected"); return; }
             auto idx = state_.ncAmbKeyIndex();
             if (!idx || !state_.assignableValue || *idx >= state_.assignableValue->size()) {
                 done("ERR not ready");
@@ -651,6 +682,25 @@ void HeadsetSession::runSetter(const cmd::Command& c, Reply done) {
             std::vector<uint8_t> presets = *state_.assignableValue;
             presets[*idx] = *buttonFunctionValue(arg);
             submitCommand(Table::T1, req::setAssignableValue(type, presets), std::move(done));
+        });
+        return;
+    }
+    case Verb::TouchFunction: {
+        const uint8_t type = v.assignableType;
+        const uint8_t key = sideKey(arg);
+        const std::string value = c.args[1];
+        refreshThen(!state_.assignableValue, Table::T1, req::getAssignableValue(type),
+                    [this, gen, key, value, type, done = std::move(done)]() mutable {
+            if (gen != gen_) { done("ERR not connected"); return; }
+            auto idx = state_.assignableKeyIndex(key);
+            if (!idx || !state_.assignableValue || *idx >= state_.assignableValue->size()) {
+                done("ERR not ready");
+                return;
+            }
+            std::vector<uint8_t> presets = *state_.assignableValue;
+            presets[*idx] = state_.touchPresetFor(key, value);
+            submitCommand(Table::T1, req::setAssignableValue(type, presets), std::move(done),
+                          [this, type] { submitBackground(Table::T1, req::getAssignableValue(type)); });
         });
         return;
     }
@@ -675,12 +725,15 @@ void HeadsetSession::runSetter(const cmd::Command& c, Reply done) {
     case Verb::TouchPanel:
         submitCommand(Table::T1, req::setGeneralSettingBool(*v.touchPanelSlot, on), std::move(done));
         return;
+    case Verb::Sidetone:
+        submitCommand(Table::T1, req::setGeneralSettingBool(*v.sidetoneSlot, on), std::move(done));
+        return;
     case Verb::QuickAccess: {
         const uint8_t action = arg == "double" ? kActionDoubleTap : kActionTripleTap;
         const uint8_t function = *quickAccessValue(c.args[1]);
         refreshThen(!state_.quickAccessValue, Table::T1, req::getQuickAccess(),
                     [this, gen, action, function, done = std::move(done)]() mutable {
-            if (gen != gen_) { done("ERR device timeout"); return; }
+            if (gen != gen_) { done("ERR not connected"); return; }
             auto idx = state_.quickAccessIndex(action);
             if (!idx || !state_.quickAccessValue || *idx >= state_.quickAccessValue->size()) {
                 done("ERR not ready");

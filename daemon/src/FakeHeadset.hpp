@@ -13,18 +13,36 @@
 
 namespace omarchy::sony::protocol {
 
+struct FakeEqPreset {
+    uint8_t id{0};
+    std::string name;
+};
+
 struct FakeHeadsetProfile {
     std::vector<uint8_t> table1;
     std::vector<uint8_t> table2;
     bool table2Supported{true};
     bool answerSupportFunction{true};
+    bool answerWornStatus{true};
     int dropFirstDataPackets{0};
     bool replyBeforeAck{false};
     uint8_t multipointSlot{0xD1};
+    uint8_t sidetoneSlot{0x00};
     std::string firmware{"2.3.1"};
+    std::string modelName{"WH-1000XM5"};
+    std::string uniqueId{"FAKE-XM5-0001"};
+    std::array<uint8_t, 4> protocolVersion{0x00, 0x00, 0x10, 0x00};
+    uint8_t color{0x01};
+    std::vector<FakeEqPreset> eqPresets;
+    Bytes assignableCapability;
+    Bytes quickAccessCapability;
 
+    // The rich simulated WH-1000XM5 (every feature this daemon knows).
     static FakeHeadsetProfile xm5();
     static FakeHeadsetProfile minimal();
+    // Support lists and capability replies of the real captures (protocol.md 3.4, 9.1).
+    static FakeHeadsetProfile wh1000xm5Capture();
+    static FakeHeadsetProfile wf1000xm5Capture();
 };
 
 struct FakePairedDevice {
@@ -40,6 +58,9 @@ public:
     void reconnect();
     Bytes receive(std::span<const uint8_t> hostBytes);
 
+    // Sets the values of the fixture status_v3_wh.json / status_v3_wf.json by profile model.
+    void useFixtureValues();
+
     Bytes pushBattery(int level, bool charging);
     Bytes pushPayload(Table table, const Bytes& payload);
 
@@ -51,6 +72,13 @@ public:
     FakeHeadsetProfile profile;
     int battery{80};
     uint8_t charging{0x00};
+    int batteryLeft{70};
+    uint8_t leftCharging{0x00};
+    int batteryRight{65};
+    uint8_t rightCharging{0x00};
+    int batteryCase{53};
+    uint8_t caseCharging{0x00};
+    bool sidetone{true};
     uint8_t ncTotalEffect{0x01};
     uint8_t ncMode{0x00};
     uint8_t ncAmbientMode{0x00};
@@ -84,6 +112,8 @@ private:
     Bytes eqValue() const;
     Bytes deviceList(uint8_t type) const;
     Bytes ncAsm(uint8_t cmd, uint8_t type) const;
+    Bytes batteryReply(uint8_t cmd, uint8_t type) const;
+    bool advertises(uint8_t t1Id) const;
 
     StreamFramer framer_;
     uint8_t deviceSeq_{0};

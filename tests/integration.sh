@@ -124,16 +124,20 @@ write_status_atomic() {
   mv -f "$tmp" "$STATUS_FILE"
 }
 
-# Helper to start mock daemon
+# jq path of the first headset entry (schema 3)
+H='.headsets[0]'
+
+# Helper to start mock daemon; $1 = mock profile (default xm5)
 start_daemon() {
+  local profile="${1:-xm5}"
   local ready_file="$SANDBOX_DIR/daemon_ready"
   rm -f "$ready_file"
   if [[ -n "$DAEMON_BIN" ]]; then
-    "$DAEMON_BIN" --mock \
+    "$DAEMON_BIN" --mock --mock-profile "$profile" \
       --state-dir "$XDG_STATE_HOME" \
       --runtime-dir "$XDG_RUNTIME_DIR" > "$ready_file" 2>&1 &
   else
-    python3 "$SCRIPT_DIR/mock_daemon.py" \
+    python3 "$SCRIPT_DIR/mock_daemon.py" --mock-profile "$profile" \
       --state-dir "$XDG_STATE_HOME" \
       --runtime-dir "$XDG_RUNTIME_DIR" > "$ready_file" 2>&1 &
   fi
@@ -154,7 +158,7 @@ start_daemon() {
 
 wait_connected() {
   local count=0
-  until jq -e '.connected == true and .supported != null' "$STATUS_FILE" >/dev/null 2>&1; do
+  until jq -e '.connected == true and ([.headsets[].supported] | all(. != null))' "$STATUS_FILE" >/dev/null 2>&1; do
     sleep 0.1
     count=$((count + 1))
     if [[ $count -ge 30 ]]; then
@@ -192,10 +196,10 @@ else
 fi
 
 # T1.D2: Atomic initial status.json generation
-if [[ -f "$STATUS_FILE" ]] && jq -e '.schema_version == 2 and .connected == true and .device_name == "WH-1000XM5" and (.supported | type) == "object"' "$STATUS_FILE" >/dev/null 2>&1; then
-  pass_test "T1.D2" "Daemon creates valid initial status.json matching schema_version 2"
+if [[ -f "$STATUS_FILE" ]] && jq -e ".schema_version == 3 and .connected == true and (.headsets | length) == 1 and .primary == $H.id and $H.device_name == \"WH-1000XM5\" and $H.model == \"wh-1000xm5\" and $H.kind == \"headphones\" and ($H.supported | type) == \"object\"" "$STATUS_FILE" >/dev/null 2>&1; then
+  pass_test "T1.D2" "Daemon creates valid initial status.json matching schema_version 3"
 else
-  fail_test "T1.D2" "status.json missing or does not match schema_version 2" "$(cat "$STATUS_FILE" 2>/dev/null)"
+  fail_test "T1.D2" "status.json missing or does not match schema_version 3" "$(cat "$STATUS_FILE" 2>/dev/null)"
 fi
 
 # T1.D3: File permissions security (0600 for status.json)
@@ -208,7 +212,7 @@ fi
 
 # T1.D4: Socket IPC status query
 status_out=$(run_cli status 2>/dev/null || true)
-if echo "$status_out" | jq -e '.schema_version == 2 and .device_name == "WH-1000XM5"' >/dev/null 2>&1; then
+if echo "$status_out" | jq -e ".schema_version == 3 and $H.device_name == \"WH-1000XM5\"" >/dev/null 2>&1; then
   pass_test "T1.D4" "Socket IPC responds to 'status' with valid JSON snapshot"
 else
   fail_test "T1.D4" "Socket IPC failed to respond to 'status'" "Got: $status_out"
@@ -216,7 +220,7 @@ fi
 
 # T1.D5: Socket IPC noise mode modification and persistence
 run_cli noise ambient >/dev/null 2>&1 || true
-if jq -e '.noise_mode == "ambient"' "$STATUS_FILE" >/dev/null 2>&1; then
+if jq -e "$H.noise_mode == \"ambient\"" "$STATUS_FILE" >/dev/null 2>&1; then
   pass_test "T1.D5" "Daemon updates noise_mode to 'ambient' via IPC and persists to file"
 else
   fail_test "T1.D5" "noise_mode was not updated to 'ambient'" "$(cat "$STATUS_FILE")"
@@ -224,7 +228,7 @@ fi
 
 # T1.D6: Socket IPC ambient-level modification and persistence
 run_cli ambient-level 16 >/dev/null 2>&1 || true
-if jq -e '.ambient_sound_level == 16' "$STATUS_FILE" >/dev/null 2>&1; then
+if jq -e "$H.ambient_sound_level == 16" "$STATUS_FILE" >/dev/null 2>&1; then
   pass_test "T1.D6" "Daemon updates ambient_sound_level to 16 via IPC and persists to file"
 else
   fail_test "T1.D6" "ambient_sound_level was not updated to 16" "$(cat "$STATUS_FILE")"
@@ -232,7 +236,7 @@ fi
 
 # T1.D7: Socket IPC EQ preset modification
 run_cli eq vocal >/dev/null 2>&1 || true
-if jq -e '.eq_preset == "vocal"' "$STATUS_FILE" >/dev/null 2>&1; then
+if jq -e "$H.eq_preset == \"vocal\"" "$STATUS_FILE" >/dev/null 2>&1; then
   pass_test "T1.D7" "Daemon updates eq_preset to 'vocal' via IPC and persists to file"
 else
   fail_test "T1.D7" "eq_preset was not updated to 'vocal'" "$(cat "$STATUS_FILE")"
@@ -240,7 +244,7 @@ fi
 
 # T1.D8: Socket IPC Custom EQ bands modification
 run_cli eq custom 2 1 -1 3 0 4 >/dev/null 2>&1 || true
-if jq -e '.eq_preset == "custom" and .eq_custom_bands == [2, 1, -1, 3, 0] and .clear_bass == 4' "$STATUS_FILE" >/dev/null 2>&1; then
+if jq -e "$H.eq_preset == \"custom\" and $H.eq_custom_bands == [2, 1, -1, 3, 0] and $H.clear_bass == 4" "$STATUS_FILE" >/dev/null 2>&1; then
   pass_test "T1.D8" "Daemon updates custom EQ bands and clear_bass via IPC and persists"
 else
   fail_test "T1.D8" "Custom EQ bands were not updated properly" "$(cat "$STATUS_FILE")"
@@ -251,7 +255,7 @@ run_cli speak-to-chat on >/dev/null 2>&1 || true
 run_cli dsee off >/dev/null 2>&1 || true
 run_cli multipoint off >/dev/null 2>&1 || true
 run_cli ear-detect off >/dev/null 2>&1 || true
-if jq -e '.speak_to_chat == true and .dsee_extreme == false and .multipoint == false and .ear_detection == false' "$STATUS_FILE" >/dev/null 2>&1; then
+if jq -e "$H.speak_to_chat == true and $H.dsee_extreme == false and $H.multipoint == false and $H.ear_detection == false" "$STATUS_FILE" >/dev/null 2>&1; then
   pass_test "T1.D9" "Daemon updates feature switches (Speak-to-Chat, DSEE, Multipoint, Ear-Detect)"
 else
   fail_test "T1.D9" "Feature toggles were not updated properly" "$(cat "$STATUS_FILE")"
@@ -260,8 +264,8 @@ fi
 # T1.D10: Disconnect state persistence
 kill -USR1 "$DAEMON_PID"
 sleep 0.2
-if jq -e '.schema_version == 2 and .connected == false and (keys | length) == 3' "$STATUS_FILE" >/dev/null 2>&1; then
-  pass_test "T1.D10" "Daemon writes the three-key connected:false payload on disconnect without unlinking"
+if jq -e '.schema_version == 3 and .connected == false and .primary == null and .headsets == [] and (keys | length) == 5' "$STATUS_FILE" >/dev/null 2>&1; then
+  pass_test "T1.D10" "Daemon writes the empty headsets list on disconnect without unlinking"
 else
   fail_test "T1.D10" "status.json did not record connected:false on disconnect"
 fi
@@ -355,6 +359,97 @@ if [[ $code -eq 2 ]]; then
   pass_test "T1.C7" "sony-ctl exits with code 2 when daemon socket is offline"
 else
   fail_test "T1.C7" "Expected exit code 2 when daemon offline, got $code"
+fi
+
+# ------------------------------------------------------------------------------
+# Feature 1.3: Two headsets at once (schema 3, --mock-profile both)
+# ------------------------------------------------------------------------------
+WH_ID="AC:80:0A:12:34:56"
+WF_ID="AC:80:0A:65:43:21"
+
+# Sends one raw request line to the daemon socket (test-only verbs need it).
+raw_cmd() {
+  python3 -c 'import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[1])
+s.sendall((sys.argv[2] + "\n").encode())
+print(s.recv(65536).decode().strip())' "$SOCKET_FILE" "$1"
+}
+
+entry() { echo ".headsets[] | select(.id == \"$1\")"; }
+
+if [[ "$CLI_BIN" == "$SCRIPT_DIR/mock_sony_ctl.py" ]]; then
+  printf "  ${YELLOW}Skipped T1.M*: the reference client has no --headset option${NC}\n"
+else
+  start_daemon both
+
+  if jq -e ".schema_version == 3 and (.headsets | length) == 2 and .headsets[0].id == \"$WH_ID\" and .headsets[0].kind == \"headphones\" and .headsets[1].id == \"$WF_ID\" and .headsets[1].kind == \"earbuds\" and .primary == \"$WF_ID\"" "$STATUS_FILE" >/dev/null 2>&1; then
+    pass_test "T1.M1" "Two sessions: headphones listed first, the earbuds playing here are primary"
+  else
+    fail_test "T1.M1" "Two-headset status.json is wrong" "$(cat "$STATUS_FILE")"
+  fi
+
+  wh_level_before=$(jq -r "($(entry "$WH_ID")).ambient_sound_level" "$STATUS_FILE")
+  set +e
+  out_wf=$(run_cli --headset wf-1000xm5 volume 5 2>&1); c_wf=$?
+  out_wh=$(run_cli -H "$WH_ID" volume 11 2>&1); c_wh=$?
+  out_pr=$(run_cli ambient-level 7 2>&1); c_pr=$?
+  set -e
+  if [[ $c_wf -eq 0 && $c_wh -eq 0 && $c_pr -eq 0 ]] &&
+     jq -e "($(entry "$WF_ID")).volume == 5 and ($(entry "$WH_ID")).volume == 11 and ($(entry "$WF_ID")).ambient_sound_level == 7 and ($(entry "$WH_ID")).ambient_sound_level == $wh_level_before" "$STATUS_FILE" >/dev/null 2>&1; then
+    pass_test "T1.M2" "--headset routes by model and address; no selector goes to the primary headset"
+  else
+    fail_test "T1.M2" "Routing failed ($c_wf/$c_wh/$c_pr: $out_wf $out_wh $out_pr)" "$(cat "$STATUS_FILE")"
+  fi
+
+  set +e
+  run_cli --headset "$WF_ID" touch-function left ambient_sound_control >/dev/null 2>&1; c_tf=$?
+  run_cli --headset "$WF_ID" sidetone off >/dev/null 2>&1; c_st=$?
+  err_tf=$(run_cli --headset wh-1000xm5 touch-function left none 2>&1 >/dev/null); c_tf_wh=$?
+  err_val=$(run_cli --headset wf-1000xm5 touch-function right volume_control 2>&1 >/dev/null); c_val=$?
+  set -e
+  if [[ $c_tf -eq 0 && $c_st -eq 0 && $c_tf_wh -eq 1 && $c_val -eq 1 &&
+        "$err_tf" == "Error from daemon: ERR unsupported touch_function" &&
+        "$err_val" == "Error from daemon: ERR unsupported touch_function right volume_control" ]] &&
+     jq -e "($(entry "$WF_ID")).touch_function_left == \"ambient_sound_control\" and ($(entry "$WF_ID")).sidetone == false" "$STATUS_FILE" >/dev/null 2>&1; then
+    pass_test "T1.M3" "Earbud verbs touch-function and sidetone act on the WF-1000XM5 only"
+  else
+    fail_test "T1.M3" "Earbud verbs failed ($c_tf/$c_st/$c_tf_wh/$c_val: $err_tf | $err_val)" "$(cat "$STATUS_FILE")"
+  fi
+
+  set +e
+  err_no=$(run_cli --headset AA:BB:CC:DD:EE:FF volume 10 2>&1 >/dev/null); c_no=$?
+  err_st=$(run_cli --headset x status 2>&1 >/dev/null); c_st=$?
+  err_empty=$(run_cli --headset "" volume 10 2>&1 >/dev/null); c_empty=$?
+  set -e
+  raw_amb=$(raw_cmd "@WF-1000XM5 volume 3")
+  raw_st=$(raw_cmd "@x status")
+  if [[ $c_no -eq 1 && "$err_no" == "Error from daemon: ERR no headset AA:BB:CC:DD:EE:FF" &&
+        $c_st -eq 1 && "$err_st" == "Error: 'status' does not take --headset" &&
+        $c_empty -eq 1 && "$raw_amb" == "OK" && "$raw_st" == "ERR usage: status" ]]; then
+    pass_test "T1.M4" "Selector errors: unknown headset, status with a selector, empty selector"
+  else
+    fail_test "T1.M4" "Selector errors wrong" "$c_no '$err_no' | $c_st '$err_st' | $c_empty '$err_empty' | '$raw_amb' | '$raw_st'"
+  fi
+
+  r1=$(raw_cmd "@wf-1000xm5 _disconnect")
+  sleep 0.2
+  after_detach=$(jq -c '[(.headsets | map(.id)), .primary]' "$STATUS_FILE")
+  set +e
+  err_gone=$(run_cli --headset wf-1000xm5 volume 4 2>&1 >/dev/null)
+  set -e
+  r2=$(raw_cmd "@$WF_ID _reconnect")
+  wait_connected
+  after_attach=$(jq -c '[(.headsets | map(.id)), .primary]' "$STATUS_FILE")
+  if [[ "$r1" == "OK" && "$after_detach" == "[[\"$WH_ID\"],\"$WH_ID\"]" &&
+        "$err_gone" == "Error from daemon: ERR no headset wf-1000xm5" && "$r2" == "OK" &&
+        "$after_attach" == "[[\"$WH_ID\",\"$WF_ID\"],\"$WF_ID\"]" ]]; then
+    pass_test "T1.M5" "One headset leaves and comes back; the other session and primary follow"
+  else
+    fail_test "T1.M5" "Detach/attach failed" "$r1 $after_detach '$err_gone' $r2 $after_attach"
+  fi
+
+  stop_daemon
 fi
 
 # Restart daemon for subsequent tests
@@ -538,19 +633,19 @@ section_header "Tier 3: Cross-Feature Combinations & State Transitions"
 
 # T3.S1: Full Listening Mode Cycle (ANC -> Ambient 14 -> wind rejected -> Off -> ANC keeps level 14)
 run_cli noise anc >/dev/null 2>&1
-s1=$(jq -r '.noise_mode' "$STATUS_FILE")
+s1=$(jq -r "$H.noise_mode" "$STATUS_FILE")
 run_cli noise ambient >/dev/null 2>&1
 run_cli ambient-level 14 >/dev/null 2>&1
-s2=$(jq -r '.noise_mode + ":" + (.ambient_sound_level|tostring)' "$STATUS_FILE")
+s2=$(jq -r "$H.noise_mode + \":\" + ($H.ambient_sound_level|tostring)" "$STATUS_FILE")
 set +e
 run_cli noise wind >/dev/null 2>&1
 c_wind=$?
 set -e
-s3=$(jq -r '.noise_mode + ":" + (.ambient_sound_level|tostring)' "$STATUS_FILE")
+s3=$(jq -r "$H.noise_mode + \":\" + ($H.ambient_sound_level|tostring)" "$STATUS_FILE")
 run_cli noise off >/dev/null 2>&1
-s4=$(jq -r '.noise_mode' "$STATUS_FILE")
+s4=$(jq -r "$H.noise_mode" "$STATUS_FILE")
 run_cli noise anc >/dev/null 2>&1
-s5=$(jq -r '.noise_mode + ":" + (.ambient_sound_level|tostring)' "$STATUS_FILE")
+s5=$(jq -r "$H.noise_mode + \":\" + ($H.ambient_sound_level|tostring)" "$STATUS_FILE")
 
 if [[ "$s1" == "anc" && "$s2" == "ambient:14" && $c_wind -eq 1 && "$s3" == "ambient:14" && "$s4" == "off" && "$s5" == "anc:14" ]]; then
   pass_test "T3.S1" "Listening mode cycle (ANC -> Ambient 14 -> 'wind' rejected -> Off -> ANC keeps level 14)"
@@ -590,11 +685,11 @@ fi
 
 # T3.S4: EQ Preset to Custom Mode Transition
 run_cli eq bright >/dev/null 2>&1
-eq1=$(jq -r '.eq_preset' "$STATUS_FILE")
+eq1=$(jq -r "$H.eq_preset" "$STATUS_FILE")
 run_cli eq custom -2 0 3 1 -1 2 >/dev/null 2>&1
-eq2=$(jq -r '.eq_preset + ":" + (.clear_bass|tostring)' "$STATUS_FILE")
+eq2=$(jq -r "$H.eq_preset + \":\" + ($H.clear_bass|tostring)" "$STATUS_FILE")
 run_cli eq vocal >/dev/null 2>&1
-eq3=$(jq -r '.eq_preset' "$STATUS_FILE")
+eq3=$(jq -r "$H.eq_preset" "$STATUS_FILE")
 
 if [[ "$eq1" == "bright" && "$eq2" == "custom:2" && "$eq3" == "vocal" ]]; then
   pass_test "T3.S4" "EQ Preset <-> Custom Mode transitions with custom band retention"
@@ -608,7 +703,7 @@ for i in {1..10}; do
   run_cli ambient-level $((i * 2)) >/dev/null 2>&1
 done
 set -e
-final_level=$(jq -r '.ambient_sound_level' "$STATUS_FILE")
+final_level=$(jq -r "$H.ambient_sound_level" "$STATUS_FILE")
 if [[ "$final_level" -eq 20 ]]; then
   pass_test "T3.S5" "Sequential command stream executes and resolves to final value (level 20)"
 else
@@ -648,7 +743,7 @@ stress_reader() {
     local content
     content=$(cat "$STATUS_FILE" 2>/dev/null || true)
     if [[ -n "$content" ]]; then
-      if ! echo "$content" | jq -e '.schema_version == 2' >/dev/null 2>&1; then
+      if ! echo "$content" | jq -e '.schema_version == 3' >/dev/null 2>&1; then
         echo "Torn read detected in stress reader!" >> "$SANDBOX_DIR/stress_err.log"
       fi
     fi
@@ -663,7 +758,7 @@ READER_PID=$!
 
 # Execute 50 rapid atomic status writes
 for i in {1..50}; do
-  write_status_atomic "{\"schema_version\": 2, \"connected\": true, \"device_name\": \"WH-1000XM5\", \"battery_level\": $((i % 100)), \"last_updated\": $i}"
+  write_status_atomic "{\"schema_version\": 3, \"connected\": true, \"last_updated\": $i, \"primary\": \"AC:80:0A:12:34:56\", \"headsets\": [{\"id\": \"AC:80:0A:12:34:56\", \"battery_level\": $((i % 100))}]}"
   usleep 2000 2>/dev/null || sleep 0.005
 done
 

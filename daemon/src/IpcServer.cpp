@@ -319,7 +319,7 @@ void IpcServer::handleCommandLine(const std::string& line, IpcReply done) {
     }
     if (!callbacks_.execute) {
         if (parsed.command->verb == cmd::Verb::Status) {
-            done("{\"schema_version\":2,\"connected\":false,\"last_updated\":0}\n");
+            done("{\"schema_version\":3,\"connected\":false,\"last_updated\":0,\"primary\":null,\"headsets\":[]}\n");
         } else {
             done("ERR not connected\n");
         }

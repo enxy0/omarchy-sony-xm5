@@ -1265,16 +1265,47 @@ No source describes a confirmation alert for this slot.
 1. What does `23 09` report for an earbud that is in the closed case or out
    of range: level `00` (as in the mos9527 capture), or a charging status
    `02` (unknown)? The contract writes the reported values; the UI rule
-   for the bar battery depends on the answer.
+   for the bar battery depends on the answer. Partly answered by 9.11: an
+   earbud that is out of the ear (log line `"rUnitRemove"`, worn code `03`)
+   read level `00` with charging status `00`, not `02`. That earbud was
+   out of the ear and not in the case. The closed-case case is still open.
 2. Does `23 0A` (case) answer while both earbuds are out of the case and
    the lid is closed, and is the value then stale?
 3. What do `E1 05` and `E3 05 V1 V2` (9.5) return with LE audio on and off,
    and with sound quality versus stable connection selected in the Sony
-   app?
+   app? Partly answered by 9.11 (one setting only).
 4. Does `F8 03 02 LL RR` apply at once and answer with NTFY `F9 03`?
 5. Does `F8 03` accept preset `00` (plain AMBIENT_SOUND_CONTROL), or only
    the IDs the capability lists?
 6. Does the WF-1000XM5 send NTFY `25 09` / `25 0A` when a level changes, or
    only when the charging status changes?
 7. Does `F3 00` ever report `02` or `03` (one earbud out), or does it report
-   `00` while at least one earbud is worn?
+   `00` while at least one earbud is worn? Answered by 9.11: it reports
+   `03` with only the left earbud in the ear.
+
+### 9.11 Capture: WF-1000XM5 fw 6.1.0, schema 3 daemon (read-only)
+
+One init sequence of the schema 3 daemon against the same earbuds as 9.1,
+read requests only. The left earbud was in the ear, the right one was not.
+
+| Request | Reply | Meaning |
+|---|---|---|
+| T1 `22 09` | `23 09 61 00 00 00 64 64` | left 97 %, not charging; right 0 %, not charging; thresholds 100 |
+| T1 `22 0A` | `23 0A 57 00 1E` | case 87 %, not charging, threshold 30 |
+| T2 `F2 00` | `F3 00 03` | right earbud not worn: `worn` true, `worn_left` true, `worn_right` false |
+| T1 `E0 05` | `E1 05 03 00 01 02 00` | `NP = 03`: `PriorMode` `00`, `01`, `02` accepted; `NL = 00` |
+| T1 `E2 05` | `E3 05 00 00` | `V1 = 00`, `V2 = 00` (both ENABLE). The Sony app setting at the time is not known |
+| (unsolicited) | T1 `C9 01 0B "rUnitRemove" 00 00` | operation log line; the daemon matches it without case and reads `F2 00` again (9.4) |
+
+The corrected assignable layout (9.3) parsed the capability; the touch
+function of both earbuds read `20` (playback control). Every request got
+its ACK.
+
+The right earbud was out of the ear and not in the case, and it read level
+`00` with status `00`. The daemon therefore reads level `00` with status
+`00` as "level unknown" and writes `battery_right: null`
+(backend-contract.md 3.3); the charging status is written as reported.
+
+The daemon finds connected headsets by polling BlueZ: every 2 s it runs a
+blocking `GetManagedObjects` on the system bus (backend-contract.md 7,
+"Known limitation").
