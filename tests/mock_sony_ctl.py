@@ -42,7 +42,7 @@ USAGE = {
     "noise": "noise anc|ambient|off",
     "ambient-level": "ambient-level <n>",
     "focus-voice": "focus-voice on|off",
-    "eq": "eq <preset> | eq custom <b1> <b2> <b3> <b4> <b5> <clear_bass>",
+    "eq": "eq <preset> | eq custom [<b1> <b2> <b3> <b4> <b5> <clear_bass>]",
     "dsee": "dsee on|off",
     "speak-to-chat": "speak-to-chat on|off",
     "speak-to-chat-config": "speak-to-chat-config <sensitivity> <timeout>",
@@ -100,6 +100,9 @@ def build_request(verb, args):
 
     if verb == "eq":
         if args and args[0].lower() == "custom":
+            # Bare `eq custom` is the preset form (contract 3.3).
+            if len(args) == 1:
+                return "eq custom"
             if len(args) != 7:
                 raise UsageError(f"usage: {USAGE[verb]}")
             values = [parse_int(a, -10, 10, "eq custom") for a in args[1:]]

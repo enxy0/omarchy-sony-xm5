@@ -230,6 +230,17 @@ function v1Supported() {
   return out;
 }
 
+// An integer >= 1, given as a number or as a string of digits (v1 code read
+// it with Number()). Anything else is null and counts as "too new"
+// (contract 5).
+function schemaVersionOf(raw) {
+  var n = null;
+  if (typeof raw === "number") n = raw;
+  else if (typeof raw === "string" && /^[0-9]+$/.test(raw.trim())) n = Number(raw.trim());
+  if (n === null || !isFinite(n) || Math.floor(n) !== n || n < 1) return null;
+  return n;
+}
+
 function _errorStatus(message) {
   var res = defaultStatus();
   res.lastError = message;
@@ -256,12 +267,12 @@ function parseStatus(raw) {
     return _errorStatus("The sony status file carried no schema_version");
   }
 
-  var version = Number(parsed.schema_version);
-  if (typeof parsed.schema_version === "boolean" || isNaN(version) || version > SUPPORTED_SCHEMA) {
+  var version = schemaVersionOf(parsed.schema_version);
+  if (version === null || version > SUPPORTED_SCHEMA) {
     var tooNew = defaultStatus();
     tooNew.schemaTooNew = true;
-    tooNew.schemaVersion = isNaN(version) ? 0 : version;
-    tooNew.lastError = "sony daemon speaks status schema " + parsed.schema_version + ", this panel reads " + SUPPORTED_SCHEMA;
+    tooNew.schemaVersion = version === null ? 0 : version;
+    tooNew.lastError = "sony daemon speaks status schema " + JSON.stringify(parsed.schema_version) + ", this panel reads " + SUPPORTED_SCHEMA;
     return tooNew;
   }
 
@@ -449,7 +460,20 @@ function buildCommand(action, value, status) {
     var msg = spec.check();
     if (msg) return _fail(msg);
   }
+  if (status.schemaVersion < 2 && !isV1Command(spec.args)) return _fail("Needs a newer sony-headphones daemon");
   return { args: spec.args, pending: spec.pending, feature: spec.feature };
+}
+
+// Verbs and arguments the schema 1 CLI accepts (cli/src/main.cpp before
+// schema 2). Bare `eq custom`, user presets and every new verb are v2 only.
+var V1_VERBS = ["noise", "ambient-level", "eq", "dsee", "speak-to-chat", "multipoint", "ear-detect"];
+var V1_EQ_PRESETS = EQ_PRESETS.slice(0, 9);
+
+function isV1Command(args) {
+  if (!Array.isArray(args) || V1_VERBS.indexOf(args[0]) === -1) return false;
+  if (args[0] !== "eq") return true;
+  if (args[1] === EQ_CUSTOM) return args.length === 8;
+  return args.length === 2 && V1_EQ_PRESETS.indexOf(args[1]) !== -1;
 }
 
 function _boolSpec(feature, verb, field, value) {
@@ -518,6 +542,14 @@ function _commandSpec(action, value, status) {
   case "focusVoice":
     return _boolSpec("noise_control", "focus-voice", "focusOnVoice", value);
   case "eqPreset":
+    // With known custom values, the Custom chip sends the full form so the
+    // headset gets exactly what the panel shows (and a v1 daemon accepts it).
+    if (value === EQ_CUSTOM && eqPresetOptions(status).indexOf(EQ_CUSTOM) !== -1 &&
+        Array.isArray(status.eqCustomBands) && status.clearBass !== null && status.supported.eq_custom === true) {
+      var full = _eqCustomSpec(status.eqCustomBands, status.clearBass);
+      full.feature = "eq_preset";
+      return full;
+    }
     return _enumSpec("eq_preset", "eq", "eqPreset", value, eqPresetOptions(status));
   case "eqCustom":
     return _eqCustomSpec(value ? value.bands : null, value ? value.clearBass : null);
@@ -931,7 +963,8 @@ function heroMeta(status) {
 function emptyStateText(status) {
   if (!status || status.ok !== true) {
     if (status && status.schemaTooNew) {
-      return "The daemon speaks status schema " + status.schemaVersion + ", this panel reads " + SUPPORTED_SCHEMA + ". Update the widget.";
+      var which = status.schemaVersion > 0 ? "status schema " + status.schemaVersion : "an unknown status schema";
+      return "The daemon speaks " + which + ", this panel reads " + SUPPORTED_SCHEMA + ". Update the widget.";
     }
     return "The sony-headphones daemon wrote no usable status.";
   }
@@ -1050,75 +1083,157 @@ function cursorMove(cursor, dx, dy, sections) {
   return current;
 }
 
+// ---------------------------------------------------------------------------
+// Panel targets: one table for gating, chips, toggles, adjusters and cursor
+// order (ui-spec 3 and 6). Fields:
+//   kind      cursor kind (see cursorMove)
+//   section   collapsible section that holds the target ("" = always open);
+//             for a "collapse" target, the section it opens
+//   feature   supported key; field / extra: status fields it needs
+//   action    buildCommand action; toggle: flips `field`
+//   v2        the verb does not exist for a schema 1 daemon
+// ---------------------------------------------------------------------------
+
+var TARGETS = {
+  noise: { kind: "walk", section: "", feature: "noise_control", field: "noiseMode", action: "noise" },
+  ambient: { kind: "adjust", section: "", feature: "noise_control", field: "ambientSoundLevel", action: "ambientLevel" },
+  focusVoice: { kind: "single", section: "", feature: "noise_control", field: "focusOnVoice", action: "focusVoice", toggle: true, v2: true },
+  sound: { kind: "collapse", section: "sound" },
+  eqPreset: { kind: "grid", columns: 5, section: "sound", feature: "eq_preset", field: "eqPreset", action: "eqPreset" },
+  dsee: { kind: "single", section: "sound", feature: "dsee", field: "dseeExtreme", action: "dsee", toggle: true },
+  connectionQuality: { kind: "walk", section: "sound", feature: "connection_quality", field: "connectionQuality", action: "connectionQuality" },
+  customEq: { kind: "collapse", section: "customEq" },
+  eqBands: { kind: "rows", section: "customEq", feature: "eq_custom", field: "eqCustomBands", extra: "clearBass", action: "eqBand" },
+  speakToChatHeader: { kind: "collapse", section: "speakToChat" },
+  speakToChat: { kind: "single", section: "speakToChat", feature: "speak_to_chat", field: "speakToChat", action: "speakToChat", toggle: true },
+  stcSensitivity: { kind: "walk", section: "speakToChat", feature: "speak_to_chat", field: "stcSensitivity", extra: "stcTimeout", action: "stcSensitivity", v2: true },
+  stcTimeout: { kind: "walk", section: "speakToChat", feature: "speak_to_chat", field: "stcTimeout", extra: "stcSensitivity", action: "stcTimeout", v2: true },
+  headset: { kind: "collapse", section: "headset" },
+  volume: { kind: "adjust", section: "headset", feature: "volume", field: "volume", action: "volume" },
+  voiceGuidance: { kind: "single", section: "headset", feature: "voice_guidance", field: "voiceGuidance", action: "voiceGuidance", toggle: true },
+  voiceGuidanceVolume: { kind: "adjust", section: "headset", feature: "voice_guidance_volume", field: "voiceGuidanceVolume", action: "voiceGuidanceVolume" },
+  autoPowerOff: { kind: "grid", columns: 4, section: "headset", feature: "auto_power_off", field: "autoPowerOff", action: "autoPowerOff" },
+  ncAmbButton: { kind: "walk", section: "headset", feature: "nc_amb_button", field: "ncAmbButton", action: "ncAmbButton" },
+  buttonFunction: { kind: "grid", columns: 3, section: "headset", feature: "button_function", field: "buttonFunction", action: "buttonFunction" },
+  earDetection: { kind: "single", section: "headset", feature: "ear_detection", field: "earDetection", action: "earDetection", toggle: true },
+  multipointHeader: { kind: "collapse", section: "multipoint" },
+  multipoint: { kind: "single", section: "multipoint", feature: "multipoint", field: "multipoint", action: "multipoint", toggle: true },
+  devices: { kind: "rows", section: "multipoint", feature: "devices", field: "devices", action: "source" }
+};
+
+var TARGET_ORDER = [
+  "noise", "ambient", "focusVoice",
+  "sound", "eqPreset", "dsee", "connectionQuality",
+  "customEq", "eqBands",
+  "speakToChatHeader", "speakToChat", "stcSensitivity", "stcTimeout",
+  "headset", "volume", "voiceGuidance", "voiceGuidanceVolume", "autoPowerOff", "ncAmbButton", "buttonFunction", "earDetection",
+  "multipointHeader", "multipoint", "devices"
+];
+
+// "hidden", "disabled" or "enabled" for a panel target.
+function targetState(status, id) {
+  var t = TARGETS[id];
+  if (!t || !isLive(status)) return STATE_HIDDEN;
+  if (t.kind === "collapse") return sectionVisible(status, t.section) ? STATE_ENABLED : STATE_HIDDEN;
+  if (t.v2 && status.schemaVersion < 2) return STATE_HIDDEN;
+  var state = controlState(status, t.feature, status[t.field]);
+  if (state === STATE_ENABLED && t.extra && (status[t.extra] === null || status[t.extra] === undefined)) return STATE_DISABLED;
+  return state;
+}
+
+function targetVisible(status, id) {
+  return targetState(status, id) !== STATE_HIDDEN;
+}
+
+function targetEnabled(status, id) {
+  return targetState(status, id) === STATE_ENABLED;
+}
+
+// Raw option values of a chip target.
+function targetOptions(status, id) {
+  switch (id) {
+  case "noise": return NOISE_MODES.slice();
+  case "eqPreset": return eqPresetOptions(status);
+  case "connectionQuality": return CONNECTION_QUALITY_OPTIONS.slice();
+  case "stcSensitivity": return STC_SENSITIVITY_OPTIONS.slice();
+  case "stcTimeout": return STC_TIMEOUT_OPTIONS.slice();
+  case "autoPowerOff": return autoPowerOffOptions(status);
+  case "ncAmbButton": return NC_AMB_BUTTON_OPTIONS.slice();
+  case "buttonFunction": return buttonFunctionOptions(status);
+  default: return [];
+  }
+}
+
+// Chips for a target: [{ value, label, tooltip }].
+function targetChoices(status, id) {
+  var label = {
+    noise: noiseModeLabel, eqPreset: eqPresetButtonLabel, connectionQuality: connectionQualityLabel,
+    stcSensitivity: stcSensitivityLabel, stcTimeout: stcTimeoutLabel, autoPowerOff: autoPowerOffLabel,
+    ncAmbButton: ncAmbButtonLabel, buttonFunction: buttonFunctionLabel
+  }[id];
+  var tip = { autoPowerOff: autoPowerOffTooltip, ncAmbButton: ncAmbButtonTooltip }[id];
+  var values = targetOptions(status, id);
+  var out = [];
+  for (var i = 0; i < values.length; i++) {
+    out.push({ value: values[i], label: label(values[i]), tooltip: tip ? tip(values[i]) : "" });
+  }
+  return out;
+}
+
+function _targetCount(status, id) {
+  var t = TARGETS[id];
+  if (t.kind === "walk" || t.kind === "grid") return targetOptions(status, id).length;
+  if (id === "eqBands") return 6;
+  if (id === "devices") return Array.isArray(status.devices) ? status.devices.length : 0;
+  return 1;
+}
+
 // Cursor targets in layout order (ui-spec 6). `expanded` maps a collapsible
-// section id to a bool.
+// section name to a bool.
 function cursorSections(status, expanded) {
   var list = [];
   if (!isLive(status)) return list;
   var ex = expanded || {};
-  function vis(key, value) { return isVisible(status, key, value); }
-  function idx(options, value) { return options.indexOf(value); }
-
-  if (vis("noise_control", status.noiseMode)) {
-    list.push({ id: "noise", kind: "walk", count: NOISE_MODES.length, preferred: idx(NOISE_MODES, status.noiseMode) });
-    list.push({ id: "ambient", kind: "adjust", count: 1 });
-    list.push({ id: "focusVoice", kind: "single", count: 1 });
-  }
-  if (sectionVisible(status, "sound")) {
-    list.push({ id: "sound", kind: "collapse", count: 1 });
-    if (ex.sound) {
-      if (vis("eq_preset", status.eqPreset)) {
-        var presets = eqPresetOptions(status);
-        list.push({ id: "eqPreset", kind: "grid", count: presets.length, columns: 5, preferred: idx(presets, status.eqPreset) });
-      }
-      if (vis("dsee", status.dseeExtreme)) list.push({ id: "dsee", kind: "single", count: 1 });
-      if (vis("connection_quality", status.connectionQuality)) {
-        list.push({ id: "connectionQuality", kind: "walk", count: 2, preferred: idx(CONNECTION_QUALITY_OPTIONS, status.connectionQuality) });
-      }
-    }
-  }
-  if (sectionVisible(status, "customEq")) {
-    list.push({ id: "customEq", kind: "collapse", count: 1 });
-    if (ex.customEq) list.push({ id: "eqBands", kind: "rows", count: 6 });
-  }
-  if (sectionVisible(status, "speakToChat")) {
-    list.push({ id: "speakToChatHeader", kind: "collapse", count: 1 });
-    if (ex.speakToChat) {
-      list.push({ id: "speakToChat", kind: "single", count: 1 });
-      list.push({ id: "stcSensitivity", kind: "walk", count: 3, preferred: idx(STC_SENSITIVITY_OPTIONS, status.stcSensitivity) });
-      list.push({ id: "stcTimeout", kind: "walk", count: 4, preferred: idx(STC_TIMEOUT_OPTIONS, status.stcTimeout) });
-    }
-  }
-  if (sectionVisible(status, "headset")) {
-    list.push({ id: "headset", kind: "collapse", count: 1 });
-    if (ex.headset) {
-      if (vis("volume", status.volume)) list.push({ id: "volume", kind: "adjust", count: 1 });
-      if (vis("voice_guidance", status.voiceGuidance)) list.push({ id: "voiceGuidance", kind: "single", count: 1 });
-      if (vis("voice_guidance_volume", status.voiceGuidanceVolume)) list.push({ id: "voiceGuidanceVolume", kind: "adjust", count: 1 });
-      if (vis("auto_power_off", status.autoPowerOff)) {
-        var apo = autoPowerOffOptions(status);
-        list.push({ id: "autoPowerOff", kind: "grid", count: apo.length, columns: 4, preferred: idx(apo, status.autoPowerOff) });
-      }
-      if (vis("nc_amb_button", status.ncAmbButton)) {
-        list.push({ id: "ncAmbButton", kind: "walk", count: 4, preferred: idx(NC_AMB_BUTTON_OPTIONS, status.ncAmbButton) });
-      }
-      if (vis("button_function", status.buttonFunction)) {
-        var bf = buttonFunctionOptions(status);
-        list.push({ id: "buttonFunction", kind: "grid", count: bf.length, columns: 3, preferred: idx(bf, status.buttonFunction) });
-      }
-      if (vis("ear_detection", status.earDetection)) list.push({ id: "earDetection", kind: "single", count: 1 });
-    }
-  }
-  if (sectionVisible(status, "multipoint")) {
-    list.push({ id: "multipointHeader", kind: "collapse", count: 1 });
-    if (ex.multipoint) {
-      if (vis("multipoint", status.multipoint)) list.push({ id: "multipoint", kind: "single", count: 1 });
-      if (vis("devices", status.devices) && Array.isArray(status.devices) && status.devices.length > 0) {
-        list.push({ id: "devices", kind: "rows", count: status.devices.length });
-      }
-    }
+  for (var i = 0; i < TARGET_ORDER.length; i++) {
+    var id = TARGET_ORDER[i];
+    var t = TARGETS[id];
+    if (t.kind !== "collapse" && t.section !== "" && ex[t.section] !== true) continue;
+    if (!targetVisible(status, id)) continue;
+    var count = _targetCount(status, id);
+    if (count < 1) continue;
+    var entry = { id: id, kind: t.kind, count: count };
+    if (t.columns) entry.columns = t.columns;
+    if (t.kind === "walk" || t.kind === "grid") entry.preferred = targetOptions(status, id).indexOf(status[t.field]);
+    list.push(entry);
   }
   return list;
+}
+
+// What Enter/Space or a click does on a target:
+// { expand: section } for a header, { action, value } for a command, or null.
+function targetActivation(status, id, index) {
+  var t = TARGETS[id];
+  if (!t) return null;
+  if (t.kind === "collapse") return targetVisible(status, id) ? { expand: t.section } : null;
+  if (!targetEnabled(status, id)) return null;
+  if (t.toggle) return { action: t.action, value: status[t.field] !== true };
+  if (t.kind === "walk" || t.kind === "grid") {
+    var options = targetOptions(status, id);
+    return index >= 0 && index < options.length ? { action: t.action, value: options[index] } : null;
+  }
+  if (id === "devices") {
+    var d = Array.isArray(status.devices) ? status.devices[index] : null;
+    return canSwitchTo(status, d) ? { action: "source", value: d.address } : null;
+  }
+  return null;
+}
+
+// What h/l does on an adjustable target: { action, value } or null.
+function targetAdjustment(status, id, index, delta) {
+  var t = TARGETS[id];
+  if (!t || !targetEnabled(status, id)) return null;
+  var value = adjustedValue(status, id, index, delta);
+  return value === null ? null : { action: t.action, value: value };
 }
 
 // Value after a keyboard step on an adjustable target, or null.

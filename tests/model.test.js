@@ -498,6 +498,78 @@ suite("Suite 19: Display Formatters & Helpers", () => {
   check("Error state hero meta", Model.heroMeta(Model.parseStatus("")), "No status");
 });
 
+suite("Suite 20: Schema Version Values", () => {
+  for (const bad of ["", "  ", [], {}, "abc", "1.5", "-1", 0, -1, 1.5, true, false]) {
+    const r = Model.parseStatus(JSON.stringify({ schema_version: bad, connected: true }));
+    check(`schema_version ${JSON.stringify(bad)} is too new`, [r.ok, r.schemaTooNew, r.schemaVersion], [false, true, 0]);
+  }
+  check("schema_version 3 keeps its number", parse({ schema_version: 3 }).schemaVersion, 3);
+  check("numeric string \"2\" accepted", parse({ schema_version: "2", connected: false }).schemaVersion, 2);
+  check("numeric string \" 1 \" accepted", parse({ schema_version: " 1 ", connected: false }).schemaVersion, 1);
+  check("schemaVersionOf", [1, 2, "7", "x", 2.5, 0].map(Model.schemaVersionOf), [1, 2, 7, null, null, null]);
+  check("Empty-string message", parse({ schema_version: "", connected: true }).lastError, "sony daemon speaks status schema \"\", this panel reads 2");
+  check("Unknown schema empty state text", Model.emptyStateText(parse({ schema_version: [] })).includes("an unknown status schema"), true);
+});
+
+suite("Suite 21: Custom EQ Chip", () => {
+  const s = full();
+  check("Custom chip with known values sends the full form", Model.buildCommand("eqPreset", "custom", s), {
+    args: ["eq", "custom", "2", "1", "-1", "3", "0", "4"],
+    pending: { eqPreset: "custom", eqCustomBands: [2, 1, -1, 3, 0], clearBass: 4 }, feature: "eq_preset"
+  });
+  check("Custom chip without bands sends the bare form", Model.buildCommand("eqPreset", "custom", Object.assign({}, s, { eqCustomBands: null })).args, ["eq", "custom"]);
+  check("Custom chip without Clear Bass sends the bare form", Model.buildCommand("eqPreset", "custom", Object.assign({}, s, { clearBass: null })).args, ["eq", "custom"]);
+  const noCustom = Object.assign({}, s, { supported: Object.assign({}, s.supported, { eq_custom: false }) });
+  check("Custom chip without eq_custom sends the bare form", Model.buildCommand("eqPreset", "custom", noCustom).args, ["eq", "custom"]);
+  check("Custom chip refused when not in eq_presets", Model.buildCommand("eqPreset", "custom", Object.assign({}, s, { eqPresets: ["off", "bass"] })).error, "Not supported by this headset");
+});
+
+suite("Suite 22: Schema 1 Daemon Verbs", () => {
+  const v1 = Model.parseStatus(fixture("status_connected_custom_eq.json"));
+  const err = "Needs a newer sony-headphones daemon";
+  check("v1 noise", Model.buildCommand("noise", "off", v1).args, ["noise", "off"]);
+  check("v1 ambient-level", Model.buildCommand("ambientLevel", 5, v1).args, ["ambient-level", "5"]);
+  check("v1 eq preset", Model.buildCommand("eqPreset", "bright", v1).args, ["eq", "bright"]);
+  check("v1 eq band uses the full form", Model.buildCommand("eqBand", { index: 0, level: 1 }, v1).args.length, 8);
+  check("v1 custom chip with values uses the full form", Model.buildCommand("eqPreset", "custom", v1).args.length, 8);
+  check("v1 bare eq custom refused", Model.buildCommand("eqPreset", "custom", Object.assign({}, v1, { eqCustomBands: null })).error, err);
+  check("v1 dsee / speak-to-chat / multipoint / ear-detect",
+    ["dsee", "speakToChat", "multipoint", "earDetection"].map((a) => Model.buildCommand(a, true, v1).args[0]),
+    ["dsee", "speak-to-chat", "multipoint", "ear-detect"]);
+  check("v1 focus-voice refused", Model.buildCommand("focusVoice", true, Object.assign({}, v1, { focusOnVoice: false })).error, err);
+  check("v1 speak-to-chat-config refused", Model.buildCommand("stcTimeout", "off", Object.assign({}, v1, { stcSensitivity: "auto", stcTimeout: "short" })).error, err);
+  check("v1 user preset refused", Model.buildCommand("eqPreset", "user1", Object.assign({}, v1, { eqPresets: ["off", "user1"] })).error, err);
+  check("isV1Command", [["noise", "anc"], ["eq", "custom"], ["eq", "user2"], ["volume", "3"], ["source", "AA:BB:CC:DD:EE:FF"]].map(Model.isV1Command), [true, false, false, false, false]);
+  check("v1 hides v2-only targets", ["focusVoice", "stcSensitivity", "stcTimeout"].map((id) => Model.targetState(v1, id)), ["hidden", "hidden", "hidden"]);
+  check("v1 cursor sections", ids(Model.cursorSections(v1, { speakToChat: true })).filter((i) => ["focusVoice", "speakToChat", "stcSensitivity", "stcTimeout"].includes(i)), ["speakToChat"]);
+  check("v2 keeps them", ["focusVoice", "stcSensitivity", "stcTimeout"].map((id) => Model.targetState(full(), id)), ["enabled", "enabled", "enabled"]);
+});
+
+suite("Suite 23: Target Table", () => {
+  const s = full();
+  check("Every ordered target is in the table", Model.TARGET_ORDER.every((id) => !!Model.TARGETS[id]), true);
+  check("Every table target is ordered", Object.keys(Model.TARGETS).every((id) => Model.TARGET_ORDER.includes(id)), true);
+  check("Every action is known to buildCommand", Object.values(Model.TARGETS).filter((t) => t.action).every((t) => Model.buildCommand(t.action, undefined, s).error !== "Unknown action " + t.action), true);
+  check("Choices with labels", Model.targetChoices(s, "ncAmbButton")[1], { value: "nc_ambient", label: "NC·AMB", tooltip: "Noise Cancelling → Ambient Sound" });
+  check("Choices without tooltips", Model.targetChoices(s, "noise").map((c) => c.label + "|" + c.tooltip), ["ANC|", "Ambient|", "Off|"]);
+  check("Header activation", Model.targetActivation(s, "speakToChatHeader", 0), { expand: "speakToChat" });
+  check("Toggle activation flips", Model.targetActivation(s, "dsee", 0), { action: "dsee", value: false });
+  check("Chip activation", Model.targetActivation(s, "autoPowerOff", 2), { action: "autoPowerOff", value: "15min" });
+  check("Chip activation out of range", Model.targetActivation(s, "autoPowerOff", 99), null);
+  const mp = Model.parseStatus(fixture("status_v2_multipoint.json"));
+  check("Device activation switches source", Model.targetActivation(mp, "devices", 0), { action: "source", value: "F0:1D:BC:AA:00:01" });
+  check("Active device activation does nothing", Model.targetActivation(mp, "devices", 1), null);
+  check("Disabled target activation does nothing", Model.targetActivation(Object.assign({}, s, { dseeExtreme: null }), "dsee", 0), null);
+  check("Unknown target", [Model.targetActivation(s, "bogus", 0), Model.targetState(s, "bogus")], [null, "hidden"]);
+  check("Adjustment", Model.targetAdjustment(s, "volume", 0, 1), { action: "volume", value: 13 });
+  check("Band adjustment", Model.targetAdjustment(s, "eqBands", 5, -1), { action: "eqBand", value: { index: 5, level: 3 } });
+  check("Adjustment on a disabled target", Model.targetAdjustment(Object.assign({}, s, { clearBass: null }), "eqBands", 0, 1), null);
+  check("Missing extra value disables", Model.targetState(Object.assign({}, s, { stcTimeout: null }), "stcSensitivity"), "disabled");
+  const init = Model.parseStatus(fixture("status_v2_initializing.json"));
+  check("Initializing: targets disabled, headers enabled", [Model.targetState(init, "dsee"), Model.targetState(init, "sound")], ["disabled", "enabled"]);
+  check("Minimal: headers hidden", Model.targetState(Model.parseStatus(fixture("status_v2_minimal.json")), "headset"), "hidden");
+});
+
 console.log(`\nSummary: ${passed} passed, ${failed} failed`);
 if (failed > 0) {
   if (typeof Deno !== "undefined") Deno.exit(1);

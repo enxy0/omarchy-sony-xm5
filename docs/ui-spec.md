@@ -117,7 +117,8 @@ A disabled control is drawn at 45 % opacity and ignores clicks and keys.
 | `connected: false` | `DISCONNECTED` | "Turn the headset on or connect it in Bluetooth settings." No controls |
 | `connected: true`, `supported: null` | `READING SETTINGS` | status line "Reading headset settings…"; every section shown, every control disabled |
 | `supported_source: "fallback"` | as connected | footer hint "Limited: headset did not report its features" |
-| `schema_version: 1` | as connected | v1 support table from contract 2.5; `battery_level: -1` is unknown; footer "Old daemon (status schema 1)" |
+| `schema_version: 1` | as connected | v1 support table from contract 2.5; `battery_level: -1` is unknown; footer "Old daemon (status schema 1)". Verbs the v1 CLI does not have are refused and their controls hidden: Focus on Voice, Speak-to-Chat sensitivity and timeout, bare `eq custom`, `user1`..`user5` |
+| `schema_version` not an integer >= 1 (a string of digits counts) | `UPDATE NEEDED` | as "too new" (contract 5) |
 | command pending (queue not empty for more than 300 ms) | as connected | status line "Applying…" (dim) |
 | command error (`sony-ctl` exit code not 0) | as connected | status line in urgent color with the error text for 6 s; the optimistic value of that command reverts |
 
@@ -173,3 +174,12 @@ target but ignore activation. The panel scrolls to keep the cursor visible.
    chip selected; right click goes to ANC.
 6. Fields whose `supported` key is `false` are read as `null` even if the
    file carries a value.
+7. The Custom EQ chip sends the full `eq custom b1..b5 cb` form with the
+   known values; only when they are unknown it sends the bare preset form.
+8. The mouse wheel over a slider adjusts the slider, as in the first-party
+   Audio panel (`PanelSlider` has no switch for this). A release with an
+   unchanged value sends nothing.
+
+All per-control data (feature key, fields, action, cursor kind, section,
+v2-only flag) is one table, `Model.TARGETS`, in layout order
+`Model.TARGET_ORDER`.
