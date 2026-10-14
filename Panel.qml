@@ -1,8 +1,11 @@
-// plugin/Panel.qml
-// Omarchy Bar-Widget & Interactive Dropdown Control Panel for Sony WH-1000XM5.
+// Panel.qml
+// Bar button and popup panel for the Sony WH-1000XM5 (docs/ui-spec.md).
+// Logic lives in Model.js; state and commands in Service.qml. Helper
+// components are inline so the plugin stays a fixed set of files.
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -15,101 +18,578 @@ Panel {
   ipcTarget: "io.github.androydified.omasony"
   manageIpc: false
 
+  // ---- inline components ---------------------------------------------------
+
+  // Section title with a summary and a chevron; opens and closes a section.
+  component CollapsibleHeader: CursorSurface {
+    id: header
+
+    property string text: ""
+    property string summary: ""
+    property bool expanded: false
+    property string fontFamily: Style.font.family
+
+    signal toggled()
+    signal hovered(bool isHovered)
+
+    implicitHeight: Math.max(headerTitle.implicitHeight, chevron.implicitHeight) + Style.space(8)
+
+    PanelSectionHeader {
+      id: headerTitle
+      anchors.left: parent.left
+      anchors.leftMargin: Style.space(6)
+      anchors.verticalCenter: parent.verticalCenter
+      text: header.text
+      foreground: header.foreground
+      fontFamily: header.fontFamily
+    }
+
+    Text {
+      anchors.right: chevron.left
+      anchors.rightMargin: Style.space(8)
+      anchors.left: headerTitle.right
+      anchors.leftMargin: Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+      horizontalAlignment: Text.AlignRight
+      elide: Text.ElideRight
+      textFormat: Text.PlainText
+      text: header.summary
+      color: Qt.darker(header.foreground, 1.4)
+      font.family: header.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+
+    Text {
+      id: chevron
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(6)
+      anchors.verticalCenter: parent.verticalCenter
+      textFormat: Text.PlainText
+      text: header.expanded ? "\u{F0140}" : "\u{F0142}"
+      color: Qt.darker(header.foreground, 1.2)
+      font.family: header.fontFamily
+      font.pixelSize: Style.font.body
+    }
+
+    MouseArea {
+      anchors.fill: parent
+      cursorShape: Qt.PointingHandCursor
+      onClicked: header.toggled()
+    }
+
+    HoverHandler {
+      onHoveredChanged: header.hovered(hovered)
+    }
+  }
+
+  // Pick-one chips in equal-width cells. options: [{ value, label, tooltip }]
+  component ChoiceGrid: Grid {
+    id: grid
+
+    property var options: []
+    property var value: null
+    property int cursorIndex: -1
+    property color foreground: Color.foreground
+    property string fontFamily: Style.font.family
+    property real fontSize: Style.font.caption
+
+    signal picked(var value)
+    signal hoveredIndex(int index, bool isHovered)
+
+    spacing: Style.space(6)
+    readonly property real cellWidth: columns > 0 ? (width - spacing * (columns - 1)) / columns : width
+
+    Repeater {
+      model: grid.options
+
+      Button {
+        required property var modelData
+        required property int index
+
+        width: grid.cellWidth
+        text: String(modelData.label)
+        tooltipText: modelData.tooltip ? String(modelData.tooltip) : ""
+        fontSize: grid.fontSize
+        foreground: grid.foreground
+        fontFamily: grid.fontFamily
+        bordered: true
+        selected: modelData.value === grid.value
+        hasCursor: grid.cursorIndex === index
+        horizontalPadding: Style.space(4)
+        verticalPadding: Style.space(6)
+        onClicked: grid.picked(modelData.value)
+        onHovered: function(h) { grid.hoveredIndex(index, h) }
+      }
+    }
+  }
+
+  // Cursor row: title and value on one line, a slider under it.
+  // Commits on release (drag) and per wheel notch.
+  component SliderRow: CursorSurface {
+    id: sliderRow
+
+    property QtObject bar: null
+    property string title: ""
+    property string valueText: ""
+    property var format: function(v) { return String(Math.round(v)) }
+    property real value: 0
+    property real minimum: 0
+    property real maximum: 1
+    property bool dimmed: false
+    property string fontFamily: Style.font.family
+
+    signal committed(real value)
+    signal hovered(bool isHovered)
+
+    implicitHeight: sliderContent.implicitHeight + Style.space(10)
+
+    Column {
+      id: sliderContent
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(6)
+      anchors.rightMargin: Style.space(6)
+      spacing: Style.space(4)
+
+      Item {
+        width: parent.width
+        implicitHeight: Math.max(sliderTitle.implicitHeight, sliderValue.implicitHeight)
+
+        PanelSectionHeader {
+          id: sliderTitle
+          anchors.left: parent.left
+          anchors.verticalCenter: parent.verticalCenter
+          text: sliderRow.title
+          foreground: sliderRow.foreground
+          fontFamily: sliderRow.fontFamily
+        }
+
+        Text {
+          id: sliderValue
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          textFormat: Text.PlainText
+          text: rowSlider.dragging ? sliderRow.format(rowSlider.liveValue) : sliderRow.valueText
+          color: sliderRow.foreground
+          font.family: sliderRow.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: true
+        }
+      }
+
+      PanelSlider {
+        id: rowSlider
+        width: parent.width
+        bar: sliderRow.bar
+        value: sliderRow.value
+        minimum: sliderRow.minimum
+        maximum: sliderRow.maximum
+        step: 1
+        integer: true
+        opacity: sliderRow.dimmed ? 0.6 : 1
+        onReleased: function(v) { sliderRow.committed(v) }
+      }
+    }
+
+    HoverHandler {
+      onHoveredChanged: sliderRow.hovered(hovered)
+    }
+  }
+
+  // Compact cursor row for an EQ band: label, slider, signed value.
+  component BandRow: CursorSurface {
+    id: bandRow
+
+    property QtObject bar: null
+    property string label: ""
+    property real value: 0
+    property string fontFamily: Style.font.family
+
+    signal committed(real value)
+    signal hovered(bool isHovered)
+
+    implicitHeight: Math.max(bandSlider.implicitHeight, bandLabel.implicitHeight) + Style.space(4)
+
+    Text {
+      id: bandLabel
+      anchors.left: parent.left
+      anchors.leftMargin: Style.space(6)
+      anchors.verticalCenter: parent.verticalCenter
+      width: Style.space(64)
+      textFormat: Text.PlainText
+      text: bandRow.label
+      color: Qt.darker(bandRow.foreground, 1.2)
+      font.family: bandRow.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+
+    PanelSlider {
+      id: bandSlider
+      anchors.left: bandLabel.right
+      anchors.right: bandValue.left
+      anchors.rightMargin: Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+      bar: bandRow.bar
+      value: bandRow.value
+      minimum: Model.EQ_LEVEL_MIN
+      maximum: Model.EQ_LEVEL_MAX
+      step: 1
+      integer: true
+      tickCount: 3
+      onReleased: function(v) { bandRow.committed(v) }
+    }
+
+    Text {
+      id: bandValue
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(6)
+      anchors.verticalCenter: parent.verticalCenter
+      width: Style.space(28)
+      horizontalAlignment: Text.AlignRight
+      textFormat: Text.PlainText
+      text: Model.formatSigned(bandSlider.dragging ? bandSlider.liveValue : bandRow.value)
+      color: bandRow.foreground
+      font.family: bandRow.fontFamily
+      font.pixelSize: Style.font.caption
+      font.bold: true
+    }
+
+    HoverHandler {
+      onHoveredChanged: bandRow.hovered(hovered)
+    }
+  }
+
+  // One paired source device. Activating a connected, idle device makes it
+  // the audio source.
+  component DeviceRow: CursorSurface {
+    id: deviceRow
+
+    property var device: null
+    property bool canSwitch: false
+    property string fontFamily: Style.font.family
+
+    signal clicked()
+    signal hovered(bool isHovered)
+
+    current: !!device && device.active
+    implicitHeight: deviceText.implicitHeight + Style.space(10)
+
+    Column {
+      id: deviceText
+      anchors.left: parent.left
+      anchors.right: deviceState.left
+      anchors.leftMargin: Style.space(8)
+      anchors.rightMargin: Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(1)
+
+      Text {
+        width: parent.width
+        elide: Text.ElideRight
+        textFormat: Text.PlainText
+        text: Model.deviceLabel(deviceRow.device)
+        color: deviceRow.foreground
+        font.family: deviceRow.fontFamily
+        font.pixelSize: Style.font.body
+        font.bold: !!deviceRow.device && deviceRow.device.active
+      }
+
+      Text {
+        width: parent.width
+        visible: !!deviceRow.device && deviceRow.device.name !== ""
+        elide: Text.ElideRight
+        textFormat: Text.PlainText
+        text: deviceRow.device ? deviceRow.device.address : ""
+        color: Qt.darker(deviceRow.foreground, 1.5)
+        font.family: deviceRow.fontFamily
+        font.pixelSize: Style.font.caption
+      }
+    }
+
+    Text {
+      id: deviceState
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+      textFormat: Text.PlainText
+      text: Model.deviceStateLabel(deviceRow.device)
+      color: !!deviceRow.device && deviceRow.device.connected ? deviceRow.foreground : Qt.darker(deviceRow.foreground, 1.6)
+      font.family: deviceRow.fontFamily
+      font.pixelSize: Style.font.caption
+      font.bold: !!deviceRow.device && deviceRow.device.active
+    }
+
+    MouseArea {
+      anchors.fill: parent
+      enabled: deviceRow.canSwitch
+      cursorShape: deviceRow.canSwitch ? Qt.PointingHandCursor : Qt.ArrowCursor
+      onClicked: deviceRow.clicked()
+    }
+
+    HoverHandler {
+      onHoveredChanged: deviceRow.hovered(hovered)
+    }
+  }
+
+  // Dim one-line hint under a control.
+  component Caption: Text {
+    property color foreground: Color.foreground
+    property string fontFamily: Style.font.family
+
+    width: parent ? parent.width : implicitWidth
+    visible: text !== ""
+    textFormat: Text.PlainText
+    wrapMode: Text.WordWrap
+    color: Qt.darker(foreground, 1.5)
+    font.family: fontFamily
+    font.pixelSize: Style.font.caption
+  }
+
+  // ---- theme ---------------------------------------------------------------
+
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
-  readonly property color barForeground: bar ? bar.barForeground : Color.foreground
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
+  readonly property real disabledOpacity: 0.45
 
-  // Keyboard navigation state
-  property string focusSection: "noise"
-  property int noiseIndex: 0
-  property int eqIndex: 0
-  property bool cursorActive: false
-
-  readonly property var noiseModes: [Model.NOISE_ANC, Model.NOISE_AMBIENT, Model.NOISE_OFF]
-
-  implicitWidth: button.implicitWidth
-  implicitHeight: button.implicitHeight
+  // ---- state ---------------------------------------------------------------
 
   Service {
     id: sony
     settings: root.settings
   }
 
-  onOpenedChanged: {
-    if (opened) {
-      cursorActive = true
-      focusSection = "noise"
-      var idx = noiseModes.indexOf(sony.noiseMode)
-      noiseIndex = idx !== -1 ? idx : 0
-      var eqIdx = Model.EQ_PRESETS.indexOf(sony.eqPreset)
-      eqIndex = eqIdx !== -1 ? eqIdx : 0
-      if (panelFlick) panelFlick.contentY = 0
-      sony.refresh()
-      Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  readonly property var st: sony.status
+  readonly property bool live: Model.isLive(st)
+  readonly property bool reading: Model.isReading(st)
+
+  function shown(key, value) { return Model.isVisible(root.st, key, value) }
+  function usable(key, value) { return Model.isEnabled(root.st, key, value) }
+
+  readonly property string statusLine: {
+    if (sony.commandError !== "") return sony.commandError
+    if (reading) return "Reading headset settings…"
+    if (sony.busyVisible) return "Applying…"
+    return ""
+  }
+
+  // Collapsible sections; kept for the shell session.
+  property var expanded: ({ sound: true, customEq: false, speakToChat: false, headset: false, multipoint: false })
+  readonly property var headerKeys: ({
+    sound: "sound", customEq: "customEq", speakToChatHeader: "speakToChat",
+    headset: "headset", multipointHeader: "multipoint"
+  })
+
+  function setExpanded(name, value) {
+    var next = {}
+    for (var k in expanded) next[k] = expanded[k]
+    next[name] = value
+    expanded = next
+  }
+
+  function toggleExpanded(name) {
+    setExpanded(name, !expanded[name])
+  }
+
+  // Chip options per cursor target: [{ value, label, tooltip }].
+  function optionsFor(id) {
+    var values = []
+    var label = null
+    var tip = function(v) { return "" }
+    switch (id) {
+    case "noise": values = Model.NOISE_MODES; label = Model.noiseModeLabel; break
+    case "eqPreset": values = Model.eqPresetOptions(st); label = Model.eqPresetButtonLabel; break
+    case "connectionQuality": values = Model.CONNECTION_QUALITY_OPTIONS; label = Model.connectionQualityLabel; break
+    case "stcSensitivity": values = Model.STC_SENSITIVITY_OPTIONS; label = Model.stcSensitivityLabel; break
+    case "stcTimeout": values = Model.STC_TIMEOUT_OPTIONS; label = Model.stcTimeoutLabel; break
+    case "autoPowerOff": values = Model.autoPowerOffOptions(st); label = Model.autoPowerOffLabel; tip = Model.autoPowerOffTooltip; break
+    case "ncAmbButton": values = Model.NC_AMB_BUTTON_OPTIONS; label = Model.ncAmbButtonLabel; tip = Model.ncAmbButtonTooltip; break
+    case "buttonFunction": values = Model.buttonFunctionOptions(st); label = Model.buttonFunctionLabel; break
+    default: return []
     }
+    var out = []
+    for (var i = 0; i < values.length; i++) out.push({ value: values[i], label: label(values[i]), tooltip: tip(values[i]) })
+    return out
+  }
+
+  // Whether the control behind a cursor target accepts input now.
+  function targetEnabled(id) {
+    var s = st
+    switch (id) {
+    case "noise": return usable("noise_control", s.noiseMode)
+    case "ambient": return usable("noise_control", s.ambientSoundLevel)
+    case "focusVoice": return usable("noise_control", s.focusOnVoice)
+    case "eqPreset": return usable("eq_preset", s.eqPreset)
+    case "dsee": return usable("dsee", s.dseeExtreme)
+    case "connectionQuality": return usable("connection_quality", s.connectionQuality)
+    case "eqBands": return usable("eq_custom", s.eqCustomBands) && s.clearBass !== null
+    case "speakToChat": return usable("speak_to_chat", s.speakToChat)
+    case "stcSensitivity": case "stcTimeout":
+      return usable("speak_to_chat", s.stcSensitivity) && s.stcTimeout !== null
+    case "volume": return usable("volume", s.volume)
+    case "voiceGuidance": return usable("voice_guidance", s.voiceGuidance)
+    case "voiceGuidanceVolume": return usable("voice_guidance_volume", s.voiceGuidanceVolume)
+    case "autoPowerOff": return usable("auto_power_off", s.autoPowerOff)
+    case "ncAmbButton": return usable("nc_amb_button", s.ncAmbButton)
+    case "buttonFunction": return usable("button_function", s.buttonFunction)
+    case "earDetection": return usable("ear_detection", s.earDetection)
+    case "multipoint": return usable("multipoint", s.multipoint)
+    case "devices": return usable("devices", s.devices)
+    default: return headerKeys[id] !== undefined
+    }
+  }
+
+  readonly property var toggleActions: ({
+    focusVoice: ["focusVoice", "focusOnVoice"],
+    dsee: ["dsee", "dseeExtreme"],
+    speakToChat: ["speakToChat", "speakToChat"],
+    voiceGuidance: ["voiceGuidance", "voiceGuidance"],
+    earDetection: ["earDetection", "earDetection"],
+    multipoint: ["multipoint", "multipoint"]
+  })
+  readonly property var adjustActions: ({
+    ambient: "ambientLevel", volume: "volume", voiceGuidanceVolume: "voiceGuidanceVolume", eqBands: "eqBand"
+  })
+
+  function flip(id) {
+    var a = toggleActions[id]
+    if (!a || !targetEnabled(id)) return
+    sony.send(a[0], st[a[1]] !== true)
+  }
+
+  // Sends `value` for cursor target `id`; `action` defaults to the id.
+  function choose(id, value, action) {
+    if (!targetEnabled(id)) return
+    sony.send(action || id, value)
+  }
+
+  function switchSource(device) {
+    if (Model.canSwitchTo(st, device)) sony.send("source", device.address)
+  }
+
+  // ---- cursor model (first-party recipe, logic in Model.js) ----------------
+
+  property bool cursorActive: false
+  property string focusSection: ""
+  property int selectedIndex: 0
+  readonly property var cursorSections: Model.cursorSections(st, expanded)
+
+  function hasCursor(id, index) {
+    return cursorActive && focusSection === id && selectedIndex === (index === undefined ? 0 : index)
+  }
+
+  function cursorIndexFor(id) {
+    return cursorActive && focusSection === id ? selectedIndex : -1
+  }
+
+  function setCursor(id, index) {
+    cursorActive = true
+    focusSection = id
+    selectedIndex = index === undefined ? 0 : index
+  }
+
+  onCursorSectionsChanged: {
+    if (!cursorActive) return
+    var c = Model.cursorClamp({ section: focusSection, index: selectedIndex }, cursorSections)
+    focusSection = c.section
+    selectedIndex = c.index
   }
 
   function moveCursor(dx, dy) {
-    cursorActive = true
-    var sections = ["noise", "ambient", "eq", "speakToChat", "dsee", "multipoint"]
-
-    if (dy !== 0) {
-      if (focusSection === "noise") {
-        if (dy > 0) {
-          focusSection = (sony.noiseMode === Model.NOISE_AMBIENT) ? "ambient" : "eq"
-        }
-      } else if (focusSection === "ambient") {
-        if (dy > 0) focusSection = "eq"
-        else if (dy < 0) focusSection = "noise"
-      } else if (focusSection === "eq") {
-        if (dy > 0) {
-          if (eqIndex < 5) eqIndex = Math.min(9, eqIndex + 5)
-          else focusSection = "speakToChat"
-        } else if (dy < 0) {
-          if (eqIndex >= 5) eqIndex = eqIndex - 5
-          else focusSection = (sony.noiseMode === Model.NOISE_AMBIENT) ? "ambient" : "noise"
-        }
-      } else if (focusSection === "speakToChat") {
-        if (dy > 0) focusSection = "dsee"
-        else if (dy < 0) {
-          focusSection = "eq"
-          eqIndex = 5
-        }
-      } else if (focusSection === "dsee") {
-        if (dy > 0) focusSection = "multipoint"
-        else if (dy < 0) focusSection = "speakToChat"
-      } else if (focusSection === "multipoint") {
-        if (dy < 0) focusSection = "dsee"
-      }
-      return
+    if (cursorSections.length === 0) return
+    if (!cursorActive) {
+      var start = Model.cursorClamp({ section: focusSection, index: selectedIndex }, cursorSections)
+      setCursor(start.section, start.index)
+    } else {
+      var r = Model.cursorMove({ section: focusSection, index: selectedIndex }, dx, dy, cursorSections)
+      focusSection = r.section
+      selectedIndex = r.index
+      if (r.action && r.action.type === "adjust") adjustCursor(r.action.delta)
+      else if (r.action && r.action.type === "expand") setExpanded(headerKeys[focusSection], r.action.value)
     }
-
-    if (dx !== 0) {
-      if (focusSection === "noise") {
-        noiseIndex = Math.max(0, Math.min(noiseModes.length - 1, noiseIndex + dx))
-      } else if (focusSection === "ambient") {
-        var newLvl = Model.clamp(sony.ambientSoundLevel + dx, 0, 20, 0)
-        sony.setAmbientLevel(newLvl)
-      } else if (focusSection === "eq") {
-        eqIndex = Math.max(0, Math.min(Model.EQ_PRESETS.length - 1, eqIndex + dx))
-      }
-    }
+    Qt.callLater(function() { root.ensureCursorVisible(root.cursorItem(root.focusSection, root.selectedIndex)) })
   }
 
   function activateCursor() {
-    if (focusSection === "noise") {
-      sony.setNoiseMode(noiseModes[noiseIndex])
-    } else if (focusSection === "ambient") {
-      // Level is adjusted via left/right
-    } else if (focusSection === "eq") {
-      sony.setEqPreset(Model.EQ_PRESETS[eqIndex])
-    } else if (focusSection === "speakToChat") {
-      sony.setSpeakToChat(!sony.speakToChat)
-    } else if (focusSection === "dsee") {
-      sony.setDsee(!sony.dseeExtreme)
-    } else if (focusSection === "multipoint") {
-      sony.setMultipoint(!sony.multipoint)
+    if (!cursorActive) return
+    var id = focusSection
+    var i = selectedIndex
+    if (headerKeys[id] !== undefined) {
+      toggleExpanded(headerKeys[id])
+      return
+    }
+    if (toggleActions[id]) {
+      flip(id)
+      return
+    }
+    if (id === "devices") {
+      if (Array.isArray(st.devices) && i < st.devices.length) switchSource(st.devices[i])
+      return
+    }
+    var options = optionsFor(id)
+    if (i >= 0 && i < options.length) choose(id, options[i].value)
+  }
+
+  function adjustCursor(delta) {
+    var action = adjustActions[focusSection]
+    if (!action || !targetEnabled(focusSection)) return
+    var value = Model.adjustedValue(st, focusSection, selectedIndex, delta)
+    if (value !== null) sony.sendDebounced(action, value)
+  }
+
+  function cursorItem(id, index) {
+    switch (id) {
+    case "noise": return noiseRow
+    case "ambient": return ambientRow
+    case "focusVoice": return focusVoiceToggle
+    case "sound": return soundHeader
+    case "eqPreset": return eqGrid
+    case "dsee": return dseeToggle
+    case "connectionQuality": return connectionQualityBlock
+    case "customEq": return customEqHeader
+    case "eqBands": return bandRepeater.itemAt(index)
+    case "speakToChatHeader": return stcHeader
+    case "speakToChat": return stcToggle
+    case "stcSensitivity": return stcSensitivityBlock
+    case "stcTimeout": return stcTimeoutBlock
+    case "headset": return headsetHeader
+    case "volume": return volumeRow
+    case "voiceGuidance": return voiceGuidanceToggle
+    case "voiceGuidanceVolume": return guidanceVolumeRow
+    case "autoPowerOff": return autoPowerOffBlock
+    case "ncAmbButton": return ncAmbBlock
+    case "buttonFunction": return buttonFunctionBlock
+    case "earDetection": return earDetectionToggle
+    case "multipointHeader": return multipointHeader
+    case "multipoint": return multipointToggle
+    case "devices": return deviceRepeater.itemAt(index)
+    default: return null
+    }
+  }
+
+  function ensureCursorVisible(item) {
+    if (!item || !panelFlick) return
+    var margin = Style.space(6)
+    var maxY = Math.max(0, panelFlick.contentHeight - panelFlick.height)
+    if (maxY <= 0) return
+    var top = item.mapToItem(panelFlick.contentItem, 0, 0).y
+    var bottom = top + (item.height || 0)
+    if (top < panelFlick.contentY + margin) panelFlick.contentY = Math.max(0, Math.min(maxY, top - margin))
+    else if (bottom > panelFlick.contentY + panelFlick.height - margin)
+      panelFlick.contentY = Math.max(0, Math.min(maxY, bottom + margin - panelFlick.height))
+  }
+
+  onOpenedChanged: {
+    if (opened) {
+      cursorActive = false
+      focusSection = ""
+      selectedIndex = 0
+      if (panelFlick) panelFlick.contentY = 0
+      sony.refresh()
+      Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    } else {
+      sony.flushDebounced()
     }
   }
 
@@ -121,10 +601,14 @@ Panel {
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
     function refresh(): string { sony.refresh(); return "ok" }
-    function cycleNoise(): string { sony.cycleNoiseMode(); return sony.noiseMode }
+    function cycleNoise(): string { sony.cycleNoiseMode(); return sony.status.noiseMode || "unknown" }
   }
 
-  // Bar Widget Button
+  implicitWidth: button.implicitWidth
+  implicitHeight: button.implicitHeight
+
+  // ---- bar button ----------------------------------------------------------
+
   WidgetButton {
     id: button
     anchors.fill: parent
@@ -132,49 +616,56 @@ Panel {
     labelVisible: false
     hasVisualContent: true
     fixedWidth: vertical ? -1 : (contentRow.implicitWidth + scaledHorizontalMargin * 2)
-    tooltipText: sony.connected
-      ? ((sony.deviceName || "WH-1000XM5") + " (" + Model.noiseModeName(sony.noiseMode) + ", " + Model.formatBattery(sony.batteryLevel) + ")")
-      : "Sony Headphones (Disconnected)"
+    tooltipText: Model.barTooltip(root.st)
+
+    readonly property color contentColor: button.active ? button.activeColor : button.foreground
 
     Row {
       id: contentRow
       anchors.centerIn: parent
-      spacing: Style.space(6)
+      spacing: Style.space(4)
 
       SonyIcon {
-        id: barIcon
         anchors.verticalCenter: parent.verticalCenter
         iconSize: Style.space(14)
-        connected: sony.connected
-        batteryLevel: sony.batteryLevel
-        charging: sony.batteryCharging
-        color: sony.connected
-          ? (button.active ? button.activeColor : button.foreground)
+        connected: root.live
+        batteryLevel: root.st.batteryLevel
+        charging: Model.isCharging(root.st)
+        color: root.live
+          ? button.contentColor
           : Qt.rgba(button.foreground.r, button.foreground.g, button.foreground.b, 0.4)
       }
 
       Text {
         anchors.verticalCenter: parent.verticalCenter
+        visible: !button.vertical && text !== ""
         textFormat: Text.PlainText
-        text: sony.connected ? Model.formatBattery(sony.batteryLevel) : "—"
-        color: button.active ? button.activeColor : button.foreground
+        text: Model.barBatteryText(root.st)
+        color: button.contentColor
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
         renderType: Text.NativeRendering
-        visible: !button.vertical
+      }
+
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        visible: !button.vertical && Model.isCharging(root.st)
+        textFormat: Text.PlainText
+        text: "\u{F0241}"
+        color: button.contentColor
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
       }
     }
 
     onPressed: function(buttonCode) {
-      if (buttonCode === Qt.RightButton) {
-        sony.cycleNoiseMode()
-      } else {
-        root.toggle()
-      }
+      if (buttonCode === Qt.RightButton) sony.cycleNoiseMode()
+      else root.toggle()
     }
   }
 
-  // Dropdown Control Panel
+  // ---- popup ---------------------------------------------------------------
+
   KeyboardPanel {
     id: panel
     anchorItem: button
@@ -183,14 +674,15 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(380))
-    contentHeight: panel.fittedContentHeight(panelColumn.implicitHeight + Style.space(24), Style.space(580))
+    contentHeight: panel.fittedContentHeight(panelColumn.implicitHeight, Style.space(640))
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
       onCloseRequested: root.close()
       onMoveRequested: function(dx, dy) { root.moveCursor(dx, dy) }
-      onActivateRequested: function() { root.activateCursor() }
+      onActivateRequested: root.activateCursor()
+      onTabRequested: function(direction) { root.switchPanel(direction) }
 
       Flickable {
         id: panelFlick
@@ -199,78 +691,69 @@ Panel {
         contentHeight: panelColumn.implicitHeight
         clip: true
         boundsBehavior: Flickable.StopAtBounds
-
-        ScrollBar.vertical: ScrollBar {
-          policy: panelColumn.implicitHeight > panelFlick.height ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
-        }
+        flickableDirection: Flickable.VerticalFlick
+        interactive: contentHeight > height
+        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
         Column {
           id: panelColumn
-          width: parent.width
+          width: panelFlick.width
           spacing: Style.space(12)
 
-          // -------------------------------------------------------------------
-          // 1. Device Header
-          // -------------------------------------------------------------------
-          Row {
+          // -- hero -----------------------------------------------------------
+          Item {
             width: parent.width
-            spacing: Style.space(12)
+            implicitHeight: Math.max(heroIcon.height, heroLabels.implicitHeight, heroBattery.implicitHeight)
 
             SonyIcon {
+              id: heroIcon
+              anchors.left: parent.left
               anchors.verticalCenter: parent.verticalCenter
               iconSize: Style.space(28)
-              connected: sony.connected
-              batteryLevel: sony.batteryLevel
-              charging: sony.batteryCharging
+              connected: root.live
+              batteryLevel: root.st.batteryLevel
+              charging: Model.isCharging(root.st)
             }
 
             Column {
+              id: heroLabels
+              anchors.left: heroIcon.right
+              anchors.leftMargin: Style.space(12)
+              anchors.right: heroBattery.left
+              anchors.rightMargin: Style.space(8)
               anchors.verticalCenter: parent.verticalCenter
-              width: parent.width - Style.space(110)
               spacing: Style.space(2)
 
               Text {
+                width: parent.width
+                elide: Text.ElideRight
                 textFormat: Text.PlainText
-                text: sony.connected ? (sony.deviceName || "WH-1000XM5") : "WH-1000XM5"
+                text: Model.deviceTitle(root.st)
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.title
                 font.bold: true
-                elide: Text.ElideRight
-                width: parent.width
               }
 
-              Row {
-                spacing: Style.space(6)
-                anchors.left: parent.left
-
-                Rectangle {
-                  anchors.verticalCenter: parent.verticalCenter
-                  width: Style.space(7)
-                  height: Style.space(7)
-                  radius: width / 2
-                  color: sony.connected ? "#2ecc71" : Qt.darker(root.foreground, 1.8)
-                }
-
-                Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  textFormat: Text.PlainText
-                  text: sony.connected
-                    ? (sony.codec ? "Connected • " + sony.codec : "Connected")
-                    : "Disconnected"
-                  color: Qt.darker(root.foreground, 1.4)
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
+              Text {
+                width: parent.width
+                elide: Text.ElideRight
+                textFormat: Text.PlainText
+                text: Model.heroMeta(root.st).toUpperCase()
+                color: Qt.darker(root.foreground, 1.4)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                font.letterSpacing: 1.2
               }
             }
 
-            // Battery status block
             Column {
-              anchors.verticalCenter: parent.verticalCenter
+              id: heroBattery
               anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
               spacing: Style.space(2)
-              visible: sony.connected
+              visible: Model.showBattery(root.st)
 
               Row {
                 anchors.right: parent.right
@@ -278,7 +761,8 @@ Panel {
 
                 Text {
                   anchors.verticalCenter: parent.verticalCenter
-                  text: Model.batteryIcon(sony.batteryLevel, sony.batteryCharging)
+                  textFormat: Text.PlainText
+                  text: Model.batteryIcon(root.st.batteryLevel, Model.isCharging(root.st))
                   color: root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.subtitle
@@ -287,7 +771,7 @@ Panel {
                 Text {
                   anchors.verticalCenter: parent.verticalCenter
                   textFormat: Text.PlainText
-                  text: Model.formatBattery(sony.batteryLevel)
+                  text: Model.formatBattery(root.st.batteryLevel)
                   color: root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.subtitle
@@ -297,8 +781,8 @@ Panel {
 
               Text {
                 anchors.right: parent.right
+                visible: Model.isCharging(root.st)
                 textFormat: Text.PlainText
-                visible: sony.batteryCharging
                 text: "Charging"
                 color: "#2ecc71"
                 font.family: root.fontFamily
@@ -307,16 +791,54 @@ Panel {
             }
           }
 
+          // -- status line ----------------------------------------------------
+          Text {
+            width: parent.width
+            visible: text !== ""
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+            text: root.statusLine
+            color: sony.commandError !== "" ? root.urgent : Qt.darker(root.foreground, 1.5)
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          // -- no controls: error, too new, disconnected ----------------------
+          Column {
+            width: parent.width
+            visible: !root.live
+            spacing: Style.space(6)
+
+            PanelSeparator { foreground: root.foreground }
+
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              text: Model.emptyStateText(root.st)
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Caption {
+              text: root.st.ok || root.st.schemaTooNew ? "" : root.st.lastError
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+          }
+
+          // -- noise control --------------------------------------------------
           PanelSeparator {
+            visible: noiseSection.visible
             foreground: root.foreground
           }
 
-          // -------------------------------------------------------------------
-          // 2. Noise Control Mode Selector
-          // -------------------------------------------------------------------
           Column {
+            id: noiseSection
             width: parent.width
             spacing: Style.space(8)
+            visible: root.shown("noise_control", root.st.noiseMode)
 
             PanelSectionHeader {
               text: "NOISE CONTROL"
@@ -325,204 +847,698 @@ Panel {
             }
 
             Row {
-              id: noiseModeRow
+              id: noiseRow
               width: parent.width
               spacing: Style.space(6)
+              enabled: root.targetEnabled("noise")
+              opacity: enabled ? 1 : root.disabledOpacity
 
-              readonly property real cellWidth: (width - spacing * (noiseModes.length - 1)) / noiseModes.length
+              readonly property real cellWidth: (width - spacing * (Model.NOISE_MODES.length - 1)) / Model.NOISE_MODES.length
 
               Repeater {
-                model: [
-                  { mode: Model.NOISE_ANC, label: "ANC", icon: Model.noiseModeIcon(Model.NOISE_ANC) },
-                  { mode: Model.NOISE_AMBIENT, label: "Ambient", icon: Model.noiseModeIcon(Model.NOISE_AMBIENT) },
-                  { mode: Model.NOISE_OFF, label: "Off", icon: Model.noiseModeIcon(Model.NOISE_OFF) }
-                ]
+                model: Model.NOISE_MODES
 
                 Button {
                   required property var modelData
                   required property int index
-                  width: noiseModeRow.cellWidth
-                  iconText: modelData.icon
+                  width: noiseRow.cellWidth
+                  iconText: Model.noiseModeIcon(modelData)
                   iconSize: Style.font.title
-                  text: modelData.label
+                  text: Model.noiseModeLabel(modelData)
                   fontSize: Style.font.bodySmall
                   foreground: root.foreground
                   fontFamily: root.fontFamily
                   bordered: true
-                  selected: sony.noiseMode === modelData.mode
-                  hasCursor: root.cursorActive && root.focusSection === "noise" && root.noiseIndex === index
+                  selected: root.st.noiseMode === modelData
+                  hasCursor: root.hasCursor("noise", index)
                   onClicked: {
-                    root.focusSection = "noise"
-                    root.noiseIndex = index
-                    sony.setNoiseMode(modelData.mode)
+                    root.setCursor("noise", index)
+                    root.choose("noise", modelData)
                   }
+                  onHovered: function(h) { if (h) root.setCursor("noise", index) }
                 }
               }
             }
+
+            SliderRow {
+              id: ambientRow
+              width: parent.width
+              bar: root.bar
+              title: "AMBIENT SOUND LEVEL"
+              valueText: root.st.ambientSoundLevel === null ? "—" : root.st.ambientSoundLevel + " / 20"
+              format: function(v) { return Math.round(v) + " / 20" }
+              value: root.st.ambientSoundLevel === null ? Model.AMBIENT_MIN : root.st.ambientSoundLevel
+              minimum: Model.AMBIENT_MIN
+              maximum: Model.AMBIENT_MAX
+              dimmed: root.st.noiseMode !== Model.NOISE_AMBIENT
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              hasCursor: root.hasCursor("ambient")
+              enabled: root.targetEnabled("ambient")
+              opacity: enabled ? 1 : root.disabledOpacity
+              onCommitted: function(v) { root.choose("ambient", Math.round(v), "ambientLevel") }
+              onHovered: function(h) { if (h) root.setCursor("ambient") }
+            }
+
+            Toggle {
+              id: focusVoiceToggle
+              width: parent.width
+              label: "Focus on Voice"
+              description: "Lets voices through in Ambient Sound mode"
+              checked: root.st.focusOnVoice === true
+              hasCursor: root.hasCursor("focusVoice")
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              enabled: root.targetEnabled("focusVoice")
+              opacity: enabled ? 1 : root.disabledOpacity
+              onClicked: {
+                root.setCursor("focusVoice")
+                root.flip("focusVoice")
+              }
+              onHovered: function(h) { if (h) root.setCursor("focusVoice") }
+            }
           }
 
-          // -------------------------------------------------------------------
-          // 3. Ambient Sound Level Slider
-          // -------------------------------------------------------------------
+          // -- sound ----------------------------------------------------------
+          PanelSeparator {
+            visible: soundSection.visible
+            foreground: root.foreground
+          }
+
           Column {
+            id: soundSection
             width: parent.width
-            spacing: Style.space(6)
-            opacity: sony.noiseMode === Model.NOISE_AMBIENT ? 1.0 : 0.4
+            spacing: Style.space(8)
+            visible: Model.sectionVisible(root.st, "sound")
 
-            Row {
+            CollapsibleHeader {
+              id: soundHeader
               width: parent.width
+              text: "SOUND"
+              summary: root.st.eqPreset !== null && root.shown("eq_preset", root.st.eqPreset) ? Model.eqPresetName(root.st.eqPreset) : ""
+              expanded: root.expanded.sound === true
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              hasCursor: root.hasCursor("sound")
+              onToggled: {
+                root.setCursor("sound")
+                root.toggleExpanded("sound")
+              }
+              onHovered: function(h) { if (h) root.setCursor("sound") }
+            }
 
-              PanelSectionHeader {
-                text: "AMBIENT SOUND LEVEL"
+            Column {
+              width: parent.width
+              spacing: Style.space(8)
+              visible: root.expanded.sound === true
+
+              Column {
+                width: parent.width
+                spacing: Style.space(6)
+                visible: root.shown("eq_preset", root.st.eqPreset)
+
+                PanelSectionHeader {
+                  text: "EQUALIZER"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                ChoiceGrid {
+                  id: eqGrid
+                  width: parent.width
+                  columns: 5
+                  options: root.optionsFor("eqPreset")
+                  value: root.st.eqPreset
+                  cursorIndex: root.cursorIndexFor("eqPreset")
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  enabled: root.targetEnabled("eqPreset")
+                  opacity: enabled ? 1 : root.disabledOpacity
+                  onPicked: function(v) { root.choose("eqPreset", v) }
+                  onHoveredIndex: function(i, h) { if (h) root.setCursor("eqPreset", i) }
+                }
+              }
+
+              Toggle {
+                id: dseeToggle
+                width: parent.width
+                visible: root.shown("dsee", root.st.dseeExtreme)
+                label: "DSEE Extreme"
+                description: "Upscales compressed music"
+                checked: root.st.dseeExtreme === true
+                hasCursor: root.hasCursor("dsee")
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                enabled: root.targetEnabled("dsee")
+                opacity: enabled ? 1 : root.disabledOpacity
+                onClicked: {
+                  root.setCursor("dsee")
+                  root.flip("dsee")
+                }
+                onHovered: function(h) { if (h) root.setCursor("dsee") }
+              }
+
+              Column {
+                id: connectionQualityBlock
+                width: parent.width
+                spacing: Style.space(6)
+                visible: root.shown("connection_quality", root.st.connectionQuality)
+
+                PanelSectionHeader {
+                  text: "CONNECTION PRIORITY"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                ChoiceGrid {
+                  width: parent.width
+                  columns: 2
+                  options: root.optionsFor("connectionQuality")
+                  value: root.st.connectionQuality
+                  cursorIndex: root.cursorIndexFor("connectionQuality")
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  fontSize: Style.font.bodySmall
+                  enabled: root.targetEnabled("connectionQuality")
+                  opacity: enabled ? 1 : root.disabledOpacity
+                  onPicked: function(v) { root.choose("connectionQuality", v) }
+                  onHoveredIndex: function(i, h) { if (h) root.setCursor("connectionQuality", i) }
+                }
+
+                Caption {
+                  text: root.st.connectionQuality === "other"
+                    ? "The headset uses another mode. The headset may reconnect after a change."
+                    : "The headset may reconnect after a change."
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+              }
+
+              Caption {
+                visible: root.shown("codec", root.st.codec)
+                text: "Codec: " + Model.codecLabel(root.st.codec)
                 foreground: root.foreground
                 fontFamily: root.fontFamily
               }
-
-              Item {
-                width: Math.max(0, parent.width - parent.children[0].implicitWidth - parent.children[2].implicitWidth)
-                height: 1
-              }
-
-              Text {
-                textFormat: Text.PlainText
-                text: String(sony.ambientSoundLevel) + " / 20"
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                font.bold: true
-              }
-            }
-
-            PanelSlider {
-              id: ambientSlider
-              width: parent.width
-              minimum: 0
-              maximum: 20
-              step: 1
-              integer: true
-              value: sony.ambientSoundLevel
-              enabled: sony.noiseMode === Model.NOISE_AMBIENT
-              bar: root.bar
-              onMoved: function(v) {
-                root.focusSection = "ambient"
-                sony.setAmbientLevel(Math.round(v))
-              }
-              onReleased: function(v) {
-                sony.setAmbientLevel(Math.round(v))
-              }
             }
           }
 
+          // -- custom EQ ------------------------------------------------------
           PanelSeparator {
+            visible: customEqSection.visible
             foreground: root.foreground
           }
 
-          // -------------------------------------------------------------------
-          // 4. Equalizer Presets Selector
-          // -------------------------------------------------------------------
           Column {
+            id: customEqSection
             width: parent.width
-            spacing: Style.space(8)
+            spacing: Style.space(4)
+            visible: Model.sectionVisible(root.st, "customEq")
 
-            PanelSectionHeader {
-              text: "EQUALIZER PRESET (" + Model.eqPresetName(sony.eqPreset) + ")"
+            CollapsibleHeader {
+              id: customEqHeader
+              width: parent.width
+              text: "CUSTOM EQ"
+              summary: Model.eqBandsSummary(root.st)
+              expanded: root.expanded.customEq === true
               foreground: root.foreground
               fontFamily: root.fontFamily
+              hasCursor: root.hasCursor("customEq")
+              onToggled: {
+                root.setCursor("customEq")
+                root.toggleExpanded("customEq")
+              }
+              onHovered: function(h) { if (h) root.setCursor("customEq") }
             }
 
-            Grid {
-              id: eqGrid
+            Column {
               width: parent.width
-              columns: 5
-              spacing: Style.space(6)
-
-              readonly property real cellWidth: (width - spacing * (columns - 1)) / columns
+              spacing: Style.space(2)
+              visible: root.expanded.customEq === true
+              enabled: root.targetEnabled("eqBands")
+              opacity: enabled ? 1 : root.disabledOpacity
 
               Repeater {
-                model: Model.EQ_PRESETS
+                id: bandRepeater
+                model: 6
 
-                Button {
-                  required property var modelData
+                BandRow {
                   required property int index
-                  width: eqGrid.cellWidth
-                  text: Model.eqPresetButtonLabel(modelData)
-                  fontSize: Style.font.caption
+                  width: parent.width
+                  bar: root.bar
+                  label: index < 5 ? Model.EQ_BAND_LABELS[index] : "Clear Bass"
+                  value: {
+                    var s = root.st
+                    if (index === 5) return s.clearBass === null ? 0 : s.clearBass
+                    return Array.isArray(s.eqCustomBands) ? s.eqCustomBands[index] : 0
+                  }
                   foreground: root.foreground
                   fontFamily: root.fontFamily
-                  bordered: true
-                  selected: sony.eqPreset === modelData
-                  hasCursor: root.cursorActive && root.focusSection === "eq" && root.eqIndex === index
-                  horizontalPadding: Style.space(4)
-                  verticalPadding: Style.space(6)
-                  onClicked: {
-                    root.focusSection = "eq"
-                    root.eqIndex = index
-                    sony.setEqPreset(modelData)
-                  }
+                  hasCursor: root.hasCursor("eqBands", index)
+                  onCommitted: function(v) { root.choose("eqBands", { index: index, level: Math.round(v) }, "eqBand") }
+                  onHovered: function(h) { if (h) root.setCursor("eqBands", index) }
+                }
+              }
+
+              Caption {
+                text: "A change selects the Custom preset."
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+            }
+          }
+
+          // -- speak-to-chat --------------------------------------------------
+          PanelSeparator {
+            visible: stcSection.visible
+            foreground: root.foreground
+          }
+
+          Column {
+            id: stcSection
+            width: parent.width
+            spacing: Style.space(8)
+            visible: Model.sectionVisible(root.st, "speakToChat")
+
+            CollapsibleHeader {
+              id: stcHeader
+              width: parent.width
+              text: "SPEAK-TO-CHAT"
+              summary: root.st.speakToChat === null ? "" : Model.onOffLabel(root.st.speakToChat)
+              expanded: root.expanded.speakToChat === true
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              hasCursor: root.hasCursor("speakToChatHeader")
+              onToggled: {
+                root.setCursor("speakToChatHeader")
+                root.toggleExpanded("speakToChat")
+              }
+              onHovered: function(h) { if (h) root.setCursor("speakToChatHeader") }
+            }
+
+            Column {
+              width: parent.width
+              spacing: Style.space(8)
+              visible: root.expanded.speakToChat === true
+
+              Toggle {
+                id: stcToggle
+                width: parent.width
+                label: "Speak-to-Chat"
+                description: "Pauses music when you start talking"
+                checked: root.st.speakToChat === true
+                hasCursor: root.hasCursor("speakToChat")
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                enabled: root.targetEnabled("speakToChat")
+                opacity: enabled ? 1 : root.disabledOpacity
+                onClicked: {
+                  root.setCursor("speakToChat")
+                  root.flip("speakToChat")
+                }
+                onHovered: function(h) { if (h) root.setCursor("speakToChat") }
+              }
+
+              Column {
+                id: stcSensitivityBlock
+                width: parent.width
+                spacing: Style.space(6)
+                enabled: root.targetEnabled("stcSensitivity")
+                opacity: enabled ? 1 : root.disabledOpacity
+
+                PanelSectionHeader {
+                  text: "VOICE DETECTION"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                ChoiceGrid {
+                  width: parent.width
+                  columns: 3
+                  options: root.optionsFor("stcSensitivity")
+                  value: root.st.stcSensitivity
+                  cursorIndex: root.cursorIndexFor("stcSensitivity")
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  fontSize: Style.font.bodySmall
+                  onPicked: function(v) { root.choose("stcSensitivity", v) }
+                  onHoveredIndex: function(i, h) { if (h) root.setCursor("stcSensitivity", i) }
+                }
+              }
+
+              Column {
+                id: stcTimeoutBlock
+                width: parent.width
+                spacing: Style.space(6)
+                enabled: root.targetEnabled("stcTimeout")
+                opacity: enabled ? 1 : root.disabledOpacity
+
+                PanelSectionHeader {
+                  text: "END AFTER SILENCE"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                ChoiceGrid {
+                  width: parent.width
+                  columns: 4
+                  options: root.optionsFor("stcTimeout")
+                  value: root.st.stcTimeout
+                  cursorIndex: root.cursorIndexFor("stcTimeout")
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  fontSize: Style.font.bodySmall
+                  onPicked: function(v) { root.choose("stcTimeout", v) }
+                  onHoveredIndex: function(i, h) { if (h) root.setCursor("stcTimeout", i) }
+                }
+
+                Caption {
+                  text: root.st.stcTimeout === "off" ? "Speak-to-Chat stays on until you press a button." : ""
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
                 }
               }
             }
           }
 
+          // -- headset --------------------------------------------------------
           PanelSeparator {
+            visible: headsetSection.visible
             foreground: root.foreground
           }
 
-          // -------------------------------------------------------------------
-          // 5. Feature Toggles
-          // -------------------------------------------------------------------
           Column {
+            id: headsetSection
             width: parent.width
             spacing: Style.space(8)
+            visible: Model.sectionVisible(root.st, "headset")
 
-            PanelSectionHeader {
-              text: "FEATURES"
+            CollapsibleHeader {
+              id: headsetHeader
+              width: parent.width
+              text: "HEADSET"
+              summary: root.st.volume !== null ? "Volume " + root.st.volume : ""
+              expanded: root.expanded.headset === true
               foreground: root.foreground
               fontFamily: root.fontFamily
+              hasCursor: root.hasCursor("headset")
+              onToggled: {
+                root.setCursor("headset")
+                root.toggleExpanded("headset")
+              }
+              onHovered: function(h) { if (h) root.setCursor("headset") }
             }
 
-            Toggle {
-              id: toggleSpeakToChat
+            Column {
               width: parent.width
-              label: "Speak-to-Chat"
-              description: "Pauses music automatically when speaking"
-              checked: sony.speakToChat
-              hasCursor: root.cursorActive && root.focusSection === "speakToChat"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              onClicked: {
-                root.focusSection = "speakToChat"
-                sony.setSpeakToChat(!sony.speakToChat)
+              spacing: Style.space(8)
+              visible: root.expanded.headset === true
+
+              SliderRow {
+                id: volumeRow
+                width: parent.width
+                visible: root.shown("volume", root.st.volume)
+                bar: root.bar
+                title: "VOLUME"
+                valueText: Model.formatValue(root.st.volume, " / 30")
+                format: function(v) { return Math.round(v) + " / 30" }
+                value: root.st.volume === null ? 0 : root.st.volume
+                minimum: Model.VOLUME_MIN
+                maximum: Model.VOLUME_MAX
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                hasCursor: root.hasCursor("volume")
+                enabled: root.targetEnabled("volume")
+                opacity: enabled ? 1 : root.disabledOpacity
+                onCommitted: function(v) { root.choose("volume", Math.round(v)) }
+                onHovered: function(h) { if (h) root.setCursor("volume") }
+              }
+
+              Toggle {
+                id: voiceGuidanceToggle
+                width: parent.width
+                visible: root.shown("voice_guidance", root.st.voiceGuidance)
+                label: "Voice guidance"
+                description: "Spoken battery and mode notices"
+                checked: root.st.voiceGuidance === true
+                hasCursor: root.hasCursor("voiceGuidance")
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                enabled: root.targetEnabled("voiceGuidance")
+                opacity: enabled ? 1 : root.disabledOpacity
+                onClicked: {
+                  root.setCursor("voiceGuidance")
+                  root.flip("voiceGuidance")
+                }
+                onHovered: function(h) { if (h) root.setCursor("voiceGuidance") }
+              }
+
+              SliderRow {
+                id: guidanceVolumeRow
+                width: parent.width
+                visible: root.shown("voice_guidance_volume", root.st.voiceGuidanceVolume)
+                bar: root.bar
+                title: "VOICE GUIDANCE VOLUME"
+                valueText: Model.formatSigned(root.st.voiceGuidanceVolume)
+                format: function(v) { return Model.formatSigned(v) }
+                value: root.st.voiceGuidanceVolume === null ? 0 : root.st.voiceGuidanceVolume
+                minimum: Model.GUIDANCE_VOLUME_MIN
+                maximum: Model.GUIDANCE_VOLUME_MAX
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                hasCursor: root.hasCursor("voiceGuidanceVolume")
+                enabled: root.targetEnabled("voiceGuidanceVolume")
+                opacity: enabled ? 1 : root.disabledOpacity
+                onCommitted: function(v) { root.choose("voiceGuidanceVolume", Math.round(v)) }
+                onHovered: function(h) { if (h) root.setCursor("voiceGuidanceVolume") }
+              }
+
+              Column {
+                id: autoPowerOffBlock
+                width: parent.width
+                spacing: Style.space(6)
+                visible: root.shown("auto_power_off", root.st.autoPowerOff)
+                enabled: root.targetEnabled("autoPowerOff")
+                opacity: enabled ? 1 : root.disabledOpacity
+
+                PanelSectionHeader {
+                  text: "AUTO POWER OFF"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                ChoiceGrid {
+                  width: parent.width
+                  columns: 4
+                  options: root.optionsFor("autoPowerOff")
+                  value: root.st.autoPowerOff
+                  cursorIndex: root.cursorIndexFor("autoPowerOff")
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onPicked: function(v) { root.choose("autoPowerOff", v) }
+                  onHoveredIndex: function(i, h) { if (h) root.setCursor("autoPowerOff", i) }
+                }
+              }
+
+              Column {
+                id: ncAmbBlock
+                width: parent.width
+                spacing: Style.space(6)
+                visible: root.shown("nc_amb_button", root.st.ncAmbButton)
+                enabled: root.targetEnabled("ncAmbButton")
+                opacity: enabled ? 1 : root.disabledOpacity
+
+                PanelSectionHeader {
+                  text: "NC/AMB BUTTON CYCLE"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                ChoiceGrid {
+                  width: parent.width
+                  columns: 4
+                  options: root.optionsFor("ncAmbButton")
+                  value: root.st.ncAmbButton
+                  cursorIndex: root.cursorIndexFor("ncAmbButton")
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onPicked: function(v) { root.choose("ncAmbButton", v) }
+                  onHoveredIndex: function(i, h) { if (h) root.setCursor("ncAmbButton", i) }
+                }
+              }
+
+              Column {
+                id: buttonFunctionBlock
+                width: parent.width
+                spacing: Style.space(6)
+                visible: root.shown("button_function", root.st.buttonFunction)
+                enabled: root.targetEnabled("buttonFunction")
+                opacity: enabled ? 1 : root.disabledOpacity
+
+                PanelSectionHeader {
+                  text: "NC/AMB BUTTON FUNCTION"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                ChoiceGrid {
+                  width: parent.width
+                  columns: 3
+                  options: root.optionsFor("buttonFunction")
+                  value: root.st.buttonFunction
+                  cursorIndex: root.cursorIndexFor("buttonFunction")
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onPicked: function(v) { root.choose("buttonFunction", v) }
+                  onHoveredIndex: function(i, h) { if (h) root.setCursor("buttonFunction", i) }
+                }
+
+                Caption {
+                  text: root.st.buttonFunction === "other" ? "The button uses a function this panel does not name." : ""
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+              }
+
+              Toggle {
+                id: earDetectionToggle
+                width: parent.width
+                visible: root.shown("ear_detection", root.st.earDetection)
+                label: "Pause when taken off"
+                description: "Resumes when you put the headset on"
+                checked: root.st.earDetection === true
+                hasCursor: root.hasCursor("earDetection")
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                enabled: root.targetEnabled("earDetection")
+                opacity: enabled ? 1 : root.disabledOpacity
+                onClicked: {
+                  root.setCursor("earDetection")
+                  root.flip("earDetection")
+                }
+                onHovered: function(h) { if (h) root.setCursor("earDetection") }
               }
             }
+          }
 
-            Toggle {
-              id: toggleDsee
+          // -- multipoint -----------------------------------------------------
+          PanelSeparator {
+            visible: multipointSection.visible
+            foreground: root.foreground
+          }
+
+          Column {
+            id: multipointSection
+            width: parent.width
+            spacing: Style.space(8)
+            visible: Model.sectionVisible(root.st, "multipoint")
+
+            CollapsibleHeader {
+              id: multipointHeader
               width: parent.width
-              label: "DSEE Extreme"
-              description: "AI audio upscaling for compressed tracks"
-              checked: sony.dseeExtreme
-              hasCursor: root.cursorActive && root.focusSection === "dsee"
+              text: "MULTIPOINT"
+              summary: root.st.multipoint === null ? "" : Model.onOffLabel(root.st.multipoint)
+              expanded: root.expanded.multipoint === true
               foreground: root.foreground
               fontFamily: root.fontFamily
-              onClicked: {
-                root.focusSection = "dsee"
-                sony.setDsee(!sony.dseeExtreme)
+              hasCursor: root.hasCursor("multipointHeader")
+              onToggled: {
+                root.setCursor("multipointHeader")
+                root.toggleExpanded("multipoint")
               }
+              onHovered: function(h) { if (h) root.setCursor("multipointHeader") }
             }
 
-            Toggle {
-              id: toggleMultipoint
+            Column {
               width: parent.width
-              label: "Multipoint Connection"
-              description: "Connect to two devices simultaneously"
-              checked: sony.multipoint
-              hasCursor: root.cursorActive && root.focusSection === "multipoint"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              onClicked: {
-                root.focusSection = "multipoint"
-                sony.setMultipoint(!sony.multipoint)
+              spacing: Style.space(6)
+              visible: root.expanded.multipoint === true
+
+              Toggle {
+                id: multipointToggle
+                width: parent.width
+                visible: root.shown("multipoint", root.st.multipoint)
+                label: "Connect to 2 devices"
+                description: "The headset reconnects after this change"
+                checked: root.st.multipoint === true
+                hasCursor: root.hasCursor("multipoint")
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                enabled: root.targetEnabled("multipoint")
+                opacity: enabled ? 1 : root.disabledOpacity
+                onClicked: {
+                  root.setCursor("multipoint")
+                  root.flip("multipoint")
+                }
+                onHovered: function(h) { if (h) root.setCursor("multipoint") }
+              }
+
+              Column {
+                width: parent.width
+                spacing: Style.space(2)
+                visible: root.shown("devices", root.st.devices)
+                enabled: root.targetEnabled("devices")
+                opacity: enabled ? 1 : root.disabledOpacity
+
+                PanelSectionHeader {
+                  text: "PAIRED DEVICES"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                Repeater {
+                  id: deviceRepeater
+                  model: Array.isArray(root.st.devices) ? root.st.devices : []
+
+                  DeviceRow {
+                    required property var modelData
+                    required property int index
+                    width: parent.width
+                    device: modelData
+                    canSwitch: Model.canSwitchTo(root.st, modelData)
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    hasCursor: root.hasCursor("devices", index)
+                    onClicked: {
+                      root.setCursor("devices", index)
+                      root.switchSource(modelData)
+                    }
+                    onHovered: function(h) { if (h) root.setCursor("devices", index) }
+                  }
+                }
+
+                Caption {
+                  text: Array.isArray(root.st.devices) && root.st.devices.length === 0
+                    ? "No paired devices."
+                    : (Model.isSupported(root.st, "source_switch") ? "Select a connected device to play audio from it." : "")
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+              }
+            }
+          }
+
+          // -- info footer ----------------------------------------------------
+          PanelSeparator {
+            visible: infoFooter.visible
+            foreground: root.foreground
+          }
+
+          Column {
+            id: infoFooter
+            width: parent.width
+            spacing: Style.space(2)
+            visible: footerRepeater.count > 0
+
+            Repeater {
+              id: footerRepeater
+              model: Model.footerLines(root.st)
+
+              Caption {
+                required property var modelData
+                text: String(modelData)
+                foreground: root.foreground
+                fontFamily: root.fontFamily
               }
             }
           }
