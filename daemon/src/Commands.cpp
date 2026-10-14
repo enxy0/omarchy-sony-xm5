@@ -53,6 +53,8 @@ constexpr VerbSpec kVerbs[] = {
     {"connection-quality", Verb::ConnectionQuality, "connection-quality sound|connection"},
     {"multipoint", Verb::Multipoint, "multipoint on|off"},
     {"source", Verb::Source, "source <address>"},
+    {"touch-panel", Verb::TouchPanel, "touch-panel on|off"},
+    {"quick-access", Verb::QuickAccess, "quick-access double|triple <value>"},
     {"_set_battery", Verb::TestSetBattery, "_set_battery <level> [charging]"},
     {"_disconnect", Verb::TestDisconnect, "_disconnect"},
     {"_reconnect", Verb::TestReconnect, "_reconnect"},
@@ -181,6 +183,7 @@ ParseResult parse(const std::vector<std::string>& tokens, bool allowTestVerbs) {
     case Verb::VoiceGuidance:
     case Verb::EarDetect:
     case Verb::Multipoint:
+    case Verb::TouchPanel:
         return single({"on", "off"});
     case Verb::VoiceGuidanceVolume:
         return integer(-2, 2);
@@ -204,6 +207,17 @@ ParseResult parse(const std::vector<std::string>& tokens, bool allowTestVerbs) {
             return usageError(spec->usage);
         }
         c.args = {sensitivity, timeout};
+        return ParseResult{c, {}};
+    }
+
+    case Verb::QuickAccess: {
+        if (argc != 2) return usageError(spec->usage);
+        std::string action = word(1);
+        std::string value = word(2);
+        if (!oneOf(action, {"double", "triple"}) || !oneOf(value, {"off", "spotify"})) {
+            return usageError(spec->usage);
+        }
+        c.args = {action, value};
         return ParseResult{c, {}};
     }
 

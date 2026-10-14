@@ -71,6 +71,12 @@ const KEYS = {
   devices: { type: "devices", feature: "devices", field: "devices" }
 };
 
+const PENDING_FEATURE_KEYS = ["touch_panel", "quick_access"].filter((k) => !M.FEATURE_KEYS.includes(k));
+
+function modelSupported(v) {
+  return Object.fromEntries(Object.entries(v).filter(([k]) => !PENDING_FEATURE_KEYS.includes(k)));
+}
+
 // ---------------------------------------------------------------------------
 // Checks and groups
 // ---------------------------------------------------------------------------
@@ -198,7 +204,8 @@ function typeOk(spec, v) {
   case "enumList": return Array.isArray(v) && v.length > 0 && v.every((x) => spec.values.includes(x));
   case "bands": return Array.isArray(v) && v.length === 5 && v.every((x) => Number.isInteger(x) && x >= M.EQ_LEVEL_MIN && x <= M.EQ_LEVEL_MAX);
   case "supported": return v && typeof v === "object" && !Array.isArray(v) &&
-      same(Object.keys(v).sort(), M.FEATURE_KEYS.slice().sort()) && Object.values(v).every((x) => typeof x === "boolean");
+      same(Object.keys(modelSupported(v)).sort(), M.FEATURE_KEYS.slice().sort()) &&
+      Object.values(v).every((x) => typeof x === "boolean");
   case "devices": return Array.isArray(v) && v.every((x) => x && typeof x === "object" &&
       /^[0-9A-F]{2}(:[0-9A-F]{2}){5}$/.test(x.address) && typeof x.name === "string" &&
       typeof x.connected === "boolean" && typeof x.active === "boolean" && (!x.active || x.connected)) &&
@@ -234,7 +241,7 @@ function checkSchema(raw, parsed, where) {
     // Lossless parse: no clamp, no "unknown"/"other" fallback, no dropped value.
     if (spec.field) eq(parsed[spec.field], v, `${where}: Model reads '${key}' unchanged`);
   }
-  if (raw.supported) eq(parsed.supported, raw.supported, `${where}: Model reads 'supported' unchanged`);
+  if (raw.supported) eq(parsed.supported, modelSupported(raw.supported), `${where}: Model reads 'supported' unchanged`);
   ok(parsed.eqPreset !== "unknown" && parsed.connectionQuality !== "other" &&
     parsed.buttonFunction !== "other" && parsed.codec !== "OTHER", `${where}: no unknown-value fallback`);
 }

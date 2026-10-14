@@ -35,6 +35,8 @@ const char* featureKey(Verb verb) {
         case Verb::ConnectionQuality:   return "connection_quality";
         case Verb::Multipoint:          return "multipoint";
         case Verb::Source:              return "source_switch";
+        case Verb::TouchPanel:          return "touch_panel";
+        case Verb::QuickAccess:         return "quick_access";
         default:                        return nullptr;
     }
 }
@@ -59,6 +61,8 @@ bool featureEnabled(const Supported& s, Verb verb) {
         case Verb::ConnectionQuality:   return s.connection_quality;
         case Verb::Multipoint:          return s.multipoint;
         case Verb::Source:              return s.source_switch;
+        case Verb::TouchPanel:          return s.touch_panel;
+        case Verb::QuickAccess:         return s.quick_access;
         default:                        return false;
     }
 }
@@ -252,6 +256,9 @@ void HeadsetSession::planCapabilities() {
     if (state_.hasFunction(Table::T1, fn1::PRESET_EQ)) {
         queueRead(Table::T1, req::getEqCapability());
     }
+    if (state_.hasFunction(Table::T1, fn1::QUICK_ACCESS)) {
+        queueRead(Table::T1, req::getQuickAccessCapability());
+    }
     queueLocal([this] { publishSupported(); });
 }
 
@@ -308,6 +315,7 @@ void HeadsetSession::queueValueReads() {
     if (sup.worn) queueRead(Table::T2, req::getWornStatus());
     if (sup.voice_guidance) queueRead(Table::T2, req::getVoiceGuidance(v.voiceGuidanceType));
     if (sup.voice_guidance_volume) queueRead(Table::T2, req::getVoiceGuidanceVolume());
+    if (sup.quick_access) queueRead(Table::T1, req::getQuickAccess());
 
     Step operationLog;
     operationLog.payload = req::enableOperationLog();
@@ -400,6 +408,10 @@ void HeadsetSession::updateLateSupport() {
     if (!current.button_function && derived.button_function) current.button_function = true;
     if (!current.multipoint && derived.multipoint) {
         current.multipoint = true;
+        selectVariants(state_);
+    }
+    if (!current.touch_panel && derived.touch_panel) {
+        current.touch_panel = true;
         selectVariants(state_);
     }
 }
@@ -525,6 +537,12 @@ void HeadsetSession::execute(const cmd::Command& command, Reply done, Clock::tim
     case Verb::ButtonFunction: {
         auto options = state_.buttonFunctionOptions();
         if (options && !contains(*options, arg)) { unsupportedValue(arg); return; }
+        break;
+    }
+    case Verb::QuickAccess: {
+        const std::string& value = command.args[1];
+        auto options = state_.quickAccessOptions(command.args[0] == "double" ? kActionDoubleTap : kActionTripleTap);
+        if (options && !contains(*options, value)) { unsupportedValue(arg + " " + value); return; }
         break;
     }
     case Verb::Source: {
@@ -654,6 +672,26 @@ void HeadsetSession::runSetter(const cmd::Command& c, Reply done) {
     case Verb::Source:
         submitCommand(Table::T2, req::setSourceSwitch(arg), std::move(done));
         return;
+    case Verb::TouchPanel:
+        submitCommand(Table::T1, req::setGeneralSettingBool(*v.touchPanelSlot, on), std::move(done));
+        return;
+    case Verb::QuickAccess: {
+        const uint8_t action = arg == "double" ? kActionDoubleTap : kActionTripleTap;
+        const uint8_t function = *quickAccessValue(c.args[1]);
+        refreshThen(!state_.quickAccessValue, Table::T1, req::getQuickAccess(),
+                    [this, gen, action, function, done = std::move(done)]() mutable {
+            if (gen != gen_) { done("ERR device timeout"); return; }
+            auto idx = state_.quickAccessIndex(action);
+            if (!idx || !state_.quickAccessValue || *idx >= state_.quickAccessValue->size()) {
+                done("ERR not ready");
+                return;
+            }
+            std::vector<uint8_t> functions = *state_.quickAccessValue;
+            functions[*idx] = function;
+            submitCommand(Table::T1, req::setQuickAccess(functions), std::move(done));
+        });
+        return;
+    }
     default:
         done("ERR unknown command '" + c.name + "'");
         return;

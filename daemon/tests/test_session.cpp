@@ -274,16 +274,18 @@ TEST(InitSequenceFollowsProtocolOrder) {
         {Table::T1, B({0x00, 0x00})}, {Table::T1, B({0x02, 0x00})}, {Table::T1, B({0x04, 0x02})},
         {Table::T1, B({0x04, 0x01})}, {Table::T1, B({0x04, 0x03})}, {Table::T1, B({0x06, 0x00})},
         {Table::T2, B({0x06, 0x00})},
-        {Table::T1, B({0xD0, 0xD1, 0x01})}, {Table::T1, B({0xE0, 0x01})}, {Table::T1, B({0xF0, 0x03})},
-        {Table::T1, B({0x50, 0x00, 0x01})},
+        {Table::T1, B({0xD0, 0xD1, 0x01})}, {Table::T1, B({0xD0, 0xD2, 0x01})}, {Table::T1, B({0xE0, 0x01})},
+        {Table::T1, B({0xF0, 0x03})}, {Table::T1, B({0x50, 0x00, 0x01})}, {Table::T1, B({0xF0, 0x0D})},
         {Table::T1, B({0x22, 0x00})}, {Table::T1, B({0x94, 0x00, 0x00})}, {Table::T1, B({0xD6, 0xD1})},
+        {Table::T1, B({0xD6, 0xD2})},
         {Table::T1, B({0x12, 0x02})}, {Table::T1, B({0xA6, 0x20})}, {Table::T1, B({0x66, 0x17})},
         {Table::T2, B({0x32, 0x02})}, {Table::T2, B({0x36, 0x02})}, {Table::T2, B({0x36, 0x01})},
         {Table::T1, B({0xF6, 0x0C})}, {Table::T1, B({0xFA, 0x0C})}, {Table::T1, B({0x52, 0x00})},
         {Table::T1, B({0x56, 0x00})}, {Table::T1, B({0xE6, 0x00})}, {Table::T1, B({0xE2, 0x01})},
         {Table::T1, B({0xE6, 0x01})}, {Table::T1, B({0xF6, 0x03})}, {Table::T1, B({0x66, 0x30})},
         {Table::T1, B({0x26, 0x05})}, {Table::T1, B({0xF6, 0x01})}, {Table::T2, B({0xF2, 0x00})},
-        {Table::T2, B({0x46, 0x01})}, {Table::T2, B({0x46, 0x20})}, {Table::T1, B({0xC4, 0x01, 0x00})},
+        {Table::T2, B({0x46, 0x01})}, {Table::T2, B({0x46, 0x20})}, {Table::T1, B({0xF6, 0x0D})},
+        {Table::T1, B({0xC4, 0x01, 0x00})},
     };
     CHECK_EQ(h.fake.received.size(), expected.size());
     for (size_t i = 0; i < std::min(expected.size(), h.fake.received.size()); ++i) {
@@ -579,6 +581,9 @@ TEST(SetterVerbsSendProtocolBytes) {
         {"ear-detect off", Table::T1, B({0xF8, 0x01, 0x01})},
         {"volume 25", Table::T1, B({0xA8, 0x20, 25})},
         {"connection-quality connection", Table::T1, B({0xE8, 0x00, 0x01})},
+        {"touch-panel off", Table::T1, B({0xD8, 0xD2, 0x00, 0x01})},
+        {"quick-access double spotify", Table::T1, B({0xF8, 0x0D, 0x02, 0x01, 0x01})},
+        {"quick-access triple off", Table::T1, B({0xF8, 0x0D, 0x02, 0x01, 0x00})},
     };
     for (const auto& c : cases) {
         size_t mark = h.fake.received.size();
@@ -604,6 +609,76 @@ TEST(SetterVerbsSendProtocolBytes) {
     CHECK(!j["ear_detection"].boolean);
     CHECK_EQ(j["volume"].number, 25.0);
     CHECK_EQ(j["connection_quality"].string, std::string("connection"));
+    CHECK(!j["touch_panel"].boolean);
+    CHECK(!j["touch_panel"].isNull());
+    CHECK_EQ(j["quick_access_double_tap"].string, std::string("spotify"));
+    CHECK_EQ(j["quick_access_triple_tap"].string, std::string("off"));
+}
+
+TEST(NewVerbsFollowGating) {
+    Harness h(FakeHeadsetProfile::minimal());
+    CHECK_EQ(h.run("touch-panel maybe"), std::string("ERR usage: touch-panel on|off"));
+    CHECK_EQ(h.run("quick-access double"), std::string("ERR usage: quick-access double|triple <value>"));
+    CHECK_EQ(h.run("quick-access single spotify"), std::string("ERR usage: quick-access double|triple <value>"));
+    CHECK_EQ(h.run("quick-access double endel"), std::string("ERR usage: quick-access double|triple <value>"));
+    h.connect();
+    h.advance(1500);
+    CHECK_EQ(h.run("touch-panel on"), std::string("ERR unsupported touch_panel"));
+    CHECK_EQ(h.run("quick-access double spotify"), std::string("ERR unsupported quick_access"));
+}
+
+TEST(QuickAccessSetKeepsTheOtherPress) {
+    Harness h;
+    h.connect();
+    h.advance(200);
+    h.fake.quickAccess = {0x01, 0x01};
+    h.push(Table::T1, B({0xF9, 0x0D, 0x02, 0x01, 0x01}));
+    size_t mark = h.fake.received.size();
+    CHECK_EQ(h.run("quick-access double off"), std::string("OK"));
+    auto sent = h.sentSince(mark);
+    REQUIRE(sent.size() == 1);
+    CHECK_EQ(sent[0].second, B({0xF8, 0x0D, 0x02, 0x00, 0x01}));
+    CHECK_EQ(h.status()["quick_access_double_tap"].string, std::string("off"));
+    CHECK_EQ(h.status()["quick_access_triple_tap"].string, std::string("spotify"));
+}
+
+TEST(Xm5Firmware251SupportListMatchesCapture) {
+    FakeHeadsetProfile profile;
+    profile.table1 = {0x10, 0x12, 0x13, 0x14, 0x23, 0x25, 0x20, 0x27, 0xD1, 0x32, 0x50, 0x6B, 0x70, 0x90, 0xA1, 0xC1, 0xC2,
+                      0xE1, 0xE2, 0xF4, 0x93, 0x69, 0xD2, 0xF9, 0xB0, 0xB2, 0xB6, 0xF1, 0xFD, 0xFC, 0xB8, 0xB7, 0x19};
+    profile.table2 = {0x41, 0x50, 0xF2, 0x32, 0x31, 0xF8};
+    profile.multipointSlot = 0xD2;
+    profile.firmware = "2.5.1";
+    Harness h(profile);
+    h.fake.eqPreset = 0x00;
+    h.connect();
+    h.advance(300);
+    CHECK(h.session->initComplete());
+    Json sup = h.status()["supported"];
+    CHECK(sup["battery"].boolean);
+    CHECK(sup["noise_control"].boolean);
+    CHECK(sup["eq_custom"].boolean);
+    CHECK(sup["dsee"].boolean);
+    CHECK(!sup["voice_guidance_volume"].boolean);
+    CHECK(!sup["button_function"].boolean);
+    CHECK(!sup["worn"].boolean);
+    CHECK(sup["multipoint"].boolean);
+    CHECK(sup["touch_panel"].boolean);
+    CHECK(sup["quick_access"].boolean);
+    CHECK(sentPayload(h, Table::T1, B({0xD6, 0xD1})));
+    CHECK(sentPayload(h, Table::T1, B({0xF0, 0x0D})));
+    CHECK(!sentPayload(h, Table::T1, B({0xF0, 0x03})));
+    Json j = h.status();
+    CHECK(j["touch_panel"].boolean);
+    CHECK(!j["multipoint"].boolean);
+    CHECK_EQ(j["eq_preset"].string, std::string("off"));
+    CHECK_EQ(j["eq_custom_bands"].array.size(), size_t{5});
+    CHECK_EQ(h.run("touch-panel off"), std::string("OK"));
+    CHECK(sentPayload(h, Table::T1, B({0xD8, 0xD1, 0x00, 0x01})));
+    CHECK_EQ(h.run("multipoint off"), std::string("OK"));
+    CHECK(sentPayload(h, Table::T1, B({0xD8, 0xD2, 0x00, 0x01})));
+    h.advance(31000);
+    CHECK(!sentPayload(h, Table::T2, B({0xF2, 0x00})));
 }
 
 TEST(EqSetIsFollowedByValueRead) {
@@ -766,7 +841,7 @@ TEST(ProbeReportsDeviceData) {
     CHECK((*j)["protocol"]["table2"].boolean);
     CHECK_EQ((*j)["unique_id"].string, std::string("FAKE-XM5-0001"));
     CHECK_EQ((*j)["color"].string, std::string("0x01"));
-    CHECK_EQ((*j)["support_table1"].array.size(), size_t{15});
+    CHECK_EQ((*j)["support_table1"].array.size(), size_t{17});
     CHECK_EQ((*j)["support_table2"].array.size(), size_t{4});
     CHECK_EQ((*j)["general_settings"].array[0]["subject"].string, std::string("MULTIPOINT_SETTING"));
     CHECK_EQ((*j)["eq_capability"]["bands"].number, 6.0);

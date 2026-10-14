@@ -54,6 +54,9 @@ struct BluetoothConfig {
     bool mockMode{false};              // Enable mock transport
 };
 
+std::optional<BluetoothDeviceInfo> selectSonyHeadphones(const std::vector<BluetoothDeviceInfo>& devices,
+                                                        const std::string& preferredMac);
+
 // ---------------------------------------------------------------------------
 // Abstract Interfaces
 // ---------------------------------------------------------------------------

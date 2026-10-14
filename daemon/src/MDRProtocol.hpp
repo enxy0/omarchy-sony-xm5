@@ -88,6 +88,7 @@ inline constexpr uint8_t PLAYBACK_CONTROL_BY_WEARING = 0xF1;
 inline constexpr uint8_t ASSIGNABLE_SETTING = 0xF3;
 inline constexpr uint8_t WEARING_STATUS_DETECTOR = 0xF6;
 inline constexpr uint8_t SMART_TALKING_MODE_TYPE2 = 0xFC;
+inline constexpr uint8_t QUICK_ACCESS = 0xFD;
 inline constexpr uint8_t ASSIGNABLE_SETTING_WITH_LIMITATION = 0xFE;
 } // namespace fn1
 
@@ -171,6 +172,9 @@ Bytes getVoiceGuidance(uint8_t type);
 Bytes setVoiceGuidance(uint8_t type, bool on, uint8_t language);
 Bytes getVoiceGuidanceVolume();
 Bytes setVoiceGuidanceVolume(int volume);
+Bytes getQuickAccessCapability();
+Bytes getQuickAccess();
+Bytes setQuickAccess(const std::vector<uint8_t>& functions);
 } // namespace req
 
 // ---------------------------------------------------------------------------
@@ -191,6 +195,8 @@ std::optional<std::string> speakToChatTimeoutName(uint8_t value);
 std::optional<uint8_t> speakToChatTimeoutValue(std::string_view name);
 std::string connectionQualityName(uint8_t priorMode);
 std::optional<uint8_t> connectionQualityValue(std::string_view name);
+std::string quickAccessName(uint8_t function);
+std::optional<uint8_t> quickAccessValue(std::string_view name);
 
 std::string hexByte(uint8_t value);
 std::string hexBytes(std::span<const uint8_t> data);
