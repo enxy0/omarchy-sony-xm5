@@ -93,7 +93,7 @@ Panel {
     property string fontFamily: Style.font.family
     property real fontSize: Style.font.caption
 
-    signal picked(var value)
+    signal picked(int index)
     signal hoveredIndex(int index, bool isHovered)
 
     spacing: Style.space(6)
@@ -117,7 +117,7 @@ Panel {
         hasCursor: grid.cursorIndex === index
         horizontalPadding: Style.space(4)
         verticalPadding: Style.space(6)
-        onClicked: grid.picked(modelData.value)
+        onClicked: grid.picked(index)
         onHovered: function(h) { grid.hoveredIndex(index, h) }
       }
     }
@@ -188,7 +188,10 @@ Panel {
         step: 1
         integer: true
         opacity: sliderRow.dimmed ? 0.6 : 1
-        onReleased: function(v) { sliderRow.committed(v) }
+        // Skip no-op commits: a wheel notch at a bound releases the same value.
+        onReleased: function(v) {
+          if (Math.round(v) !== Math.round(sliderRow.value)) sliderRow.committed(Math.round(v))
+        }
       }
     }
 
@@ -237,7 +240,9 @@ Panel {
       step: 1
       integer: true
       tickCount: 3
-      onReleased: function(v) { bandRow.committed(v) }
+      onReleased: function(v) {
+        if (Math.round(v) !== Math.round(bandRow.value)) bandRow.committed(Math.round(v))
+      }
     }
 
     Text {
@@ -364,8 +369,8 @@ Panel {
   readonly property bool live: Model.isLive(st)
   readonly property bool reading: Model.isReading(st)
 
+  // For read-only fields that have no cursor target (codec, device list).
   function shown(key, value) { return Model.isVisible(root.st, key, value) }
-  function usable(key, value) { return Model.isEnabled(root.st, key, value) }
 
   readonly property string statusLine: {
     if (sony.commandError !== "") return sony.commandError
@@ -376,10 +381,6 @@ Panel {
 
   // Collapsible sections; kept for the shell session.
   property var expanded: ({ sound: true, customEq: false, speakToChat: false, headset: false, multipoint: false })
-  readonly property var headerKeys: ({
-    sound: "sound", customEq: "customEq", speakToChatHeader: "speakToChat",
-    headset: "headset", multipointHeader: "multipoint"
-  })
 
   function setExpanded(name, value) {
     var next = {}
@@ -392,80 +393,24 @@ Panel {
     setExpanded(name, !expanded[name])
   }
 
-  // Chip options per cursor target: [{ value, label, tooltip }].
-  function optionsFor(id) {
-    var values = []
-    var label = null
-    var tip = function(v) { return "" }
-    switch (id) {
-    case "noise": values = Model.NOISE_MODES; label = Model.noiseModeLabel; break
-    case "eqPreset": values = Model.eqPresetOptions(st); label = Model.eqPresetButtonLabel; break
-    case "connectionQuality": values = Model.CONNECTION_QUALITY_OPTIONS; label = Model.connectionQualityLabel; break
-    case "stcSensitivity": values = Model.STC_SENSITIVITY_OPTIONS; label = Model.stcSensitivityLabel; break
-    case "stcTimeout": values = Model.STC_TIMEOUT_OPTIONS; label = Model.stcTimeoutLabel; break
-    case "autoPowerOff": values = Model.autoPowerOffOptions(st); label = Model.autoPowerOffLabel; tip = Model.autoPowerOffTooltip; break
-    case "ncAmbButton": values = Model.NC_AMB_BUTTON_OPTIONS; label = Model.ncAmbButtonLabel; tip = Model.ncAmbButtonTooltip; break
-    case "buttonFunction": values = Model.buttonFunctionOptions(st); label = Model.buttonFunctionLabel; break
-    default: return []
-    }
-    var out = []
-    for (var i = 0; i < values.length; i++) out.push({ value: values[i], label: label(values[i]), tooltip: tip(values[i]) })
-    return out
+  // Targets are described once in Model.TARGETS; these wrap it for bindings.
+  function shownFor(id) { return Model.targetVisible(root.st, id) }
+  function enabledFor(id) { return Model.targetEnabled(root.st, id) }
+  function choicesFor(id) { return Model.targetChoices(root.st, id) }
+
+  // Click, Enter or Space on target `id` (chip `index` for chip rows).
+  function activate(id, index) {
+    var i = index === undefined ? 0 : index
+    setCursor(id, i)
+    var a = Model.targetActivation(st, id, i)
+    if (!a) return
+    if (a.expand) toggleExpanded(a.expand)
+    else sony.send(a.action, a.value)
   }
 
-  // Whether the control behind a cursor target accepts input now.
-  function targetEnabled(id) {
-    var s = st
-    switch (id) {
-    case "noise": return usable("noise_control", s.noiseMode)
-    case "ambient": return usable("noise_control", s.ambientSoundLevel)
-    case "focusVoice": return usable("noise_control", s.focusOnVoice)
-    case "eqPreset": return usable("eq_preset", s.eqPreset)
-    case "dsee": return usable("dsee", s.dseeExtreme)
-    case "connectionQuality": return usable("connection_quality", s.connectionQuality)
-    case "eqBands": return usable("eq_custom", s.eqCustomBands) && s.clearBass !== null
-    case "speakToChat": return usable("speak_to_chat", s.speakToChat)
-    case "stcSensitivity": case "stcTimeout":
-      return usable("speak_to_chat", s.stcSensitivity) && s.stcTimeout !== null
-    case "volume": return usable("volume", s.volume)
-    case "voiceGuidance": return usable("voice_guidance", s.voiceGuidance)
-    case "voiceGuidanceVolume": return usable("voice_guidance_volume", s.voiceGuidanceVolume)
-    case "autoPowerOff": return usable("auto_power_off", s.autoPowerOff)
-    case "ncAmbButton": return usable("nc_amb_button", s.ncAmbButton)
-    case "buttonFunction": return usable("button_function", s.buttonFunction)
-    case "earDetection": return usable("ear_detection", s.earDetection)
-    case "multipoint": return usable("multipoint", s.multipoint)
-    case "devices": return usable("devices", s.devices)
-    default: return headerKeys[id] !== undefined
-    }
-  }
-
-  readonly property var toggleActions: ({
-    focusVoice: ["focusVoice", "focusOnVoice"],
-    dsee: ["dsee", "dseeExtreme"],
-    speakToChat: ["speakToChat", "speakToChat"],
-    voiceGuidance: ["voiceGuidance", "voiceGuidance"],
-    earDetection: ["earDetection", "earDetection"],
-    multipoint: ["multipoint", "multipoint"]
-  })
-  readonly property var adjustActions: ({
-    ambient: "ambientLevel", volume: "volume", voiceGuidanceVolume: "voiceGuidanceVolume", eqBands: "eqBand"
-  })
-
-  function flip(id) {
-    var a = toggleActions[id]
-    if (!a || !targetEnabled(id)) return
-    sony.send(a[0], st[a[1]] !== true)
-  }
-
-  // Sends `value` for cursor target `id`; `action` defaults to the id.
-  function choose(id, value, action) {
-    if (!targetEnabled(id)) return
-    sony.send(action || id, value)
-  }
-
-  function switchSource(device) {
-    if (Model.canSwitchTo(st, device)) sony.send("source", device.address)
+  // Slider release on target `id`.
+  function commit(id, value) {
+    if (enabledFor(id)) sony.send(Model.TARGETS[id].action, value)
   }
 
   // ---- cursor model (first-party recipe, logic in Model.js) ----------------
@@ -506,36 +451,18 @@ Panel {
       focusSection = r.section
       selectedIndex = r.index
       if (r.action && r.action.type === "adjust") adjustCursor(r.action.delta)
-      else if (r.action && r.action.type === "expand") setExpanded(headerKeys[focusSection], r.action.value)
+      else if (r.action && r.action.type === "expand") setExpanded(Model.TARGETS[focusSection].section, r.action.value)
     }
     Qt.callLater(function() { root.ensureCursorVisible(root.cursorItem(root.focusSection, root.selectedIndex)) })
   }
 
   function activateCursor() {
-    if (!cursorActive) return
-    var id = focusSection
-    var i = selectedIndex
-    if (headerKeys[id] !== undefined) {
-      toggleExpanded(headerKeys[id])
-      return
-    }
-    if (toggleActions[id]) {
-      flip(id)
-      return
-    }
-    if (id === "devices") {
-      if (Array.isArray(st.devices) && i < st.devices.length) switchSource(st.devices[i])
-      return
-    }
-    var options = optionsFor(id)
-    if (i >= 0 && i < options.length) choose(id, options[i].value)
+    if (cursorActive) activate(focusSection, selectedIndex)
   }
 
   function adjustCursor(delta) {
-    var action = adjustActions[focusSection]
-    if (!action || !targetEnabled(focusSection)) return
-    var value = Model.adjustedValue(st, focusSection, selectedIndex, delta)
-    if (value !== null) sony.sendDebounced(action, value)
+    var a = Model.targetAdjustment(st, focusSection, selectedIndex, delta)
+    if (a) sony.sendDebounced(a.action, a.value)
   }
 
   function cursorItem(id, index) {
@@ -631,9 +558,8 @@ Panel {
         connected: root.live
         batteryLevel: root.st.batteryLevel
         charging: Model.isCharging(root.st)
-        color: root.live
-          ? button.contentColor
-          : Qt.rgba(button.foreground.r, button.foreground.g, button.foreground.b, 0.4)
+        // effectiveColor picks charging, low battery and disconnected tints.
+        normalColor: button.contentColor
       }
 
       Text {
@@ -838,7 +764,7 @@ Panel {
             id: noiseSection
             width: parent.width
             spacing: Style.space(8)
-            visible: root.shown("noise_control", root.st.noiseMode)
+            visible: root.shownFor("noise")
 
             PanelSectionHeader {
               text: "NOISE CONTROL"
@@ -850,7 +776,7 @@ Panel {
               id: noiseRow
               width: parent.width
               spacing: Style.space(6)
-              enabled: root.targetEnabled("noise")
+              enabled: root.enabledFor("noise")
               opacity: enabled ? 1 : root.disabledOpacity
 
               readonly property real cellWidth: (width - spacing * (Model.NOISE_MODES.length - 1)) / Model.NOISE_MODES.length
@@ -871,10 +797,7 @@ Panel {
                   bordered: true
                   selected: root.st.noiseMode === modelData
                   hasCursor: root.hasCursor("noise", index)
-                  onClicked: {
-                    root.setCursor("noise", index)
-                    root.choose("noise", modelData)
-                  }
+                  onClicked: root.activate("noise", index)
                   onHovered: function(h) { if (h) root.setCursor("noise", index) }
                 }
               }
@@ -894,27 +817,25 @@ Panel {
               foreground: root.foreground
               fontFamily: root.fontFamily
               hasCursor: root.hasCursor("ambient")
-              enabled: root.targetEnabled("ambient")
+              enabled: root.enabledFor("ambient")
               opacity: enabled ? 1 : root.disabledOpacity
-              onCommitted: function(v) { root.choose("ambient", Math.round(v), "ambientLevel") }
+              onCommitted: function(v) { root.commit("ambient", v) }
               onHovered: function(h) { if (h) root.setCursor("ambient") }
             }
 
             Toggle {
               id: focusVoiceToggle
               width: parent.width
+              visible: root.shownFor("focusVoice")
               label: "Focus on Voice"
               description: "Lets voices through in Ambient Sound mode"
               checked: root.st.focusOnVoice === true
               hasCursor: root.hasCursor("focusVoice")
               foreground: root.foreground
               fontFamily: root.fontFamily
-              enabled: root.targetEnabled("focusVoice")
+              enabled: root.enabledFor("focusVoice")
               opacity: enabled ? 1 : root.disabledOpacity
-              onClicked: {
-                root.setCursor("focusVoice")
-                root.flip("focusVoice")
-              }
+              onClicked: root.activate("focusVoice")
               onHovered: function(h) { if (h) root.setCursor("focusVoice") }
             }
           }
@@ -935,15 +856,12 @@ Panel {
               id: soundHeader
               width: parent.width
               text: "SOUND"
-              summary: root.st.eqPreset !== null && root.shown("eq_preset", root.st.eqPreset) ? Model.eqPresetName(root.st.eqPreset) : ""
+              summary: root.st.eqPreset !== null && root.shownFor("eqPreset") ? Model.eqPresetName(root.st.eqPreset) : ""
               expanded: root.expanded.sound === true
               foreground: root.foreground
               fontFamily: root.fontFamily
               hasCursor: root.hasCursor("sound")
-              onToggled: {
-                root.setCursor("sound")
-                root.toggleExpanded("sound")
-              }
+              onToggled: root.activate("sound")
               onHovered: function(h) { if (h) root.setCursor("sound") }
             }
 
@@ -955,7 +873,7 @@ Panel {
               Column {
                 width: parent.width
                 spacing: Style.space(6)
-                visible: root.shown("eq_preset", root.st.eqPreset)
+                visible: root.shownFor("eqPreset")
 
                 PanelSectionHeader {
                   text: "EQUALIZER"
@@ -967,14 +885,14 @@ Panel {
                   id: eqGrid
                   width: parent.width
                   columns: 5
-                  options: root.optionsFor("eqPreset")
+                  options: root.choicesFor("eqPreset")
                   value: root.st.eqPreset
                   cursorIndex: root.cursorIndexFor("eqPreset")
                   foreground: root.foreground
                   fontFamily: root.fontFamily
-                  enabled: root.targetEnabled("eqPreset")
+                  enabled: root.enabledFor("eqPreset")
                   opacity: enabled ? 1 : root.disabledOpacity
-                  onPicked: function(v) { root.choose("eqPreset", v) }
+                  onPicked: function(i) { root.activate("eqPreset", i) }
                   onHoveredIndex: function(i, h) { if (h) root.setCursor("eqPreset", i) }
                 }
               }
@@ -982,19 +900,16 @@ Panel {
               Toggle {
                 id: dseeToggle
                 width: parent.width
-                visible: root.shown("dsee", root.st.dseeExtreme)
+                visible: root.shownFor("dsee")
                 label: "DSEE Extreme"
                 description: "Upscales compressed music"
                 checked: root.st.dseeExtreme === true
                 hasCursor: root.hasCursor("dsee")
                 foreground: root.foreground
                 fontFamily: root.fontFamily
-                enabled: root.targetEnabled("dsee")
+                enabled: root.enabledFor("dsee")
                 opacity: enabled ? 1 : root.disabledOpacity
-                onClicked: {
-                  root.setCursor("dsee")
-                  root.flip("dsee")
-                }
+                onClicked: root.activate("dsee")
                 onHovered: function(h) { if (h) root.setCursor("dsee") }
               }
 
@@ -1002,7 +917,7 @@ Panel {
                 id: connectionQualityBlock
                 width: parent.width
                 spacing: Style.space(6)
-                visible: root.shown("connection_quality", root.st.connectionQuality)
+                visible: root.shownFor("connectionQuality")
 
                 PanelSectionHeader {
                   text: "CONNECTION PRIORITY"
@@ -1013,15 +928,15 @@ Panel {
                 ChoiceGrid {
                   width: parent.width
                   columns: 2
-                  options: root.optionsFor("connectionQuality")
+                  options: root.choicesFor("connectionQuality")
                   value: root.st.connectionQuality
                   cursorIndex: root.cursorIndexFor("connectionQuality")
                   foreground: root.foreground
                   fontFamily: root.fontFamily
                   fontSize: Style.font.bodySmall
-                  enabled: root.targetEnabled("connectionQuality")
+                  enabled: root.enabledFor("connectionQuality")
                   opacity: enabled ? 1 : root.disabledOpacity
-                  onPicked: function(v) { root.choose("connectionQuality", v) }
+                  onPicked: function(i) { root.activate("connectionQuality", i) }
                   onHoveredIndex: function(i, h) { if (h) root.setCursor("connectionQuality", i) }
                 }
 
@@ -1064,10 +979,7 @@ Panel {
               foreground: root.foreground
               fontFamily: root.fontFamily
               hasCursor: root.hasCursor("customEq")
-              onToggled: {
-                root.setCursor("customEq")
-                root.toggleExpanded("customEq")
-              }
+              onToggled: root.activate("customEq")
               onHovered: function(h) { if (h) root.setCursor("customEq") }
             }
 
@@ -1075,7 +987,7 @@ Panel {
               width: parent.width
               spacing: Style.space(2)
               visible: root.expanded.customEq === true
-              enabled: root.targetEnabled("eqBands")
+              enabled: root.enabledFor("eqBands")
               opacity: enabled ? 1 : root.disabledOpacity
 
               Repeater {
@@ -1095,7 +1007,7 @@ Panel {
                   foreground: root.foreground
                   fontFamily: root.fontFamily
                   hasCursor: root.hasCursor("eqBands", index)
-                  onCommitted: function(v) { root.choose("eqBands", { index: index, level: Math.round(v) }, "eqBand") }
+                  onCommitted: function(v) { root.commit("eqBands", { index: index, level: v }) }
                   onHovered: function(h) { if (h) root.setCursor("eqBands", index) }
                 }
               }
@@ -1129,10 +1041,7 @@ Panel {
               foreground: root.foreground
               fontFamily: root.fontFamily
               hasCursor: root.hasCursor("speakToChatHeader")
-              onToggled: {
-                root.setCursor("speakToChatHeader")
-                root.toggleExpanded("speakToChat")
-              }
+              onToggled: root.activate("speakToChatHeader")
               onHovered: function(h) { if (h) root.setCursor("speakToChatHeader") }
             }
 
@@ -1150,20 +1059,18 @@ Panel {
                 hasCursor: root.hasCursor("speakToChat")
                 foreground: root.foreground
                 fontFamily: root.fontFamily
-                enabled: root.targetEnabled("speakToChat")
+                enabled: root.enabledFor("speakToChat")
                 opacity: enabled ? 1 : root.disabledOpacity
-                onClicked: {
-                  root.setCursor("speakToChat")
-                  root.flip("speakToChat")
-                }
+                onClicked: root.activate("speakToChat")
                 onHovered: function(h) { if (h) root.setCursor("speakToChat") }
               }
 
               Column {
                 id: stcSensitivityBlock
                 width: parent.width
+                visible: root.shownFor("stcSensitivity")
                 spacing: Style.space(6)
-                enabled: root.targetEnabled("stcSensitivity")
+                enabled: root.enabledFor("stcSensitivity")
                 opacity: enabled ? 1 : root.disabledOpacity
 
                 PanelSectionHeader {
@@ -1175,13 +1082,13 @@ Panel {
                 ChoiceGrid {
                   width: parent.width
                   columns: 3
-                  options: root.optionsFor("stcSensitivity")
+                  options: root.choicesFor("stcSensitivity")
                   value: root.st.stcSensitivity
                   cursorIndex: root.cursorIndexFor("stcSensitivity")
                   foreground: root.foreground
                   fontFamily: root.fontFamily
                   fontSize: Style.font.bodySmall
-                  onPicked: function(v) { root.choose("stcSensitivity", v) }
+                  onPicked: function(i) { root.activate("stcSensitivity", i) }
                   onHoveredIndex: function(i, h) { if (h) root.setCursor("stcSensitivity", i) }
                 }
               }
@@ -1189,8 +1096,9 @@ Panel {
               Column {
                 id: stcTimeoutBlock
                 width: parent.width
+                visible: root.shownFor("stcTimeout")
                 spacing: Style.space(6)
-                enabled: root.targetEnabled("stcTimeout")
+                enabled: root.enabledFor("stcTimeout")
                 opacity: enabled ? 1 : root.disabledOpacity
 
                 PanelSectionHeader {
@@ -1202,13 +1110,13 @@ Panel {
                 ChoiceGrid {
                   width: parent.width
                   columns: 4
-                  options: root.optionsFor("stcTimeout")
+                  options: root.choicesFor("stcTimeout")
                   value: root.st.stcTimeout
                   cursorIndex: root.cursorIndexFor("stcTimeout")
                   foreground: root.foreground
                   fontFamily: root.fontFamily
                   fontSize: Style.font.bodySmall
-                  onPicked: function(v) { root.choose("stcTimeout", v) }
+                  onPicked: function(i) { root.activate("stcTimeout", i) }
                   onHoveredIndex: function(i, h) { if (h) root.setCursor("stcTimeout", i) }
                 }
 
@@ -1242,10 +1150,7 @@ Panel {
               foreground: root.foreground
               fontFamily: root.fontFamily
               hasCursor: root.hasCursor("headset")
-              onToggled: {
-                root.setCursor("headset")
-                root.toggleExpanded("headset")
-              }
+              onToggled: root.activate("headset")
               onHovered: function(h) { if (h) root.setCursor("headset") }
             }
 
@@ -1257,7 +1162,7 @@ Panel {
               SliderRow {
                 id: volumeRow
                 width: parent.width
-                visible: root.shown("volume", root.st.volume)
+                visible: root.shownFor("volume")
                 bar: root.bar
                 title: "VOLUME"
                 valueText: Model.formatValue(root.st.volume, " / 30")
@@ -1268,35 +1173,32 @@ Panel {
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 hasCursor: root.hasCursor("volume")
-                enabled: root.targetEnabled("volume")
+                enabled: root.enabledFor("volume")
                 opacity: enabled ? 1 : root.disabledOpacity
-                onCommitted: function(v) { root.choose("volume", Math.round(v)) }
+                onCommitted: function(v) { root.commit("volume", v) }
                 onHovered: function(h) { if (h) root.setCursor("volume") }
               }
 
               Toggle {
                 id: voiceGuidanceToggle
                 width: parent.width
-                visible: root.shown("voice_guidance", root.st.voiceGuidance)
+                visible: root.shownFor("voiceGuidance")
                 label: "Voice guidance"
                 description: "Spoken battery and mode notices"
                 checked: root.st.voiceGuidance === true
                 hasCursor: root.hasCursor("voiceGuidance")
                 foreground: root.foreground
                 fontFamily: root.fontFamily
-                enabled: root.targetEnabled("voiceGuidance")
+                enabled: root.enabledFor("voiceGuidance")
                 opacity: enabled ? 1 : root.disabledOpacity
-                onClicked: {
-                  root.setCursor("voiceGuidance")
-                  root.flip("voiceGuidance")
-                }
+                onClicked: root.activate("voiceGuidance")
                 onHovered: function(h) { if (h) root.setCursor("voiceGuidance") }
               }
 
               SliderRow {
                 id: guidanceVolumeRow
                 width: parent.width
-                visible: root.shown("voice_guidance_volume", root.st.voiceGuidanceVolume)
+                visible: root.shownFor("voiceGuidanceVolume")
                 bar: root.bar
                 title: "VOICE GUIDANCE VOLUME"
                 valueText: Model.formatSigned(root.st.voiceGuidanceVolume)
@@ -1307,9 +1209,9 @@ Panel {
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 hasCursor: root.hasCursor("voiceGuidanceVolume")
-                enabled: root.targetEnabled("voiceGuidanceVolume")
+                enabled: root.enabledFor("voiceGuidanceVolume")
                 opacity: enabled ? 1 : root.disabledOpacity
-                onCommitted: function(v) { root.choose("voiceGuidanceVolume", Math.round(v)) }
+                onCommitted: function(v) { root.commit("voiceGuidanceVolume", v) }
                 onHovered: function(h) { if (h) root.setCursor("voiceGuidanceVolume") }
               }
 
@@ -1317,8 +1219,8 @@ Panel {
                 id: autoPowerOffBlock
                 width: parent.width
                 spacing: Style.space(6)
-                visible: root.shown("auto_power_off", root.st.autoPowerOff)
-                enabled: root.targetEnabled("autoPowerOff")
+                visible: root.shownFor("autoPowerOff")
+                enabled: root.enabledFor("autoPowerOff")
                 opacity: enabled ? 1 : root.disabledOpacity
 
                 PanelSectionHeader {
@@ -1330,12 +1232,12 @@ Panel {
                 ChoiceGrid {
                   width: parent.width
                   columns: 4
-                  options: root.optionsFor("autoPowerOff")
+                  options: root.choicesFor("autoPowerOff")
                   value: root.st.autoPowerOff
                   cursorIndex: root.cursorIndexFor("autoPowerOff")
                   foreground: root.foreground
                   fontFamily: root.fontFamily
-                  onPicked: function(v) { root.choose("autoPowerOff", v) }
+                  onPicked: function(i) { root.activate("autoPowerOff", i) }
                   onHoveredIndex: function(i, h) { if (h) root.setCursor("autoPowerOff", i) }
                 }
               }
@@ -1344,8 +1246,8 @@ Panel {
                 id: ncAmbBlock
                 width: parent.width
                 spacing: Style.space(6)
-                visible: root.shown("nc_amb_button", root.st.ncAmbButton)
-                enabled: root.targetEnabled("ncAmbButton")
+                visible: root.shownFor("ncAmbButton")
+                enabled: root.enabledFor("ncAmbButton")
                 opacity: enabled ? 1 : root.disabledOpacity
 
                 PanelSectionHeader {
@@ -1357,12 +1259,12 @@ Panel {
                 ChoiceGrid {
                   width: parent.width
                   columns: 4
-                  options: root.optionsFor("ncAmbButton")
+                  options: root.choicesFor("ncAmbButton")
                   value: root.st.ncAmbButton
                   cursorIndex: root.cursorIndexFor("ncAmbButton")
                   foreground: root.foreground
                   fontFamily: root.fontFamily
-                  onPicked: function(v) { root.choose("ncAmbButton", v) }
+                  onPicked: function(i) { root.activate("ncAmbButton", i) }
                   onHoveredIndex: function(i, h) { if (h) root.setCursor("ncAmbButton", i) }
                 }
               }
@@ -1371,8 +1273,8 @@ Panel {
                 id: buttonFunctionBlock
                 width: parent.width
                 spacing: Style.space(6)
-                visible: root.shown("button_function", root.st.buttonFunction)
-                enabled: root.targetEnabled("buttonFunction")
+                visible: root.shownFor("buttonFunction")
+                enabled: root.enabledFor("buttonFunction")
                 opacity: enabled ? 1 : root.disabledOpacity
 
                 PanelSectionHeader {
@@ -1384,12 +1286,12 @@ Panel {
                 ChoiceGrid {
                   width: parent.width
                   columns: 3
-                  options: root.optionsFor("buttonFunction")
+                  options: root.choicesFor("buttonFunction")
                   value: root.st.buttonFunction
                   cursorIndex: root.cursorIndexFor("buttonFunction")
                   foreground: root.foreground
                   fontFamily: root.fontFamily
-                  onPicked: function(v) { root.choose("buttonFunction", v) }
+                  onPicked: function(i) { root.activate("buttonFunction", i) }
                   onHoveredIndex: function(i, h) { if (h) root.setCursor("buttonFunction", i) }
                 }
 
@@ -1403,19 +1305,16 @@ Panel {
               Toggle {
                 id: earDetectionToggle
                 width: parent.width
-                visible: root.shown("ear_detection", root.st.earDetection)
+                visible: root.shownFor("earDetection")
                 label: "Pause when taken off"
                 description: "Resumes when you put the headset on"
                 checked: root.st.earDetection === true
                 hasCursor: root.hasCursor("earDetection")
                 foreground: root.foreground
                 fontFamily: root.fontFamily
-                enabled: root.targetEnabled("earDetection")
+                enabled: root.enabledFor("earDetection")
                 opacity: enabled ? 1 : root.disabledOpacity
-                onClicked: {
-                  root.setCursor("earDetection")
-                  root.flip("earDetection")
-                }
+                onClicked: root.activate("earDetection")
                 onHovered: function(h) { if (h) root.setCursor("earDetection") }
               }
             }
@@ -1442,10 +1341,7 @@ Panel {
               foreground: root.foreground
               fontFamily: root.fontFamily
               hasCursor: root.hasCursor("multipointHeader")
-              onToggled: {
-                root.setCursor("multipointHeader")
-                root.toggleExpanded("multipoint")
-              }
+              onToggled: root.activate("multipointHeader")
               onHovered: function(h) { if (h) root.setCursor("multipointHeader") }
             }
 
@@ -1457,19 +1353,16 @@ Panel {
               Toggle {
                 id: multipointToggle
                 width: parent.width
-                visible: root.shown("multipoint", root.st.multipoint)
+                visible: root.shownFor("multipoint")
                 label: "Connect to 2 devices"
                 description: "The headset reconnects after this change"
                 checked: root.st.multipoint === true
                 hasCursor: root.hasCursor("multipoint")
                 foreground: root.foreground
                 fontFamily: root.fontFamily
-                enabled: root.targetEnabled("multipoint")
+                enabled: root.enabledFor("multipoint")
                 opacity: enabled ? 1 : root.disabledOpacity
-                onClicked: {
-                  root.setCursor("multipoint")
-                  root.flip("multipoint")
-                }
+                onClicked: root.activate("multipoint")
                 onHovered: function(h) { if (h) root.setCursor("multipoint") }
               }
 
@@ -1477,7 +1370,7 @@ Panel {
                 width: parent.width
                 spacing: Style.space(2)
                 visible: root.shown("devices", root.st.devices)
-                enabled: root.targetEnabled("devices")
+                enabled: root.enabledFor("devices")
                 opacity: enabled ? 1 : root.disabledOpacity
 
                 PanelSectionHeader {
@@ -1499,10 +1392,7 @@ Panel {
                     foreground: root.foreground
                     fontFamily: root.fontFamily
                     hasCursor: root.hasCursor("devices", index)
-                    onClicked: {
-                      root.setCursor("devices", index)
-                      root.switchSource(modelData)
-                    }
+                    onClicked: root.activate("devices", index)
                     onHovered: function(h) { if (h) root.setCursor("devices", index) }
                   }
                 }
