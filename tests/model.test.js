@@ -1,290 +1,28 @@
 // tests/model.test.js
-// Standalone unit tests for Model.js executable via Deno or Node.
-// Command: deno run --allow-read tests/model.test.js
-//       or: node tests/model.test.js
+// Standalone unit tests for Model.js.
+// Command: node tests/model.test.js
+//       or: deno run --allow-read tests/model.test.js
+// Works from any working directory: paths resolve against this file.
 
-let fs;
 let readFileSync;
-
 if (typeof Deno !== "undefined") {
   readFileSync = (p) => Deno.readTextFileSync(p);
 } else if (typeof process !== "undefined") {
-  fs = await import("fs");
-  const path = await import("path");
+  const fs = await import("fs");
   readFileSync = (p) => fs.readFileSync(p, "utf-8");
 } else {
   throw new Error("Unsupported runtime: expected Deno or Node.js");
 }
 
-// Locate plugin/Model.js or use reference implementation if not yet created by M4
-const possiblePaths = [
-  "plugin/Model.js",
-  "../plugin/Model.js",
-  "Model.js",
-  "/home/roykevin/Projects/omarchy-sony/plugin/Model.js"
-];
+const testsDir = new URL(".", import.meta.url);
+const repoFile = (rel) => decodeURIComponent(new URL("../" + rel, testsDir).pathname);
+const fixture = (name) => readFileSync(repoFile("tests/fixtures/" + name));
 
-let modelSource = null;
-for (const p of possiblePaths) {
-  try {
-    modelSource = readFileSync(p);
-    console.log(`[INFO] Loaded Model.js from: ${p}`);
-    break;
-  } catch (_e) {
-    // Try next path
-  }
-}
-
-let Model;
-if (modelSource) {
-  Model = new Function(
-    modelSource +
-    `; return {
-      SUPPORTED_SCHEMA, LEVEL_UNKNOWN,
-      NOISE_ANC, NOISE_AMBIENT, NOISE_WIND, NOISE_OFF, NOISE_UNKNOWN,
-      EQ_OFF, EQ_BRIGHT, EQ_EXCITED, EQ_MELLOW, EQ_RELAXED, EQ_VOCAL, EQ_TREBLE, EQ_BASS, EQ_SPEECH, EQ_CUSTOM,
-      defaultStatus, parseStatus,
-      noiseModeName, noiseModeIcon, eqPresetName, eqPresetButtonLabel,
-      batteryIcon, formatBattery, levelFraction, elideError
-    };`
-  )();
-} else {
-  console.log("[INFO] plugin/Model.js not found on disk; running against authoritative Model specification reference.");
-  Model = (() => {
-    var SUPPORTED_SCHEMA = 1;
-    var LEVEL_UNKNOWN = -1;
-
-    var NOISE_ANC = "anc";
-    var NOISE_AMBIENT = "ambient";
-    var NOISE_WIND = "wind";
-    var NOISE_OFF = "off";
-    var NOISE_UNKNOWN = "unknown";
-
-    var EQ_OFF = "off";
-    var EQ_BRIGHT = "bright";
-    var EQ_EXCITED = "excited";
-    var EQ_MELLOW = "mellow";
-    var EQ_RELAXED = "relaxed";
-    var EQ_VOCAL = "vocal";
-    var EQ_TREBLE = "treble";
-    var EQ_BASS = "bass";
-    var EQ_SPEECH = "speech";
-    var EQ_CUSTOM = "custom";
-
-    var MAX_ERROR_CHARS = 140;
-    var ELIDED_ERROR_CHARS = 137;
-
-    function defaultStatus() {
-      return {
-        ok: false,
-        lastError: "",
-        schemaVersion: 0,
-        schemaTooNew: false,
-        connected: false,
-        deviceName: "",
-        batteryLevel: LEVEL_UNKNOWN,
-        batteryCharging: false,
-        noiseMode: NOISE_UNKNOWN,
-        ambientSoundLevel: 0,
-        eqPreset: EQ_OFF,
-        eqCustomBands: [0, 0, 0, 0, 0],
-        clearBass: 0,
-        speakToChat: false,
-        dseeExtreme: false,
-        multipoint: false,
-        earDetection: true,
-        codec: ""
-      };
-    }
-
-    function clamp(val, min, max, def) {
-      var n = Number(val);
-      if (isNaN(n)) return def;
-      return Math.max(min, Math.min(max, Math.round(n)));
-    }
-
-    function parseStatus(raw) {
-      if (raw === null || raw === undefined) {
-        var res = defaultStatus();
-        res.lastError = "The sony status file is empty";
-        return res;
-      }
-      var text = String(raw).trim();
-      if (!text) {
-        var res = defaultStatus();
-        res.lastError = "The sony status file is empty";
-        return res;
-      }
-
-      var parsed;
-      try {
-        parsed = JSON.parse(text);
-      } catch (_e) {
-        var res = defaultStatus();
-        res.lastError = "Could not read the sony status file";
-        return res;
-      }
-
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        var res = defaultStatus();
-        res.lastError = "The sony status file is invalid";
-        return res;
-      }
-
-      if (parsed.schema_version === undefined || parsed.schema_version === null) {
-        var res = defaultStatus();
-        res.lastError = "The sony status file carried no schema_version";
-        return res;
-      }
-
-      var version = Number(parsed.schema_version);
-      if (isNaN(version) || version > SUPPORTED_SCHEMA) {
-        var res = defaultStatus();
-        res.schemaTooNew = true;
-        res.schemaVersion = isNaN(version) ? 0 : version;
-        res.lastError = "sony daemon speaks status schema " + version + ", this panel reads " + SUPPORTED_SCHEMA;
-        return res;
-      }
-
-      var res = defaultStatus();
-      res.ok = true;
-      res.schemaVersion = version;
-      res.connected = parsed.connected === true;
-
-      if (!res.connected) {
-        return res;
-      }
-
-      res.deviceName = String(parsed.device_name || "");
-
-      if (parsed.battery_level !== undefined && parsed.battery_level !== null) {
-        var bl = Number(parsed.battery_level);
-        if (!isNaN(bl) && bl >= 0) {
-          res.batteryLevel = Math.min(100, Math.round(bl));
-        } else {
-          res.batteryLevel = LEVEL_UNKNOWN;
-        }
-      }
-
-      res.batteryCharging = parsed.battery_charging === true || parsed.charging === true;
-
-      var validModes = [NOISE_ANC, NOISE_AMBIENT, NOISE_WIND, NOISE_OFF];
-      var nm = String(parsed.noise_mode || "").toLowerCase();
-      res.noiseMode = validModes.indexOf(nm) !== -1 ? nm : NOISE_UNKNOWN;
-
-      var rawAmbient = parsed.ambient_sound_level !== undefined ? parsed.ambient_sound_level : parsed.ambient_level;
-      res.ambientSoundLevel = clamp(rawAmbient, 0, 20, 0);
-
-      var validPresets = [EQ_OFF, EQ_BRIGHT, EQ_EXCITED, EQ_MELLOW, EQ_RELAXED, EQ_VOCAL, EQ_TREBLE, EQ_BASS, EQ_SPEECH, EQ_CUSTOM];
-      var ep = String(parsed.eq_preset || "").toLowerCase();
-      res.eqPreset = validPresets.indexOf(ep) !== -1 ? ep : EQ_OFF;
-
-      var rawBands = Array.isArray(parsed.eq_custom_bands) ? parsed.eq_custom_bands : (Array.isArray(parsed.eq_bands) ? parsed.eq_bands : []);
-      var bands = [];
-      for (var i = 0; i < 5; i++) {
-        var b = rawBands[i];
-        bands.push(clamp(b, -10, 10, 0));
-      }
-      res.eqCustomBands = bands;
-      res.clearBass = clamp(parsed.clear_bass, -10, 10, 0);
-
-      res.speakToChat = parsed.speak_to_chat === true;
-      res.dseeExtreme = parsed.dsee_extreme === true || parsed.dsee === true;
-      res.multipoint = parsed.multipoint === true;
-      res.earDetection = parsed.ear_detection !== undefined ? (parsed.ear_detection === true) : true;
-      res.codec = String(parsed.codec || "");
-
-      return res;
-    }
-
-    function noiseModeName(mode) {
-      switch (mode) {
-        case NOISE_ANC: return "Noise Cancelling";
-        case NOISE_AMBIENT: return "Ambient Sound";
-        case NOISE_WIND: return "Wind Noise Reduction";
-        case NOISE_OFF: return "Off";
-        default: return "Unknown";
-      }
-    }
-
-    function noiseModeIcon(mode) {
-      switch (mode) {
-        case NOISE_ANC: return "\uDB80\uDF4B";
-        case NOISE_AMBIENT: return "\uDB80\uDE26";
-        case NOISE_WIND: return "\uDB81\uDC9A";
-        case NOISE_OFF: return "\uDB80\uDF4C";
-        default: return "\uDB80\uDF4B";
-      }
-    }
-
-    function eqPresetName(preset) {
-      switch (preset) {
-        case EQ_OFF: return "Off";
-        case EQ_BRIGHT: return "Bright";
-        case EQ_EXCITED: return "Excited";
-        case EQ_MELLOW: return "Mellow";
-        case EQ_RELAXED: return "Relaxed";
-        case EQ_VOCAL: return "Vocal";
-        case EQ_TREBLE: return "Treble Boost";
-        case EQ_BASS: return "Bass Boost";
-        case EQ_SPEECH: return "Speech";
-        case EQ_CUSTOM: return "Custom";
-        default: return "Unknown";
-      }
-    }
-
-    function formatBattery(level) {
-      if (level === undefined || level === null || level < 0) return "—";
-      return Math.round(level) + "%";
-    }
-
-    function levelFraction(level) {
-      if (level === undefined || level === null || level < 0) return 0.0;
-      return Math.max(0.0, Math.min(1.0, level / 100.0));
-    }
-
-    function batteryIcon(level, charging) {
-      if (charging) return "\uDB80\uDC84";
-      if (level < 0) return "\uDB80\uDC83";
-      if (level >= 95) return "\uDB80\uDC79";
-      if (level >= 85) return "\uDB80\uDC82";
-      if (level >= 75) return "\uDB80\uDC81";
-      if (level >= 65) return "\uDB80\uDC80";
-      if (level >= 55) return "\uDB80\uDC7F";
-      if (level >= 45) return "\uDB80\uDC7E";
-      if (level >= 35) return "\uDB80\uDC7D";
-      if (level >= 25) return "\uDB80\uDC7C";
-      if (level >= 15) return "\uDB80\uDC7B";
-      return "\uDB80\uDC8E";
-    }
-
-    function elideError(text) {
-      if (!text) return "";
-      var cleaned = String(text).replace(/\s+/g, " ").trim();
-      if (cleaned.length > MAX_ERROR_CHARS) {
-        return cleaned.substring(0, ELIDED_ERROR_CHARS) + "…";
-      }
-      return cleaned;
-    }
-
-    function eqPresetButtonLabel(preset) {
-      switch (preset) {
-        case EQ_TREBLE: return "Treble";
-        case EQ_BASS: return "Bass";
-        default: return eqPresetName(preset);
-      }
-    }
-
-    return {
-      SUPPORTED_SCHEMA, LEVEL_UNKNOWN,
-      NOISE_ANC, NOISE_AMBIENT, NOISE_WIND, NOISE_OFF, NOISE_UNKNOWN,
-      EQ_OFF, EQ_BRIGHT, EQ_EXCITED, EQ_MELLOW, EQ_RELAXED, EQ_VOCAL, EQ_TREBLE, EQ_BASS, EQ_SPEECH, EQ_CUSTOM,
-      defaultStatus, parseStatus,
-      noiseModeName, noiseModeIcon, eqPresetName, eqPresetButtonLabel,
-      batteryIcon, formatBattery, levelFraction, elideError
-    };
-  })();
-}
+// Model.js is a QML JavaScript library: top-level `var` and `function`
+// declarations, no module syntax. Export every top-level name.
+const modelSource = readFileSync(repoFile("Model.js"));
+const names = [...modelSource.matchAll(/^(?:function|var)\s+([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]);
+const Model = new Function(modelSource + "\n; return { " + names.join(", ") + " };")();
 
 let passed = 0;
 let failed = 0;
@@ -303,79 +41,69 @@ function check(name, actual, expected) {
   }
 }
 
+function suite(title, fn) {
+  console.log(`\n[${title}]`);
+  fn();
+}
+
+const parse = (obj) => Model.parseStatus(JSON.stringify(obj));
+const full = () => Model.parseStatus(fixture("status_v2_full.json"));
+const ids = (sections) => sections.map((s) => s.id);
+
 console.log("=== Running Model.js Unit Tests ===");
 
-// Suite 1: Empty & Malformed Input Handling
-console.log("\n[Suite 1: Empty & Malformed Inputs]");
-{
+suite("Suite 1: Empty & Malformed Inputs", () => {
   const r1 = Model.parseStatus("");
   check("Empty string returns ok: false", r1.ok, false);
   check("Empty string has lastError", r1.lastError.includes("empty"), true);
-
-  const r2 = Model.parseStatus("   \n\t  ");
-  check("Whitespace string returns ok: false", r2.ok, false);
-
+  check("null input returns ok: false", Model.parseStatus(null).ok, false);
+  check("Whitespace string returns ok: false", Model.parseStatus("   \n\t  ").ok, false);
   const r3 = Model.parseStatus("invalid json {[[");
   check("Malformed JSON returns ok: false", r3.ok, false);
   check("Malformed JSON error message", r3.lastError.includes("Could not read"), true);
+  check("JSON null returns ok: false", Model.parseStatus("null").ok, false);
+  check("scalar number returns ok: false", Model.parseStatus("12345").ok, false);
+  check("array JSON returns ok: false", Model.parseStatus("[]").ok, false);
+  for (const f of ["status_empty.json", "status_whitespace.json", "status_corrupted.json", "status_non_object.json", "status_missing_schema.json"]) {
+    const r = Model.parseStatus(fixture(f));
+    check(`${f} is an error state`, [r.ok, r.connected, r.lastError !== ""], [false, false, true]);
+  }
+});
 
-  const r4 = Model.parseStatus("null");
-  check("null input returns ok: false", r4.ok, false);
-
-  const r5 = Model.parseStatus("12345");
-  check("scalar number returns ok: false", r5.ok, false);
-
-  const r6 = Model.parseStatus("[]");
-  check("array JSON returns ok: false", r6.ok, false);
-}
-
-// Suite 2: Schema Version Handling
-console.log("\n[Suite 2: Schema Version Handling]");
-{
-  const r1 = Model.parseStatus(JSON.stringify({ connected: true }));
+suite("Suite 2: Schema Version Handling", () => {
+  const r1 = parse({ connected: true });
   check("Missing schema_version returns ok: false", r1.ok, false);
   check("Missing schema_version error text", r1.lastError.includes("no schema_version"), true);
+  check("SUPPORTED_SCHEMA is 2", Model.SUPPORTED_SCHEMA, 2);
+  const r2 = parse({ schema_version: 1, connected: true });
+  check("Schema 1 accepted", [r2.ok, r2.schemaTooNew, r2.schemaVersion], [true, false, 1]);
+  const r3 = parse({ schema_version: 2, connected: true });
+  check("Schema 2 accepted", [r3.ok, r3.schemaTooNew, r3.schemaVersion], [true, false, 2]);
+  const r4 = parse({ schema_version: 3, connected: true, device_name: "x" });
+  check("Schema 3 is too new", [r4.ok, r4.schemaTooNew, r4.schemaVersion, r4.connected], [false, true, 3, false]);
+  check("Schema 3 message", r4.lastError, "sony daemon speaks status schema 3, this panel reads 2");
+  const r5 = parse({ schema_version: "two", connected: true });
+  check("Non-numeric schema is too new", [r5.ok, r5.schemaTooNew], [false, true]);
+  const r6 = Model.parseStatus(fixture("status_schema_too_new.json"));
+  check("Fixture schema 99 is too new", [r6.schemaTooNew, r6.schemaVersion], [true, 99]);
+  check("Too new: no controls", Model.controlState(r6, "noise_control", "anc"), "hidden");
+  check("Too new: hero meta", Model.heroMeta(r6), "Update needed");
+  check("Too new: empty state text", Model.emptyStateText(r6).includes("schema 99"), true);
+});
 
-  const r2 = Model.parseStatus(JSON.stringify({ schema_version: 1, connected: true }));
-  check("Schema version 1 returns ok: true", r2.ok, true);
-  check("Schema version 1 schemaTooNew is false", r2.schemaTooNew, false);
-
-  const r3 = Model.parseStatus(JSON.stringify({ schema_version: 2, connected: true }));
-  check("Schema version 2 returns ok: false", r3.ok, false);
-  check("Schema version 2 schemaTooNew is true", r3.schemaTooNew, true);
-
-  const r4 = Model.parseStatus(JSON.stringify({ schema_version: 99, connected: true }));
-  check("Schema version 99 schemaTooNew is true", r4.schemaTooNew, true);
-}
-
-// Suite 3: Full Payload & Field Parsing
-console.log("\n[Suite 3: Full Connected Payload]");
-{
-  const sample = {
-    schema_version: 1,
-    connected: true,
-    device_name: "WH-1000XM5",
-    battery_level: 78,
-    battery_charging: false,
-    noise_mode: "anc",
-    ambient_sound_level: 0,
-    eq_preset: "bright",
-    eq_custom_bands: [1, 2, 0, -1, 3],
-    clear_bass: 2,
-    speak_to_chat: true,
-    dsee_extreme: true,
-    multipoint: true,
-    codec: "LDAC",
-    ear_detection: true
-  };
-  const r = Model.parseStatus(JSON.stringify(sample));
-  check("Full payload ok: true", r.ok, true);
-  check("Connected flag", r.connected, true);
+suite("Suite 3: v1 Payload", () => {
+  const r = parse({
+    schema_version: 1, connected: true, device_name: "WH-1000XM5", battery_level: 78,
+    battery_charging: false, noise_mode: "anc", ambient_sound_level: 3, eq_preset: "bright",
+    eq_custom_bands: [1, 2, 0, -1, 3], clear_bass: 2, speak_to_chat: true, dsee_extreme: true,
+    multipoint: true, codec: "LDAC", ear_detection: true
+  });
+  check("ok and connected", [r.ok, r.connected], [true, true]);
   check("Device name", r.deviceName, "WH-1000XM5");
   check("Battery level", r.batteryLevel, 78);
   check("Battery charging", r.batteryCharging, false);
   check("Noise mode", r.noiseMode, "anc");
-  check("Ambient level", r.ambientSoundLevel, 0);
+  check("Ambient level", r.ambientSoundLevel, 3);
   check("EQ preset", r.eqPreset, "bright");
   check("EQ custom bands", r.eqCustomBands, [1, 2, 0, -1, 3]);
   check("Clear bass", r.clearBass, 2);
@@ -384,85 +112,463 @@ console.log("\n[Suite 3: Full Connected Payload]");
   check("Multipoint", r.multipoint, true);
   check("Codec", r.codec, "LDAC");
   check("Ear detection", r.earDetection, true);
-}
+  check("v1 supported table", r.supported, {
+    battery: true, noise_control: true, eq_preset: true, eq_custom: true, dsee: true,
+    speak_to_chat: true, voice_guidance: false, voice_guidance_volume: false, auto_power_off: false,
+    nc_amb_button: false, button_function: false, ear_detection: true, worn: false, volume: false,
+    connection_quality: false, codec: true, multipoint: true, devices: false, source_switch: false
+  });
+  check("v1 supported_source is null", r.supportedSource, null);
+  check("v1 volume control hidden", Model.controlState(r, "volume", r.volume), "hidden");
+  check("v1 footer mentions old daemon", Model.footerLines(r), ["Old daemon (status schema 1)"]);
 
-// Suite 4: Disconnected Payload
-console.log("\n[Suite 4: Disconnected State]");
-{
-  const r = Model.parseStatus(JSON.stringify({ schema_version: 1, connected: false }));
-  check("Disconnected ok: true", r.ok, true);
-  check("Connected is false", r.connected, false);
-  check("Battery level is unknown (-1)", r.batteryLevel, -1);
-  check("Noise mode is unknown", r.noiseMode, "unknown");
-}
+  const unknown = parse({ schema_version: 1, connected: true, battery_level: -1 });
+  check("v1 battery -1 is unknown", unknown.batteryLevel, -1);
+  check("v1 battery -1 control disabled", Model.controlState(unknown, "battery", unknown.batteryLevel), "disabled");
 
-// Suite 5: Boundaries & Clamping
-console.log("\n[Suite 5: Boundaries & Clamping]");
-{
-  const sample = {
-    schema_version: 1,
-    connected: true,
-    battery_level: 150,
-    ambient_sound_level: 99,
-    eq_custom_bands: [-20, 20, 0, 5, -8],
-    clear_bass: 15
-  };
-  const r = Model.parseStatus(JSON.stringify(sample));
+  const wind = Model.parseStatus(fixture("status_connected_wind.json"));
+  check("v1 wind mode kept", wind.noiseMode, "wind");
+  check("v1 wind name", Model.noiseModeName(wind.noiseMode), "Wind Noise Reduction");
+  check("v2 wind mode rejected", parse({ schema_version: 2, connected: true, supported: null, noise_mode: "wind" }).noiseMode, null);
+
+  const aliases = parse({ schema_version: 1, connected: true, charging: true, ambient_level: 7, eq_bands: [1, 1, 1, 1, 1], dsee: true });
+  check("Deprecated aliases read", [aliases.batteryCharging, aliases.ambientSoundLevel, aliases.eqCustomBands, aliases.dseeExtreme], [true, 7, [1, 1, 1, 1, 1], true]);
+
+  for (const f of ["status_connected_ambient.json", "status_connected_anc.json", "status_connected_charging.json",
+    "status_connected_custom_eq.json", "status_connected_low_battery.json", "status_connected_off.json"]) {
+    const s = Model.parseStatus(fixture(f));
+    check(`${f} parses as v1 connected`, [s.ok, s.connected, s.schemaVersion], [true, true, 1]);
+  }
+  const charging = Model.parseStatus(fixture("status_connected_charging.json"));
+  check("v1 charging fixture", [charging.batteryLevel, charging.batteryCharging, Model.isCharging(charging)], [92, true, true]);
+});
+
+suite("Suite 4: Disconnected State", () => {
+  for (const f of ["status_disconnected.json", "status_v2_disconnected.json"]) {
+    const r = Model.parseStatus(fixture(f));
+    check(`${f}: ok, not connected`, [r.ok, r.connected], [true, false]);
+    check(`${f}: battery unknown`, r.batteryLevel, -1);
+    check(`${f}: noise mode null`, r.noiseMode, null);
+    check(`${f}: every control hidden`, Model.FEATURE_KEYS.every((k) => Model.controlState(r, k, true) === "hidden"), true);
+    check(`${f}: no cursor targets`, Model.cursorSections(r, { sound: true }), []);
+    check(`${f}: bar text`, Model.barBatteryText(r), "—");
+    check(`${f}: tooltip`, Model.barTooltip(r), "Sony headphones: disconnected");
+    check(`${f}: hero meta`, Model.heroMeta(r), "Disconnected");
+  }
+  const v2 = Model.parseStatus(fixture("status_v2_disconnected.json"));
+  check("v2 disconnected last_updated", v2.lastUpdated, 1760438400);
+  check("Disconnected empty state text", Model.emptyStateText(v2).includes("Bluetooth"), true);
+});
+
+suite("Suite 5: Boundaries & Clamping", () => {
+  const r = parse({ schema_version: 1, connected: true, battery_level: 150, ambient_sound_level: 99, eq_custom_bands: [-20, 20, 0, 5, -8], clear_bass: 15 });
   check("Battery clamped to 100", r.batteryLevel, 100);
   check("Ambient level clamped to 20", r.ambientSoundLevel, 20);
   check("Custom bands clamped to [-10, 10]", r.eqCustomBands, [-10, 10, 0, 5, -8]);
   check("Clear bass clamped to 10", r.clearBass, 10);
-
-  const sample2 = {
-    schema_version: 1,
-    connected: true,
-    battery_level: -10,
-    ambient_sound_level: -5,
-    eq_custom_bands: [2, 3],
-    clear_bass: -25
-  };
-  const r2 = Model.parseStatus(JSON.stringify(sample2));
-  check("Negative battery clamped to -1", r2.batteryLevel, -1);
-  check("Negative ambient level clamped to 0", r2.ambientSoundLevel, 0);
-  check("Short EQ bands padded with 0 to 5 elements", r2.eqCustomBands, [2, 3, 0, 0, 0]);
+  const r2 = parse({ schema_version: 1, connected: true, battery_level: -10, ambient_sound_level: -5, eq_custom_bands: [2, 3], clear_bass: -25 });
+  check("Negative battery is unknown", r2.batteryLevel, -1);
+  check("Ambient level clamped to 1", r2.ambientSoundLevel, 1);
+  check("Short EQ bands padded with 0", r2.eqCustomBands, [2, 3, 0, 0, 0]);
   check("Clear bass clamped to -10", r2.clearBass, -10);
-}
+  const ex = Model.parseStatus(fixture("status_extreme_values.json"));
+  check("Extreme fixture: invalid enums become null", [ex.noiseMode, ex.eqPreset], [null, null]);
+  check("Extreme fixture: clamped numbers", [ex.batteryLevel, ex.ambientSoundLevel, ex.eqCustomBands, ex.clearBass], [100, 20, [-10, 10, 0, 5, -8], 10]);
+  const v2 = parse({ schema_version: 2, connected: true, supported: null, volume: 99, voice_guidance_volume: -9, codec: "opus", eq_preset: "UNKNOWN" });
+  check("Volume clamped to 30", v2.volume, 30);
+  check("Guidance volume clamped to -2", v2.voiceGuidanceVolume, -2);
+  check("Unknown codec becomes OTHER", v2.codec, "OTHER");
+  check("eq_preset unknown kept", v2.eqPreset, "unknown");
+  const bools = parse({ schema_version: 2, connected: true, supported: null, battery_level: true, dsee_extreme: "yes" });
+  check("Boolean battery is unknown", bools.batteryLevel, -1);
+  check("Non-boolean flag is null", bools.dseeExtreme, null);
+});
 
-// Suite 6: Display Formatters & Helpers
-console.log("\n[Suite 6: Display Formatters & Helpers]");
-{
+suite("Suite 6: v2 Full Fixture", () => {
+  const s = full();
+  check("ok, connected, schema 2", [s.ok, s.connected, s.schemaVersion], [true, true, 2]);
+  check("Identity", [s.deviceName, s.address, s.modelName, s.firmwareVersion], ["WH-1000XM5", "AC:80:0A:12:34:56", "WH-1000XM5", "2.3.1"]);
+  check("supported_source device", s.supportedSource, "device");
+  check("Every feature supported", Model.FEATURE_KEYS.every((k) => s.supported[k] === true), true);
+  check("Noise", [s.noiseMode, s.ambientSoundLevel, s.focusOnVoice], ["ambient", 14, true]);
+  check("EQ", [s.eqPreset, s.eqPresets.length, s.eqCustomBands, s.clearBass], ["custom", 10, [2, 1, -1, 3, 0], 4]);
+  check("Sound", [s.dseeExtreme, s.connectionQuality, s.codec, s.volume], [true, "sound", "LDAC", 12]);
+  check("Speak-to-Chat", [s.speakToChat, s.stcSensitivity, s.stcTimeout], [true, "auto", "standard"]);
+  check("Voice guidance", [s.voiceGuidance, s.voiceGuidanceVolume], [true, 0]);
+  check("Power", [s.autoPowerOff, s.autoPowerOffOptions.length], ["when_taken_off", 7]);
+  check("Buttons", [s.ncAmbButton, s.buttonFunction, s.buttonFunctions], ["nc_ambient_off", "ambient_sound_control", ["ambient_sound_control", "google_assistant", "amazon_alexa", "quick_access"]]);
+  check("Wearing", [s.earDetection, s.worn], [true, true]);
+  check("Multipoint", [s.multipoint, s.devices], [false, [{ address: "F0:1D:BC:AA:00:01", name: "laptop", connected: true, active: true }]]);
+  check("Every control enabled", [
+    ["noise_control", s.noiseMode], ["eq_preset", s.eqPreset], ["eq_custom", s.eqCustomBands], ["dsee", s.dseeExtreme],
+    ["speak_to_chat", s.speakToChat], ["voice_guidance", s.voiceGuidance], ["voice_guidance_volume", s.voiceGuidanceVolume],
+    ["auto_power_off", s.autoPowerOff], ["nc_amb_button", s.ncAmbButton], ["button_function", s.buttonFunction],
+    ["ear_detection", s.earDetection], ["volume", s.volume], ["connection_quality", s.connectionQuality],
+    ["multipoint", s.multipoint], ["devices", s.devices]
+  ].every(([k, v]) => Model.controlState(s, k, v) === "enabled"), true);
+  check("All sections visible", ["noise", "sound", "customEq", "speakToChat", "headset", "multipoint"].map((n) => Model.sectionVisible(s, n)), [true, true, true, true, true, true]);
+  check("Bar text", Model.barBatteryText(s), "80%");
+  check("Tooltip", Model.barTooltip(s), "WH-1000XM5\nAmbient Sound · LDAC\nBattery 80%");
+  check("Hero meta", Model.heroMeta(s), "Connected · LDAC · On head");
+  check("Footer", Model.footerLines(s), ["WH-1000XM5 · firmware 2.3.1 · AC:80:0A:12:34:56"]);
+  check("Not reading", Model.isReading(s), false);
+  check("Collapsed cursor sections", ids(Model.cursorSections(s, {})),
+    ["noise", "ambient", "focusVoice", "sound", "customEq", "speakToChatHeader", "headset", "multipointHeader"]);
+  check("Expanded cursor sections", ids(Model.cursorSections(s, { sound: true, customEq: true, speakToChat: true, headset: true, multipoint: true })),
+    ["noise", "ambient", "focusVoice", "sound", "eqPreset", "dsee", "connectionQuality", "customEq", "eqBands",
+      "speakToChatHeader", "speakToChat", "stcSensitivity", "stcTimeout", "headset", "volume", "voiceGuidance",
+      "voiceGuidanceVolume", "autoPowerOff", "ncAmbButton", "buttonFunction", "earDetection", "multipointHeader",
+      "multipoint", "devices"]);
+  const sec = Model.cursorSections(s, { sound: true, headset: true });
+  const byId = Object.fromEntries(sec.map((x) => [x.id, x]));
+  check("Noise preferred is current mode", byId.noise.preferred, 1);
+  check("EQ grid", [byId.eqPreset.kind, byId.eqPreset.count, byId.eqPreset.columns, byId.eqPreset.preferred], ["grid", 10, 5, 9]);
+  check("Auto power off grid preferred", [byId.autoPowerOff.count, byId.autoPowerOff.preferred], [7, 6]);
+  check("Button function grid", [byId.buttonFunction.count, byId.buttonFunction.preferred], [4, 0]);
+});
+
+suite("Suite 7: v2 Minimal Fixture", () => {
+  const s = Model.parseStatus(fixture("status_v2_minimal.json"));
+  check("Battery and charging", [s.batteryLevel, s.batteryCharging], [45, true]);
+  check("Noise enabled", Model.controlState(s, "noise_control", s.noiseMode), "enabled");
+  check("EQ hidden", Model.controlState(s, "eq_preset", s.eqPreset), "hidden");
+  check("Codec hidden", Model.controlState(s, "codec", s.codec), "hidden");
+  check("Only noise section", ["noise", "sound", "customEq", "speakToChat", "headset", "multipoint"].map((n) => Model.sectionVisible(s, n)), [true, false, false, false, false, false]);
+  check("Cursor sections", ids(Model.cursorSections(s, { sound: true, headset: true, multipoint: true })), ["noise", "ambient", "focusVoice"]);
+  check("Charging", Model.isCharging(s), true);
+  check("Tooltip without codec", Model.barTooltip(s), "WH-1000XM5\nNoise Cancelling\nBattery 45% (charging)");
+  check("Hero meta without codec", Model.heroMeta(s), "Connected");
+  check("Footer without firmware", Model.footerLines(s), ["WH-1000XM5 · AC:80:0A:12:34:56"]);
+  check("EQ command refused", Model.buildCommand("eqPreset", "bass", s), { error: "Not supported by this headset" });
+});
+
+suite("Suite 8: v2 Multipoint Fixture", () => {
+  const s = Model.parseStatus(fixture("status_v2_multipoint.json"));
+  check("Device name", s.deviceName, "My XM5");
+  check("Devices", s.devices.map((d) => [Model.deviceLabel(d), Model.deviceStateLabel(d)]),
+    [["laptop", "Connected"], ["Pixel 8", "Playing"], ["3C:22:FB:CC:00:03", "Not connected"]]);
+  check("Can switch to connected idle device", s.devices.map((d) => Model.canSwitchTo(s, d)), [true, false, false]);
+  check("Button function hidden", Model.controlState(s, "button_function", s.buttonFunction), "hidden");
+  check("Guidance volume hidden", Model.controlState(s, "voice_guidance_volume", s.voiceGuidanceVolume), "hidden");
+  check("Worn hidden", Model.heroMeta(s), "Connected · AAC");
+  const sec = Model.cursorSections(s, { multipoint: true, headset: true });
+  check("Headset targets", ids(sec).filter((i) => ["volume", "voiceGuidance", "voiceGuidanceVolume", "autoPowerOff", "ncAmbButton", "buttonFunction", "earDetection"].includes(i)),
+    ["volume", "voiceGuidance", "autoPowerOff", "ncAmbButton", "earDetection"]);
+  const devices = sec.find((x) => x.id === "devices");
+  check("Device rows", [devices.kind, devices.count], ["rows", 3]);
+  const cmd = Model.buildCommand("source", "f0:1d:bc:aa:00:01", s);
+  check("Source command normalizes address", cmd.args, ["source", "F0:1D:BC:AA:00:01"]);
+  check("Source optimistic devices", cmd.pending.devices.map((d) => d.active), [true, false, false]);
+  check("Source to disconnected device refused", Model.buildCommand("source", "3C:22:FB:CC:00:03", s), { error: "Device is not connected" });
+  check("Source to unknown device refused", Model.buildCommand("source", "00:00:00:00:00:00", s), { error: "Device is not connected" });
+  check("Source bad address refused", Model.buildCommand("source", "laptop", s), { error: "Invalid address" });
+  const twoActive = parse({ schema_version: 2, connected: true, supported: null, devices: [
+    { address: "aa:bb:cc:dd:ee:01", name: "a", connected: true, active: true },
+    { address: "AA:BB:CC:DD:EE:02", name: "b", connected: true, active: true },
+    { address: "AA:BB:CC:DD:EE:03", name: "c", connected: false, active: true },
+    { address: "bad", name: "d", connected: true, active: false }
+  ] });
+  check("At most one active, active implies connected, bad address dropped", twoActive.devices.map((d) => [d.address, d.active]),
+    [["AA:BB:CC:DD:EE:01", true], ["AA:BB:CC:DD:EE:02", false], ["AA:BB:CC:DD:EE:03", false]]);
+});
+
+suite("Suite 9: v2 Initializing Fixture", () => {
+  const s = Model.parseStatus(fixture("status_v2_initializing.json"));
+  check("Reading", Model.isReading(s), true);
+  check("supported null", [s.supported, s.supportedSource], [null, null]);
+  check("Every control disabled", Model.FEATURE_KEYS.every((k) => Model.controlState(s, k, "x") === "disabled"), true);
+  check("Every section visible", ["noise", "sound", "customEq", "speakToChat", "headset", "multipoint"].every((n) => Model.sectionVisible(s, n)), true);
+  check("Bar text unknown battery", Model.barBatteryText(s), "—");
+  check("Tooltip", Model.barTooltip(s), "WH-1000XM5\nReading headset settings…");
+  check("Hero meta", Model.heroMeta(s), "Reading settings");
+  check("Commands refused", Model.buildCommand("noise", "anc", s), { error: "Reading headset settings…" });
+  check("Cursor still lists headers", ids(Model.cursorSections(s, {})),
+    ["noise", "ambient", "focusVoice", "sound", "customEq", "speakToChatHeader", "headset", "multipointHeader"]);
+  const known = parse({ schema_version: 2, connected: true, supported: null, battery_level: 40, device_name: "x" });
+  check("Battery shown while reading", Model.barBatteryText(known), "40%");
+});
+
+suite("Suite 10: v2 Fallback Fixture", () => {
+  const s = Model.parseStatus(fixture("status_v2_fallback.json"));
+  check("supported_source fallback", s.supportedSource, "fallback");
+  check("Footer hint", Model.footerLines(s), ["WH-1000XM5 · firmware 2.3.1 · AC:80:0A:12:34:56", "Limited: headset did not report its features"]);
+  check("DSEE hidden", Model.controlState(s, "dsee", s.dseeExtreme), "hidden");
+  check("Codec hidden", Model.controlState(s, "codec", s.codec), "hidden");
+  check("Volume enabled", Model.controlState(s, "volume", s.volume), "enabled");
+  check("Guidance volume hidden", Model.controlState(s, "voice_guidance_volume", s.voiceGuidanceVolume), "hidden");
+  check("Multipoint section hidden", Model.sectionVisible(s, "multipoint"), false);
+  check("Sound section visible for EQ", Model.sectionVisible(s, "sound"), true);
+  check("eq_presets null uses v1 list", Model.eqPresetOptions(s), Model.EQ_PRESETS);
+  check("Preset accepted from v1 list", Model.buildCommand("eqPreset", "speech", s).args, ["eq", "speech"]);
+  check("user preset refused without list", Model.buildCommand("eqPreset", "user1", s), { error: "Not supported by this headset" });
+  check("Sound targets", ids(Model.cursorSections(s, { sound: true })).filter((i) => ["eqPreset", "dsee", "connectionQuality"].includes(i)), ["eqPreset"]);
+  check("Low battery tooltip", Model.barTooltip(s), "WH-1000XM5\nOff\nBattery 15%");
+});
+
+suite("Suite 11: supported false nulls its fields", () => {
+  const s = parse({ schema_version: 2, connected: true, supported: { battery: true, noise_control: false }, battery_level: 50, noise_mode: "anc", volume: 9 });
+  check("Noise mode nulled", s.noiseMode, null);
+  check("Volume nulled", s.volume, null);
+  check("Battery kept", s.batteryLevel, 50);
+  check("Missing supported keys read as false", s.supported.devices, false);
+  const noBattery = parse({ schema_version: 2, connected: true, supported: { battery: false }, battery_level: 50 });
+  check("Battery hidden: empty bar text", Model.barBatteryText(noBattery), "");
+  check("Battery hidden: no battery line", Model.barTooltip(noBattery), "WH-1000XM5");
+});
+
+suite("Suite 12: Command Building", () => {
+  const s = full();
+  const cmd = (a, v, st) => Model.buildCommand(a, v, st || s);
+  check("noise", cmd("noise", "anc"), { args: ["noise", "anc"], pending: { noiseMode: "anc" }, feature: "noise_control" });
+  check("noise wind refused", cmd("noise", "wind").error, "Not supported by this headset");
+  check("ambient-level sets ambient mode", cmd("ambientLevel", 5), { args: ["ambient-level", "5"], pending: { ambientSoundLevel: 5, noiseMode: "ambient" }, feature: "noise_control" });
+  check("ambient-level 0 refused", cmd("ambientLevel", 0).error, "Value out of range");
+  check("ambient-level 21 refused", cmd("ambientLevel", 21).error, "Value out of range");
+  check("ambient-level fraction refused", cmd("ambientLevel", 2.5).error, "Value out of range");
+  check("focus-voice", cmd("focusVoice", false).args, ["focus-voice", "off"]);
+  check("focus-voice non-bool refused", cmd("focusVoice", "on").error, "Invalid value");
+  check("eq preset", cmd("eqPreset", "bass").args, ["eq", "bass"]);
+  check("eq preset not in list", cmd("eqPreset", "user2").error, "Not supported by this headset");
+  check("eq custom", cmd("eqCustom", { bands: [1, 2, 3, 4, 5], clearBass: -3 }), {
+    args: ["eq", "custom", "1", "2", "3", "4", "5", "-3"],
+    pending: { eqPreset: "custom", eqCustomBands: [1, 2, 3, 4, 5], clearBass: -3 }, feature: "eq_custom"
+  });
+  check("eq custom out of range", cmd("eqCustom", { bands: [1, 2, 3, 4, 11], clearBass: 0 }).error, "Value out of range");
+  check("eq custom short", cmd("eqCustom", { bands: [1, 2], clearBass: 0 }).error, "Value out of range");
+  check("eq band replaces one value", cmd("eqBand", { index: 2, level: 7 }).args, ["eq", "custom", "2", "1", "7", "3", "0", "4"]);
+  check("eq band 5 is clear bass", cmd("eqBand", { index: 5, level: -10 }).args, ["eq", "custom", "2", "1", "-1", "3", "0", "-10"]);
+  check("eq band without values", cmd("eqBand", { index: 0, level: 1 }, Object.assign({}, s, { eqCustomBands: null })).error, "Custom EQ values are not known yet");
+  check("eq band bad index", cmd("eqBand", { index: 6, level: 1 }).error, "Value out of range");
+  check("dsee", cmd("dsee", false).args, ["dsee", "off"]);
+  check("connection-quality", cmd("connectionQuality", "connection").args, ["connection-quality", "connection"]);
+  check("connection-quality other refused", cmd("connectionQuality", "other").error, "Not supported by this headset");
+  check("volume", cmd("volume", 30).args, ["volume", "30"]);
+  check("volume 31 refused", cmd("volume", 31).error, "Value out of range");
+  check("speak-to-chat", cmd("speakToChat", true).args, ["speak-to-chat", "on"]);
+  check("stc sensitivity keeps timeout", cmd("stcSensitivity", "low"), { args: ["speak-to-chat-config", "low", "standard"], pending: { stcSensitivity: "low", stcTimeout: "standard" }, feature: "speak_to_chat" });
+  check("stc timeout keeps sensitivity", cmd("stcTimeout", "off").args, ["speak-to-chat-config", "auto", "off"]);
+  check("stc config needs other value", cmd("stcTimeout", "off", Object.assign({}, s, { stcSensitivity: null })).error, "Speak-to-Chat settings are not known yet");
+  check("stc bad value", cmd("stcSensitivity", "max").error, "Invalid value");
+  check("voice-guidance", cmd("voiceGuidance", false).args, ["voice-guidance", "off"]);
+  check("voice-guidance-volume", cmd("voiceGuidanceVolume", -2).args, ["voice-guidance-volume", "-2"]);
+  check("voice-guidance-volume 3 refused", cmd("voiceGuidanceVolume", 3).error, "Value out of range");
+  check("auto-power-off", cmd("autoPowerOff", "60min").args, ["auto-power-off", "60min"]);
+  check("auto-power-off not in list", cmd("autoPowerOff", "when_taken_off", Object.assign({}, s, { autoPowerOffOptions: ["off", "5min"] })).error, "Not supported by this headset");
+  check("nc-amb-button", cmd("ncAmbButton", "nc_off").args, ["nc-amb-button", "nc_off"]);
+  check("button-function", cmd("buttonFunction", "quick_access").args, ["button-function", "quick_access"]);
+  check("button-function not in list", cmd("buttonFunction", "voice_recognition").error, "Not supported by this headset");
+  check("ear-detect", cmd("earDetection", false).args, ["ear-detect", "off"]);
+  check("multipoint", cmd("multipoint", true).args, ["multipoint", "on"]);
+  check("unknown action", cmd("bogus", 1).error, "Unknown action bogus");
+  check("disconnected refused", cmd("noise", "anc", Model.parseStatus(fixture("status_v2_disconnected.json"))).error, "Headset not connected");
+  check("error state refused", cmd("noise", "anc", Model.parseStatus("")).error, "No headset status");
+  const noDsee = Object.assign({}, s, { supported: Object.assign({}, s.supported, { dsee: false }) });
+  check("unsupported before value check", cmd("dsee", "maybe", noDsee).error, "Not supported by this headset");
+});
+
+suite("Suite 13: Option Lists", () => {
+  const s = full();
+  check("auto power off list from status", Model.autoPowerOffOptions(s), ["off", "5min", "15min", "30min", "60min", "180min", "when_taken_off"]);
+  check("auto power off without list", Model.autoPowerOffOptions(Object.assign({}, s, { autoPowerOffOptions: null, autoPowerOff: "30min" })), ["off", "5min", "15min", "30min", "60min", "180min"]);
+  check("auto power off without list keeps current when_taken_off", Model.autoPowerOffOptions(Object.assign({}, s, { autoPowerOffOptions: null })).includes("when_taken_off"), true);
+  check("button functions without list", Model.buttonFunctionOptions(Object.assign({}, s, { buttonFunctions: null })), Model.BUTTON_FUNCTION_VALUES);
+  check("eq presets with user presets", Model.eqPresetOptions(parse({ schema_version: 2, connected: true, supported: null, eq_presets: ["off", "user1", "unknown", "OFF"] })), ["off", "user1"]);
+  check("empty eq presets list uses v1 list", Model.eqPresetOptions({ eqPresets: [] }), Model.EQ_PRESETS);
+});
+
+suite("Suite 14: Optimistic Values", () => {
+  const s = full();
+  let pending = {};
+  pending = Model.addPending(pending, { noiseMode: "anc" }, 1);
+  pending = Model.addPending(pending, { volume: 20 }, 2);
+  check("hasPending", Model.hasPending(pending), true);
+  const eff = Model.applyPending(s, pending);
+  check("applyPending overrides", [eff.noiseMode, eff.volume, eff.dseeExtreme], ["anc", 20, true]);
+  check("applyPending does not mutate", s.noiseMode, "ambient");
+  check("applyPending without pending returns same object", Model.applyPending(s, {}) === s, true);
+  check("dropPending by id", Object.keys(Model.dropPending(pending, 1)), ["volume"]);
+  const confirmed = Object.assign({}, s, { noiseMode: "anc" });
+  check("reconcile drops confirmed", Object.keys(Model.reconcilePending(pending, confirmed)), ["volume"]);
+  check("reconcile keeps object when nothing matches", Model.reconcilePending(pending, s) === pending, true);
+  const disc = Model.parseStatus(fixture("status_v2_disconnected.json"));
+  check("reconcile keeps pending while disconnected", Model.reconcilePending(pending, disc) === pending, true);
+  check("applyPending ignores disconnected", Model.applyPending(disc, pending) === disc, true);
+  const bands = Model.addPending({}, { eqCustomBands: [1, 2, 3, 4, 5] }, 3);
+  check("reconcile compares arrays by value", Model.hasPending(Model.reconcilePending(bands, Object.assign({}, s, { eqCustomBands: [1, 2, 3, 4, 5] }))), false);
+  check("newer id owns the field", Model.dropPending(Model.addPending(pending, { noiseMode: "off" }, 4), 1).noiseMode.value, "off");
+});
+
+suite("Suite 15: Command Queue", () => {
+  let r = Model.enqueueCommand([], { args: ["volume", "10"], id: 1 });
+  r = Model.enqueueCommand(r.queue, { args: ["noise", "anc"], id: 2 });
+  check("Append distinct verbs", r.queue.map((i) => i.id), [1, 2]);
+  r = Model.enqueueCommand(r.queue, { args: ["volume", "12"], id: 3 });
+  check("Same verb replaced and moved to end", r.queue.map((i) => i.id), [2, 3]);
+  check("Dropped ids reported", r.dropped, [1]);
+  r = Model.enqueueCommand(r.queue, { args: ["ambient-level", "5"], id: 4 });
+  r = Model.enqueueCommand(r.queue, { args: ["noise", "off"], id: 5 });
+  check("Last intent wins across noise and ambient-level", r.queue.map((i) => i.args.join(" ")), ["volume 12", "ambient-level 5", "noise off"]);
+});
+
+suite("Suite 16: Command Error Text", () => {
+  check("Exit 2", Model.commandErrorText(2, "Error: Cannot connect to daemon socket (x)", ""), "Daemon not running (sony-ctl could not connect)");
+  check("Daemon ERR", Model.commandErrorText(1, "Error from daemon: ERR unsupported dsee\n", ""), "ERR unsupported dsee");
+  check("CLI error", Model.commandErrorText(1, "Error: 'volume' requires an integer", ""), "'volume' requires an integer");
+  check("Empty output", Model.commandErrorText(1, "", ""), "sony-ctl failed (exit 1)");
+  check("Did not start", Model.commandErrorText(127, "", ""), "sony-ctl did not start (is ~/.local/bin/sony-ctl installed?)");
+  check("Long error elided", Model.commandErrorText(1, "Error: " + "a".repeat(300), "").length, 138);
+});
+
+suite("Suite 17: Cursor Movement", () => {
+  const sections = [
+    { id: "noise", kind: "walk", count: 3, preferred: 1 },
+    { id: "ambient", kind: "adjust", count: 1 },
+    { id: "sound", kind: "collapse", count: 1 },
+    { id: "eqPreset", kind: "grid", count: 12, columns: 5, preferred: -1 },
+    { id: "eqBands", kind: "rows", count: 6 },
+    { id: "dsee", kind: "single", count: 1 }
+  ];
+  const mv = (section, index, dx, dy) => Model.cursorMove({ section, index }, dx, dy, sections);
+  check("Clamp unknown section to first", Model.cursorClamp({ section: "x", index: 0 }, sections), { section: "noise", index: 1 });
+  check("Clamp empty list", Model.cursorClamp(null, []), { section: "", index: 0 });
+  check("Walk right", mv("noise", 1, 1, 0), { section: "noise", index: 2, action: null });
+  check("Walk stops at end", mv("noise", 2, 1, 0).index, 2);
+  check("Down enters adjust", mv("noise", 0, 0, 1), { section: "ambient", index: 0, action: null });
+  check("Adjust emits delta", mv("ambient", 0, -1, 0).action, { type: "adjust", delta: -1 });
+  check("Collapse l expands", mv("sound", 0, 1, 0).action, { type: "expand", value: true });
+  check("Collapse h collapses", mv("sound", 0, -1, 0).action, { type: "expand", value: false });
+  check("Enter grid from above lands at 0", mv("sound", 0, 0, 1), { section: "eqPreset", index: 0, action: null });
+  check("Grid down moves by columns", mv("eqPreset", 1, 0, 1).index, 6);
+  check("Grid down into short last row clamps", mv("eqPreset", 8, 0, 1), { section: "eqPreset", index: 11, action: null });
+  check("Grid down from last row leaves", mv("eqPreset", 11, 0, 1), { section: "eqBands", index: 0, action: null });
+  check("Grid up from first row leaves", mv("eqPreset", 3, 0, -1).section, "sound");
+  check("Enter grid from below lands on last row start", mv("eqBands", 0, 0, -1), { section: "eqPreset", index: 10, action: null });
+  check("Rows walk", mv("eqBands", 2, 0, 1).index, 3);
+  check("Rows adjust", mv("eqBands", 2, 1, 0), { section: "eqBands", index: 2, action: { type: "adjust", delta: 1 } });
+  check("Rows leave at end", mv("eqBands", 5, 0, 1).section, "dsee");
+  check("Enter rows from below lands on last", mv("dsee", 0, 0, -1), { section: "eqBands", index: 5, action: null });
+  check("Stop at bottom", mv("dsee", 0, 0, 1).section, "dsee");
+  check("Stop at top", mv("noise", 1, 0, -1).section, "noise");
+  check("Single ignores h/l", mv("dsee", 0, 1, 0).action, null);
+});
+
+suite("Suite 18: Keyboard Adjust Values", () => {
+  const s = full();
+  check("Ambient up", Model.adjustedValue(s, "ambient", 0, 1), 15);
+  check("Ambient at max stays null", Model.adjustedValue(Object.assign({}, s, { ambientSoundLevel: 20 }), "ambient", 0, 1), null);
+  check("Ambient unknown", Model.adjustedValue(Object.assign({}, s, { ambientSoundLevel: null }), "ambient", 0, 1), null);
+  check("Volume down", Model.adjustedValue(s, "volume", 0, -1), 11);
+  check("Guidance volume up", Model.adjustedValue(s, "voiceGuidanceVolume", 0, 1), 1);
+  check("EQ band up", Model.adjustedValue(s, "eqBands", 3, 1), { index: 3, level: 4 });
+  check("Clear Bass down", Model.adjustedValue(s, "eqBands", 5, -1), { index: 5, level: 3 });
+  check("Unknown id", Model.adjustedValue(s, "noise", 0, 1), null);
+});
+
+suite("Suite 19: Display Formatters & Helpers", () => {
   check("noiseModeName(anc)", Model.noiseModeName("anc"), "Noise Cancelling");
   check("noiseModeName(ambient)", Model.noiseModeName("ambient"), "Ambient Sound");
-  check("noiseModeName(wind)", Model.noiseModeName("wind"), "Wind Noise Reduction");
   check("noiseModeName(off)", Model.noiseModeName("off"), "Off");
-  check("noiseModeName(invalid)", Model.noiseModeName("xyz"), "Unknown");
-
-  check("eqPresetName(bright)", Model.eqPresetName("bright"), "Bright");
-  check("eqPresetName(vocal)", Model.eqPresetName("vocal"), "Vocal");
+  check("noiseModeName(null)", Model.noiseModeName(null), "Unknown");
+  check("noiseModeLabel", Model.NOISE_MODES.map(Model.noiseModeLabel), ["ANC", "Ambient", "Off"]);
   check("eqPresetName(treble)", Model.eqPresetName("treble"), "Treble Boost");
-  check("eqPresetName(bass)", Model.eqPresetName("bass"), "Bass Boost");
-  check("eqPresetName(custom)", Model.eqPresetName("custom"), "Custom");
-
-  check("eqPresetButtonLabel(treble)", Model.eqPresetButtonLabel("treble"), "Treble");
+  check("eqPresetName(user3)", Model.eqPresetName("user3"), "User 3");
+  check("eqPresetName(unknown)", Model.eqPresetName("unknown"), "Unknown");
   check("eqPresetButtonLabel(bass)", Model.eqPresetButtonLabel("bass"), "Bass");
-  check("eqPresetButtonLabel(vocal)", Model.eqPresetButtonLabel("vocal"), "Vocal");
-
+  check("connectionQualityLabel", ["sound", "connection", "other"].map(Model.connectionQualityLabel), ["Sound quality", "Stable connection", "Other"]);
+  check("codecLabel", ["LDAC", "APTX_HD", "NONE", "OTHER", null].map(Model.codecLabel), ["LDAC", "aptX HD", "No stream", "Other", "Unknown"]);
+  check("stc labels", [Model.stcSensitivityLabel("auto"), Model.stcTimeoutLabel("long")], ["Auto", "Long"]);
+  check("autoPowerOffLabel", Model.AUTO_POWER_OFF_VALUES.map(Model.autoPowerOffLabel), ["Off", "5 min", "15 min", "30 min", "1 h", "3 h", "Taken off"]);
+  check("ncAmbButtonLabel", Model.NC_AMB_BUTTON_OPTIONS.map(Model.ncAmbButtonLabel), ["NC·AMB·Off", "NC·AMB", "NC·Off", "AMB·Off"]);
+  check("buttonFunctionLabel", Model.buttonFunctionLabel("quick_access"), "Quick access");
+  check("formatSigned", [3, 0, -2, null].map(Model.formatSigned), ["+3", "0", "-2", "—"]);
+  check("onOffLabel", [true, false, null].map(Model.onOffLabel), ["On", "Off", "Unknown"]);
+  check("eqBandsSummary", Model.eqBandsSummary(full()), "+2 +1 -1 +3 0");
   check("formatBattery(78)", Model.formatBattery(78), "78%");
-  check("formatBattery(0)", Model.formatBattery(0), "0%");
   check("formatBattery(-1)", Model.formatBattery(-1), "—");
-
   check("levelFraction(78)", Model.levelFraction(78), 0.78);
-  check("levelFraction(100)", Model.levelFraction(100), 1.0);
   check("levelFraction(-1)", Model.levelFraction(-1), 0.0);
-
   check("batteryIcon charging", typeof Model.batteryIcon(50, true), "string");
-  check("batteryIcon normal", typeof Model.batteryIcon(50, false), "string");
-
-  const longErr = "Error: " + "a".repeat(200);
-  const elided = Model.elideError(longErr);
+  check("batteryIcon unknown", Model.batteryIcon(null, false), Model.batteryIcon(-1, false));
+  check("cycleNoiseMode", ["anc", "ambient", "off", "wind", null].map(Model.cycleNoiseMode), ["ambient", "off", "anc", "anc", "anc"]);
+  const elided = Model.elideError("Error: " + "a".repeat(200));
   check("elideError length <= 140", elided.length <= 140, true);
   check("elideError ends with ellipsis", elided.endsWith("…"), true);
-}
+  check("deviceTitle fallback", Model.deviceTitle(Model.defaultStatus()), "WH-1000XM5");
+  check("Error state tooltip", Model.barTooltip(Model.parseStatus("")), "Sony headphones: The sony status file is empty");
+  check("Error state hero meta", Model.heroMeta(Model.parseStatus("")), "No status");
+});
+
+suite("Suite 20: Schema Version Values", () => {
+  for (const bad of ["", "  ", [], {}, "abc", "1.5", "-1", 0, -1, 1.5, true, false]) {
+    const r = Model.parseStatus(JSON.stringify({ schema_version: bad, connected: true }));
+    check(`schema_version ${JSON.stringify(bad)} is too new`, [r.ok, r.schemaTooNew, r.schemaVersion], [false, true, 0]);
+  }
+  check("schema_version 3 keeps its number", parse({ schema_version: 3 }).schemaVersion, 3);
+  check("numeric string \"2\" accepted", parse({ schema_version: "2", connected: false }).schemaVersion, 2);
+  check("numeric string \" 1 \" accepted", parse({ schema_version: " 1 ", connected: false }).schemaVersion, 1);
+  check("schemaVersionOf", [1, 2, "7", "x", 2.5, 0].map(Model.schemaVersionOf), [1, 2, 7, null, null, null]);
+  check("Empty-string message", parse({ schema_version: "", connected: true }).lastError, "sony daemon speaks status schema \"\", this panel reads 2");
+  check("Unknown schema empty state text", Model.emptyStateText(parse({ schema_version: [] })).includes("an unknown status schema"), true);
+});
+
+suite("Suite 21: Custom EQ Chip", () => {
+  const s = full();
+  check("Custom chip with known values sends the full form", Model.buildCommand("eqPreset", "custom", s), {
+    args: ["eq", "custom", "2", "1", "-1", "3", "0", "4"],
+    pending: { eqPreset: "custom", eqCustomBands: [2, 1, -1, 3, 0], clearBass: 4 }, feature: "eq_preset"
+  });
+  check("Custom chip without bands sends the bare form", Model.buildCommand("eqPreset", "custom", Object.assign({}, s, { eqCustomBands: null })).args, ["eq", "custom"]);
+  check("Custom chip without Clear Bass sends the bare form", Model.buildCommand("eqPreset", "custom", Object.assign({}, s, { clearBass: null })).args, ["eq", "custom"]);
+  const noCustom = Object.assign({}, s, { supported: Object.assign({}, s.supported, { eq_custom: false }) });
+  check("Custom chip without eq_custom sends the bare form", Model.buildCommand("eqPreset", "custom", noCustom).args, ["eq", "custom"]);
+  check("Custom chip refused when not in eq_presets", Model.buildCommand("eqPreset", "custom", Object.assign({}, s, { eqPresets: ["off", "bass"] })).error, "Not supported by this headset");
+});
+
+suite("Suite 22: Schema 1 Daemon Verbs", () => {
+  const v1 = Model.parseStatus(fixture("status_connected_custom_eq.json"));
+  const err = "Needs a newer sony-headphones daemon";
+  check("v1 noise", Model.buildCommand("noise", "off", v1).args, ["noise", "off"]);
+  check("v1 ambient-level", Model.buildCommand("ambientLevel", 5, v1).args, ["ambient-level", "5"]);
+  check("v1 eq preset", Model.buildCommand("eqPreset", "bright", v1).args, ["eq", "bright"]);
+  check("v1 eq band uses the full form", Model.buildCommand("eqBand", { index: 0, level: 1 }, v1).args.length, 8);
+  check("v1 custom chip with values uses the full form", Model.buildCommand("eqPreset", "custom", v1).args.length, 8);
+  check("v1 bare eq custom refused", Model.buildCommand("eqPreset", "custom", Object.assign({}, v1, { eqCustomBands: null })).error, err);
+  check("v1 dsee / speak-to-chat / multipoint / ear-detect",
+    ["dsee", "speakToChat", "multipoint", "earDetection"].map((a) => Model.buildCommand(a, true, v1).args[0]),
+    ["dsee", "speak-to-chat", "multipoint", "ear-detect"]);
+  check("v1 focus-voice refused", Model.buildCommand("focusVoice", true, Object.assign({}, v1, { focusOnVoice: false })).error, err);
+  check("v1 speak-to-chat-config refused", Model.buildCommand("stcTimeout", "off", Object.assign({}, v1, { stcSensitivity: "auto", stcTimeout: "short" })).error, err);
+  check("v1 user preset refused", Model.buildCommand("eqPreset", "user1", Object.assign({}, v1, { eqPresets: ["off", "user1"] })).error, err);
+  check("isV1Command", [["noise", "anc"], ["eq", "custom"], ["eq", "user2"], ["volume", "3"], ["source", "AA:BB:CC:DD:EE:FF"]].map(Model.isV1Command), [true, false, false, false, false]);
+  check("v1 hides v2-only targets", ["focusVoice", "stcSensitivity", "stcTimeout"].map((id) => Model.targetState(v1, id)), ["hidden", "hidden", "hidden"]);
+  check("v1 cursor sections", ids(Model.cursorSections(v1, { speakToChat: true })).filter((i) => ["focusVoice", "speakToChat", "stcSensitivity", "stcTimeout"].includes(i)), ["speakToChat"]);
+  check("v2 keeps them", ["focusVoice", "stcSensitivity", "stcTimeout"].map((id) => Model.targetState(full(), id)), ["enabled", "enabled", "enabled"]);
+});
+
+suite("Suite 23: Target Table", () => {
+  const s = full();
+  check("Every ordered target is in the table", Model.TARGET_ORDER.every((id) => !!Model.TARGETS[id]), true);
+  check("Every table target is ordered", Object.keys(Model.TARGETS).every((id) => Model.TARGET_ORDER.includes(id)), true);
+  check("Every action is known to buildCommand", Object.values(Model.TARGETS).filter((t) => t.action).every((t) => Model.buildCommand(t.action, undefined, s).error !== "Unknown action " + t.action), true);
+  check("Choices with labels", Model.targetChoices(s, "ncAmbButton")[1], { value: "nc_ambient", label: "NC·AMB", tooltip: "Noise Cancelling → Ambient Sound" });
+  check("Choices without tooltips", Model.targetChoices(s, "noise").map((c) => c.label + "|" + c.tooltip), ["ANC|", "Ambient|", "Off|"]);
+  check("Header activation", Model.targetActivation(s, "speakToChatHeader", 0), { expand: "speakToChat" });
+  check("Toggle activation flips", Model.targetActivation(s, "dsee", 0), { action: "dsee", value: false });
+  check("Chip activation", Model.targetActivation(s, "autoPowerOff", 2), { action: "autoPowerOff", value: "15min" });
+  check("Chip activation out of range", Model.targetActivation(s, "autoPowerOff", 99), null);
+  const mp = Model.parseStatus(fixture("status_v2_multipoint.json"));
+  check("Device activation switches source", Model.targetActivation(mp, "devices", 0), { action: "source", value: "F0:1D:BC:AA:00:01" });
+  check("Active device activation does nothing", Model.targetActivation(mp, "devices", 1), null);
+  check("Disabled target activation does nothing", Model.targetActivation(Object.assign({}, s, { dseeExtreme: null }), "dsee", 0), null);
+  check("Unknown target", [Model.targetActivation(s, "bogus", 0), Model.targetState(s, "bogus")], [null, "hidden"]);
+  check("Adjustment", Model.targetAdjustment(s, "volume", 0, 1), { action: "volume", value: 13 });
+  check("Band adjustment", Model.targetAdjustment(s, "eqBands", 5, -1), { action: "eqBand", value: { index: 5, level: 3 } });
+  check("Adjustment on a disabled target", Model.targetAdjustment(Object.assign({}, s, { clearBass: null }), "eqBands", 0, 1), null);
+  check("Missing extra value disables", Model.targetState(Object.assign({}, s, { stcTimeout: null }), "stcSensitivity"), "disabled");
+  const init = Model.parseStatus(fixture("status_v2_initializing.json"));
+  check("Initializing: targets disabled, headers enabled", [Model.targetState(init, "dsee"), Model.targetState(init, "sound")], ["disabled", "enabled"]);
+  check("Minimal: headers hidden", Model.targetState(Model.parseStatus(fixture("status_v2_minimal.json")), "headset"), "hidden");
+});
 
 console.log(`\nSummary: ${passed} passed, ${failed} failed`);
 if (failed > 0) {
