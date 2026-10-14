@@ -1267,8 +1267,8 @@ No source describes a confirmation alert for this slot.
    `02` (unknown)? The contract writes the reported values; the UI rule
    for the bar battery depends on the answer. Partly answered by 9.11: an
    earbud that is out of the ear (log line `"rUnitRemove"`, worn code `03`)
-   read level `00` with charging status `00`, not `02`. Where that earbud
-   was (case or table) is not recorded.
+   read level `00` with charging status `00`, not `02`. That earbud was
+   out of the ear and not in the case. The closed-case case is still open.
 2. Does `23 0A` (case) answer while both earbuds are out of the case and
    the lid is closed, and is the value then stale?
 3. What do `E1 05` and `E3 05 V1 V2` (9.5) return with LE audio on and off,
@@ -1300,3 +1300,12 @@ read requests only. The left earbud was in the ear, the right one was not.
 The corrected assignable layout (9.3) parsed the capability; the touch
 function of both earbuds read `20` (playback control). Every request got
 its ACK.
+
+The right earbud was out of the ear and not in the case, and it read level
+`00` with status `00`. The daemon therefore reads level `00` with status
+`00` as "level unknown" and writes `battery_right: null`
+(backend-contract.md 3.3); the charging status is written as reported.
+
+The daemon finds connected headsets by polling BlueZ: every 2 s it runs a
+blocking `GetManagedObjects` on the system bus (backend-contract.md 7,
+"Known limitation").

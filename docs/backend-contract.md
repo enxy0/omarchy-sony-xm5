@@ -99,10 +99,16 @@ one". A device with no name and the Sony service is used only through
 3. When BlueZ reports the device as disconnected, or the RFCOMM link fails,
    the daemon closes the session and removes the entry from `headsets[]`.
    Requests queued for that headset fail with `ERR not connected`.
-4. While a session is closed, the daemon does not retry on its own; it
-   waits for the next BlueZ connect signal. Exception: after `multipoint`
-   and `connection-quality` the headset drops the link and reconnects by
-   itself; that is the same path (a new session, a new entry).
+4. The daemon never starts a Bluetooth connection. While BlueZ still
+   reports the headset as connected, it reopens only the RFCOMM link: up
+   to 6 attempts in a row with a short backoff (2 to 10 s), then one
+   attempt every 60 s. An attempt fails when the RFCOMM link does not open
+   or the protocol handshake does not answer; only an answered handshake
+   resets the count. When BlueZ reports the headset as disconnected, the
+   daemon stops retrying and waits for the next BlueZ connect. After
+   `multipoint` and `connection-quality` the headset drops the link and
+   reconnects by itself; that is the same path (a new session, a new
+   entry).
 
 A headset is either in `headsets[]` (handshake answered) or absent. There is
 no "connecting" entry.
@@ -233,6 +239,12 @@ An option list (`eq_presets`, `button_functions`, `*_options`) is never
 All six are new. A charging flag is `true` for "charging" and for "charged,
 still in the case or on the cable", `false` for "not charging", and `null`
 for "unknown" or not read.
+
+An earbud that reports level 0 with "not charging" is switched off or out
+of range, not empty (protocol.md 9.11): the daemon writes its
+`battery_left` / `battery_right` as `null` and keeps its charging flag
+(`false`). The bar battery then shows the other earbud. A level 0 with any
+other charging status, and a case level 0, are written as 0.
 
 | Key | Type | Allowed values | Feature key | Notes |
 |---|---|---|---|---|
@@ -708,6 +720,11 @@ Rules for schema version 3:
 - `sony-ctl [--headset <id>] probe` prints the identity, the support
   function lists and the last 64 frames of one headset. Attach its output to
   bug reports about missing features.
+
+Known limitation: the daemon learns BlueZ connection changes by polling,
+not by D-Bus signals. Every 2 s it runs one blocking `GetManagedObjects`
+call (2 s timeout) on the system bus, so a headset can take up to about
+2 s to appear in or leave `headsets[]`.
 
 The rename of the repository and the plugin id is planned separately in
 [`rename-plan.md`](rename-plan.md); it does not change this contract.
