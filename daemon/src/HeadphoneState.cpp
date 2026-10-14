@@ -1,4 +1,5 @@
 #include "HeadphoneState.hpp"
+#include "Commands.hpp"
 #include "Json.hpp"
 
 #include <algorithm>
@@ -247,7 +248,7 @@ bool applyT1(std::span<const uint8_t> p, HeadphoneState& s, InboundEvents& ev) {
         if (type != 0x20) return false;
         uint8_t volume = r.u8();
         if (!r.ok()) return false;
-        s.volume = volume;
+        if (volume <= 30) s.volume = volume; else s.volume.reset();
         return true;
     }
     case 0xC9: { // LOG_NTFY_PARAM
@@ -388,11 +389,14 @@ bool applyT2(std::span<const uint8_t> p, HeadphoneState& s, InboundEvents& ev) {
         std::vector<PairedDevice> devices;
         for (uint8_t i = 0; i < n && r.ok(); ++i) {
             PairedDevice d;
-            d.address = normalizeAddress(r.bytesAsString(17));
+            auto address = cmd::normalizeAddress(r.bytesAsString(17));
             d.connectionStatus = r.u8();
             if (type == 0x02) r.skip(3);
             d.name = r.prefixedString();
-            if (r.ok()) devices.push_back(std::move(d));
+            if (r.ok() && address) {
+                d.address = *address;
+                devices.push_back(std::move(d));
+            }
         }
         uint8_t playback = r.u8();
         if (!r.ok()) return false;
@@ -524,6 +528,7 @@ std::optional<std::vector<std::string>> HeadphoneState::eqPresetNames() const {
         if (name == "unknown") continue;
         if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
     }
+    if (names.empty()) return std::nullopt;
     return names;
 }
 
@@ -548,6 +553,7 @@ std::optional<std::vector<std::string>> HeadphoneState::buttonFunctionOptions() 
         if (name == "other") continue;
         if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
     }
+    if (names.empty()) return std::nullopt;
     return names;
 }
 

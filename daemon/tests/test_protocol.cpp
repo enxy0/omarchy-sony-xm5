@@ -649,6 +649,41 @@ TEST(UnsupportedFeaturesAreNullEvenWhenKnown) {
     CHECK(!j["supported"]["dsee"].boolean);
 }
 
+TEST(EmptyOptionListsAreNull) {
+    HeadphoneState s = withSupport({0x50, 0xF3});
+    s.connected = true;
+    s.eqCapability = EqCapability{6, 21, {{0x77, "New"}}};
+    s.assignableCapability = AssignableCapability{0x03, {{0x04, 0x01, 0x00, {0x99}}}};
+    s.supported = deriveSupported(s);
+    CHECK(!s.eqPresetNames().has_value());
+    CHECK(!s.buttonFunctionOptions().has_value());
+    Json j = parsed(statusJson(s, 1));
+    CHECK(j["eq_presets"].isNull());
+    CHECK(j["button_functions"].isNull());
+    CHECK(j["supported"]["button_function"].boolean);
+}
+
+TEST(OutOfRangeValuesAreDropped) {
+    HeadphoneState s;
+    CHECK(apply1(B({0xA7, 0x20, 12}), s));
+    CHECK(apply1(B({0xA9, 0x20, 31}), s));
+    CHECK(!s.volume.has_value());
+    Bytes list = B({0x37, 0x00, 0x02});
+    std::string bad = "F0-1D-BC-AA-00-01";
+    list.insert(list.end(), bad.begin(), bad.end());
+    list.push_back(0x01);
+    list = withString(list, "bad");
+    std::string good = "5C:E9:1E:BB:00:02";
+    list.insert(list.end(), good.begin(), good.end());
+    list.push_back(0x01);
+    list = withString(list, "good");
+    list.push_back(0x01);
+    CHECK(apply2(list, s));
+    REQUIRE(s.devices.has_value());
+    REQUIRE(s.devices->size() == 1);
+    CHECK_EQ(s.devices->at(0).name, std::string("good"));
+}
+
 TEST(StatusEscapesDeviceStrings) {
     HeadphoneState s;
     s.connected = true;
@@ -690,7 +725,7 @@ TEST(ProbeListsRawData) {
     CHECK_EQ(j["support_table1"].array[0]["name"].string, std::string("BATTERY_LEVEL_INDICATOR"));
     CHECK_EQ(j["support_table2"].array[0]["id"].string, std::string("0x32"));
     REQUIRE(j["general_settings"].array.size() == 1);
-    const Json& gs = j["general_settings"].array[0];
+    const Json gs = j["general_settings"].array[0];
     CHECK_EQ(gs["slot"].string, std::string("0xD1"));
     CHECK_EQ(gs["type"].string, std::string("boolean"));
     CHECK_EQ(gs["format"].string, std::string("enum_name"));
