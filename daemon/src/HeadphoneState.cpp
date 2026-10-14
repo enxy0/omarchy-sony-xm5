@@ -204,12 +204,10 @@ bool applyT1(std::span<const uint8_t> p, HeadphoneState& s, InboundEvents& ev) {
         s.eqPresetIdValue = preset;
         if (steps == 6) {
             s.eqCustomSeen = true;
-            if (preset == 0xA0) {
-                s.clearBass = std::clamp(static_cast<int>(values[0]) - 10, -10, 10);
-                std::array<int, 5> bands{};
-                for (size_t i = 0; i < 5; ++i) bands[i] = std::clamp(static_cast<int>(values[i + 1]) - 10, -10, 10);
-                s.eqCustomBands = bands;
-            }
+            s.clearBass = std::clamp(static_cast<int>(values[0]) - 10, -10, 10);
+            std::array<int, 5> bands{};
+            for (size_t i = 0; i < 5; ++i) bands[i] = std::clamp(static_cast<int>(values[i + 1]) - 10, -10, 10);
+            s.eqCustomBands = bands;
         }
         return true;
     }

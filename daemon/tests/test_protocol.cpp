@@ -333,15 +333,31 @@ TEST(EqParsesCapabilityStatusAndValues) {
     CHECK_EQ(s.clearBass, std::optional<int>(10));
     CHECK((s.eqCustomBands == std::optional<std::array<int, 5>>(std::array<int, 5>{1, 0, 3, -1, 2})));
 
-    CHECK(apply1(B({0x59, 0x00, 0x10, 0x06, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A}), s));
+    CHECK(apply1(B({0x59, 0x00, 0x10, 0x06, 0x0B, 0x0C, 0x0A, 0x09, 0x0A, 0x0E}), s));
     CHECK_EQ(eqPresetName(*s.eqPresetIdValue), std::string("bright"));
-    CHECK_EQ(s.clearBass, std::optional<int>(10));
+    CHECK_EQ(s.clearBass, std::optional<int>(1));
+    CHECK((s.eqCustomBands == std::optional<std::array<int, 5>>(std::array<int, 5>{2, 0, -1, 0, 4})));
 
     CHECK(apply1(B({0x59, 0x00, 0xA2, 0x00}), s));
+    CHECK_EQ(s.clearBass, std::optional<int>(1));
     CHECK_EQ(eqPresetName(*s.eqPresetIdValue), std::string("user2"));
     CHECK(apply1(B({0x59, 0x00, 0x42, 0x00}), s));
     CHECK_EQ(eqPresetName(*s.eqPresetIdValue), std::string("unknown"));
     CHECK(!apply1(B({0x57, 0x00, 0xA0, 0x06, 0x14}), s));
+}
+
+TEST(EqValueForPresetOffCarriesBandsFromXm5Capture) {
+    HeadphoneState s = withSupport({0x50});
+    s.connected = true;
+    CHECK(apply1(B({0x57, 0x00, 0x00, 0x06, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A}), s));
+    s.supported = deriveSupported(s);
+    Json j = parsed(statusJson(s, 1));
+    CHECK_EQ(j["eq_preset"].string, std::string("off"));
+    CHECK(j["supported"]["eq_custom"].boolean);
+    REQUIRE(j["eq_custom_bands"].array.size() == 5);
+    for (const auto& band : j["eq_custom_bands"].array) CHECK_EQ(band.number, 0.0);
+    REQUIRE(j["eq_bands"].array.size() == 5);
+    CHECK_EQ(j["clear_bass"].number, 0.0);
 }
 
 TEST(DseeAndConnectionQualityShareAudioCommands) {
