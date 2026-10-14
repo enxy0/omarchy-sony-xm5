@@ -20,7 +20,7 @@
     "nc_amb_button": true,
     "button_function": false,
     "ear_detection": true,
-    "worn": false,
+    "worn": true,
     "volume": true,
     "connection_quality": true,
     "codec": true,
