@@ -1,13 +1,23 @@
-// plugin/SonyIcon.qml
-// Vector headphone silhouette with dynamic state/alert coloring.
+// SonyIcon.qml
+// Headset glyph with state tints: Material Design "headphones" (U+F02CB) or
+// "earbuds" (U+F184F) from the Nerd Font, the icon set of the first-party
+// bar widgets. It paints through OpticalGlyph, the component BarIconButton
+// uses, so in a box of Style.bar.iconCanvas at Style.bar.iconFont it sits on
+// the same vertical center as the Audio and Bluetooth glyphs.
 import QtQuick
-import QtQuick.Shapes
 import qs.Commons
+import qs.Ui
+import "Model.js" as Model
 
 Item {
   id: root
 
+  // "headphones" or "earbuds" (status.json `kind`).
+  property string kind: Model.KIND_HEADPHONES
+  // Font pixel size of the glyph; the box defaults to the same size.
   property real iconSize: Style.font.icon
+  property real boxSize: iconSize
+  property string fontFamily: Style.font.family
   property bool connected: true
   property int batteryLevel: -1
   property bool charging: false
@@ -26,69 +36,20 @@ Item {
 
   property color color: effectiveColor
 
-  width: iconSize
-  height: iconSize
-  implicitWidth: iconSize
-  implicitHeight: iconSize
+  width: boxSize
+  height: boxSize
+  implicitWidth: boxSize
+  implicitHeight: boxSize
 
   Behavior on color {
     ColorAnimation { duration: 180 }
   }
 
-  // Headband arch
-  Shape {
+  OpticalGlyph {
     anchors.fill: parent
-    antialiasing: true
-    layer.enabled: true
-    layer.samples: 4
-
-    ShapePath {
-      strokeWidth: Math.max(1.8, root.width * 0.115)
-      strokeColor: root.color
-      fillColor: "transparent"
-      capStyle: ShapePath.RoundCap
-      joinStyle: ShapePath.RoundJoin
-      startX: root.width * 0.18
-      startY: root.height * 0.55
-
-      PathCubic {
-        control1X: root.width * 0.18
-        control1Y: root.height * 0.05
-        control2X: root.width * 0.82
-        control2Y: root.height * 0.05
-        x: root.width * 0.82
-        y: root.height * 0.55
-      }
-    }
-  }
-
-  // Left Ear Cup
-  Rectangle {
-    x: root.width * 0.06
-    y: root.height * 0.44
-    width: root.width * 0.24
-    height: root.height * 0.48
-    radius: width * 0.48
+    text: Model.headsetGlyph(root.kind)
+    fontFamily: root.fontFamily
+    fontSize: root.iconSize
     color: root.color
-    antialiasing: true
-
-    Behavior on color {
-      ColorAnimation { duration: 180 }
-    }
-  }
-
-  // Right Ear Cup
-  Rectangle {
-    x: root.width * 0.70
-    y: root.height * 0.44
-    width: root.width * 0.24
-    height: root.height * 0.48
-    radius: width * 0.48
-    color: root.color
-    antialiasing: true
-
-    Behavior on color {
-      ColorAnimation { duration: 180 }
-    }
   }
 }
