@@ -35,6 +35,7 @@ using Clock = std::chrono::steady_clock;
 constexpr const char* DAEMON_VERSION = "0.3.0";
 constexpr auto kBluezPollInterval = std::chrono::seconds(2);
 constexpr uint32_t kMaxLinkAttempts = 6;
+constexpr uint32_t kSlowRetryMs = 60000;
 constexpr const char* kMockAdapter = "F0:1D:BC:AA:00:01";
 
 struct DaemonOptions {
@@ -278,6 +279,7 @@ int main(int argc, char* argv[]) {
                                                          std::make_unique<MockSdpResolver>());
         } else {
             config.maxReconnectAttempts = kMaxLinkAttempts;
+            config.slowRetryMs = kSlowRetryMs;
             auto lookup = std::make_unique<LookupDiscovery>([&latestDevices](const std::string& mac) {
                 std::optional<BluetoothDeviceInfo> found;
                 for (const auto& dev : latestDevices) {
@@ -293,6 +295,7 @@ int main(int argc, char* argv[]) {
             return s->link->getState() == ConnectionState::CONNECTED && s->link->sendPacket(bytes);
         };
         hooks.dropLink = [s](const std::string& reason) { s->link->reconnect(reason); };
+        hooks.linkHealthy = [s] { s->link->markHealthy(); };
         if (!opts.mockMode) hooks.log = [id](const std::string& line) { logLine("MDR", id, line); };
         s->session = &manager.add(id, std::move(hooks));
 

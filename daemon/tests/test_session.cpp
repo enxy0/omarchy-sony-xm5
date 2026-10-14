@@ -39,6 +39,7 @@ struct Device {
     int forwardLimit{-1};
     int forwarded{0};
     std::vector<std::string> drops;
+    int healthy{0};
     HeadsetSession* session{nullptr};
 };
 
@@ -80,6 +81,7 @@ struct Harness {
             return true;
         };
         hooks.dropLink = [d](const std::string& reason) { d->drops.push_back(reason); };
+        hooks.linkHealthy = [d] { ++d->healthy; };
         d->session = &manager.add(id, std::move(hooks));
         return *d;
     }
@@ -479,8 +481,18 @@ TEST(UnansweredHandshakeDropsTheLink) {
     CHECK(h.first.drops.empty());
     h.advance(200);
     CHECK_EQ(h.first.drops.size(), size_t{1});
+    CHECK_EQ(h.first.healthy, 0);
     CHECK(!h.session->state().connected);
     CHECK(h.doc()["headsets"].array.empty());
+}
+
+TEST(AnsweredHandshakeMarksTheLinkHealthyOnce) {
+    Harness h;
+    h.connect();
+    h.advance(200);
+    CHECK(h.session->initComplete());
+    CHECK_EQ(h.first.healthy, 1);
+    CHECK(h.first.drops.empty());
 }
 
 TEST(ReplyBeforeAckDeviceStillInitializes) {
@@ -1338,9 +1350,13 @@ TEST(WfPeriodicSyncRereadsBothBatteries) {
 
 TEST(WfBatteryNotificationsUpdateStatus) {
     WfHarness h;
-    h.push(Table::T1, B({0x25, 0x09, 0x00, 0x00, 0x64, 0x01, 0x64, 0x64}));
+    h.push(Table::T1, B({0x25, 0x09, 0x00, 0x01, 0x64, 0x01, 0x64, 0x64}));
     Json s = h.status();
     CHECK_EQ(s["battery_left"].number, 0.0);
+    CHECK(s["battery_left_charging"].boolean);
+    h.push(Table::T1, B({0x25, 0x09, 0x00, 0x00, 0x64, 0x01, 0x64, 0x64}));
+    s = h.status();
+    CHECK(s["battery_left"].isNull());
     CHECK(!s["battery_left_charging"].boolean);
     CHECK_EQ(s["battery_right"].number, 100.0);
     CHECK(s["battery_right_charging"].boolean);

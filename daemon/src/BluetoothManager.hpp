@@ -52,7 +52,11 @@ struct BluetoothConfig {
     uint32_t connectTimeoutMs{5000};   // RFCOMM connect timeout (ms)
     uint8_t defaultChannel{DEFAULT_RFCOMM_CHANNEL}; // Fallback channel if SDP fails
     bool mockMode{false};              // Enable mock transport
-    uint32_t maxReconnectAttempts{0};  // Give up after this many failed attempts in a row (0 = never)
+    // Failed attempts in a row (RFCOMM connect or MDR handshake) before the fast
+    // retries stop (0 = never). markHealthy() resets the count.
+    uint32_t maxReconnectAttempts{0};
+    // After the fast retries: one attempt per this period (0 = stop until start()).
+    uint32_t slowRetryMs{0};
 };
 
 struct BluezSnapshot {
@@ -96,19 +100,19 @@ class IDeviceDiscovery {
 public:
     virtual ~IDeviceDiscovery() = default;
     virtual std::vector<BluetoothDeviceInfo> getAvailableDevices() = 0;
-    virtual std::optional<BluetoothDeviceInfo> findSonyHeadphones(const std::string& preferredMac = "") = 0;
+    virtual std::optional<BluetoothDeviceInfo> findByAddress(const std::string& preferredMac = "") = 0;
     virtual BluezSnapshot snapshot() { return BluezSnapshot{true, getAvailableDevices(), {}}; }
 };
 
 std::unique_ptr<IDeviceDiscovery> createBluezDiscovery();
 
-// Answers findSonyHeadphones from a lookup function (the daemon's last BlueZ snapshot).
+// Answers findByAddress from a lookup function (the daemon's last BlueZ snapshot).
 class LookupDiscovery : public IDeviceDiscovery {
 public:
     using Lookup = std::function<std::optional<BluetoothDeviceInfo>(const std::string& mac)>;
     explicit LookupDiscovery(Lookup lookup) : lookup_(std::move(lookup)) {}
     std::vector<BluetoothDeviceInfo> getAvailableDevices() override { return {}; }
-    std::optional<BluetoothDeviceInfo> findSonyHeadphones(const std::string& preferredMac = "") override {
+    std::optional<BluetoothDeviceInfo> findByAddress(const std::string& preferredMac = "") override {
         return lookup_(preferredMac);
     }
 
@@ -164,7 +168,7 @@ public:
         return devices;
     }
 
-    std::optional<BluetoothDeviceInfo> findSonyHeadphones(const std::string& preferredMac = "") override;
+    std::optional<BluetoothDeviceInfo> findByAddress(const std::string& preferredMac = "") override;
     BluezSnapshot snapshot() override { return BluezSnapshot{true, devices, adapterAddresses}; }
 };
 
@@ -200,7 +204,6 @@ public:
     ~BluetoothManager();
 
     // Factory methods
-    static std::unique_ptr<BluetoothManager> createLinux(BluetoothConfig config = {});
     // RFCOMM link to one device; `discovery` answers for config.preferredMac.
     static std::unique_ptr<BluetoothManager> createLinuxLink(BluetoothConfig config,
                                                              std::unique_ptr<IDeviceDiscovery> discovery);
@@ -214,6 +217,8 @@ public:
     void stop();
     void disconnect();
     void reconnect(const std::string& reason);
+    // The link works end to end (the MDR handshake answered): reset the retry count.
+    void markHealthy();
 
     // Packet transmission
     bool sendPacket(const uint8_t* data, size_t length);

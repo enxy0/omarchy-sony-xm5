@@ -214,6 +214,7 @@ void HeadsetSession::afterHandshake(LinkResult result) {
 
     state_.connected = true;
     state_.connectedSince = unixNow();
+    if (hooks_.linkHealthy) hooks_.linkHealthy();
     publishIfChanged();
     log("protocol version " + std::to_string(state_.protocolVersion) + ", table1=" +
         (state_.table1Supported ? "yes" : "no") + ", table2=" + (state_.table2Supported ? "yes" : "no"));

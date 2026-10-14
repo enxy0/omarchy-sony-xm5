@@ -24,6 +24,8 @@ public:
         std::function<bool(const protocol::Bytes& bytes)> write;
         std::function<void()> changed;
         std::function<void(const std::string& reason)> dropLink;
+        // The MDR handshake answered: the link is usable.
+        std::function<void()> linkHealthy;
         std::function<void(const std::string& line)> log;
         std::function<int64_t()> unixNow;
     };

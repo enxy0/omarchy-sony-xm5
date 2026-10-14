@@ -1,27 +1,12 @@
 #include "SessionManager.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <string_view>
 #include <utility>
 
 namespace omarchy::sony {
 
 using protocol::HeadphoneState;
-
-namespace {
-
-bool sameText(std::string_view a, std::string_view b) {
-    if (a.size() != b.size()) return false;
-    for (size_t i = 0; i < a.size(); ++i) {
-        if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i]))) {
-            return false;
-        }
-    }
-    return true;
-}
-
-} // namespace
 
 SessionManager::SessionManager(Hooks hooks) : hooks_(std::move(hooks)) {}
 
@@ -52,12 +37,6 @@ void SessionManager::remove(const std::string& id, Clock::time_point now) {
 HeadsetSession* SessionManager::find(const std::string& id) {
     auto it = sessions_.find(id);
     return it == sessions_.end() ? nullptr : it->second.get();
-}
-
-std::vector<std::string> SessionManager::ids() const {
-    std::vector<std::string> out;
-    for (const auto& [id, session] : sessions_) out.push_back(id);
-    return out;
 }
 
 void SessionManager::setAdapterAddresses(std::vector<std::string> addresses) {
@@ -117,17 +96,8 @@ SessionManager::Resolution SessionManager::resolve(const std::optional<std::stri
     }
     if (!selector) {
         auto id = primary();
-        if (!id) {
-            if (pool.size() == 1) {
-                out.id = pool.front().first;
-                out.session = pool.front().second;
-                return out;
-            }
-            out.error = "ERR not connected";
-            return out;
-        }
         for (const auto& [sid, session] : pool) {
-            if (sid == *id) {
+            if (id && sid == *id) {
                 out.id = sid;
                 out.session = session;
                 return out;
@@ -144,7 +114,7 @@ SessionManager::Resolution SessionManager::resolve(const std::optional<std::stri
         }
     } else {
         for (const auto& entry : pool) {
-            if (sameText(entry.second->state().model(), *selector)) matches.push_back(entry);
+            if (protocol::equalsIgnoreCase(entry.second->state().model(), *selector)) matches.push_back(entry);
         }
     }
     if (matches.empty()) {

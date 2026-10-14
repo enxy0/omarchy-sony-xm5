@@ -4,7 +4,9 @@
 #include "TestUtil.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <string>
+#include <thread>
 
 using namespace omarchy::sony::protocol;
 using testutil::Json;
@@ -600,6 +602,22 @@ TEST(EarbudBatteriesParse) {
     CHECK(j["battery_case_charging"].boolean);
     CHECK(j["battery_level"].isNull());
     CHECK_EQ(j["kind"].string, std::string("earbuds"));
+
+    // Level 0 with "not charging" is an earbud that is off or out of range
+    // (protocol.md 9.11): the level is unknown, the status stays.
+    CHECK(apply1(B({0x23, 0x09, 0x61, 0x00, 0x00, 0x00, 0x64, 0x64}), s));
+    j = entryOf(s);
+    CHECK_EQ(j["battery_left"].number, 97.0);
+    CHECK(j["battery_right"].isNull());
+    CHECK(!j["battery_right_charging"].isNull());
+    CHECK(!j["battery_right_charging"].boolean);
+    CHECK(apply1(B({0x23, 0x0A, 0x00, 0x00, 0x1E}), s));
+    CHECK_EQ(entryOf(s)["battery_case"].number, 0.0);
+    CHECK_EQ(earbudLevel(0, uint8_t{0x01}), std::optional<int>(0));
+    CHECK_EQ(earbudLevel(0, uint8_t{0x03}), std::optional<int>(0));
+    CHECK_EQ(earbudLevel(0, uint8_t{0x02}), std::optional<int>(0));
+    CHECK(!earbudLevel(0, uint8_t{0x00}).has_value());
+    CHECK_EQ(earbudLevel(1, uint8_t{0x00}), std::optional<int>(1));
 }
 
 TEST(WornStatusPerEarbud) {
@@ -1232,6 +1250,88 @@ TEST(SelectionAllowListIgnoresNamesAndUuids) {
     CHECK((pick(devices, {"AA:BB:CC:DD:EE:09"}) == Macs{}));
 }
 
+namespace {
+
+// One RFCOMM link to a device whose MDR handshake answers only when told to.
+struct LinkProbe {
+    std::unique_ptr<BluetoothManager> link;
+    int connects{0};
+    bool answerHandshake{false};
+    std::chrono::steady_clock::time_point started{std::chrono::steady_clock::now()};
+
+    explicit LinkProbe(uint32_t slowRetryMs) {
+        BluetoothConfig config;
+        config.preferredMac = "AA:BB:CC:DD:EE:01";
+        config.initialBackoffMs = 1;
+        config.maxBackoffMs = 1;
+        config.maxReconnectAttempts = 3;
+        config.slowRetryMs = slowRetryMs;
+        auto discovery = std::make_unique<MockDeviceDiscovery>();
+        discovery->devices = {btDevice("AA:BB:CC:DD:EE:01", "WF-1000XM5", true)};
+        link = std::make_unique<BluetoothManager>(config, std::make_unique<MockTransport>(), std::move(discovery),
+                                                  std::make_unique<MockSdpResolver>());
+        BluetoothCallbacks callbacks;
+        callbacks.onConnected = [this] { ++connects; };
+        link->setCallbacks(std::move(callbacks));
+    }
+
+    // Runs the link until `ms` after the start. A connected link either
+    // answers the handshake (markHealthy) or drops it, as HeadsetSession does.
+    void runUntil(int ms) {
+        while (std::chrono::steady_clock::now() - started < std::chrono::milliseconds(ms)) {
+            link->tick();
+            if (link->getState() == ConnectionState::CONNECTED) {
+                if (answerHandshake) link->markHealthy();
+                else link->reconnect("MDR protocol handshake not answered");
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+};
+
+} // namespace
+
+TEST(UnansweredHandshakeGivesUpAfterTheRetryBound) {
+    LinkProbe p(0);
+    p.link->start();
+    p.runUntil(150);
+    // The first attempt plus three retries; an open RFCOMM channel does not
+    // reset the count, only an answered handshake does.
+    CHECK_EQ(p.connects, 4);
+    CHECK(p.link->getState() == ConnectionState::DISCONNECTED);
+    p.runUntil(300);
+    CHECK_EQ(p.connects, 4);
+    p.link->start();
+    p.runUntil(450);
+    CHECK_EQ(p.connects, 8);
+}
+
+TEST(SlowRetryAfterGiveUpUntilTheHandshakeAnswers) {
+    LinkProbe p(400);
+    p.link->start();
+    p.runUntil(200);
+    CHECK_EQ(p.connects, 4);
+    CHECK(p.link->getState() == ConnectionState::RECONNECT_BACKOFF);
+    // One attempt per slow cycle, each failure waits a full cycle again.
+    p.runUntil(600);
+    CHECK_EQ(p.connects, 5);
+    p.runUntil(1000);
+    CHECK_EQ(p.connects, 6);
+    p.answerHandshake = true;
+    p.runUntil(1400);
+    CHECK_EQ(p.connects, 7);
+    CHECK(p.link->getState() == ConnectionState::CONNECTED);
+    // A healthy link that drops gets the fast retries again.
+    p.answerHandshake = false;
+    p.link->reconnect("link dropped");
+    p.runUntil(1600);
+    CHECK_EQ(p.connects, 10);
+    CHECK(p.link->getState() == ConnectionState::RECONNECT_BACKOFF);
+    p.link->stop();
+    p.runUntil(2100);
+    CHECK_EQ(p.connects, 10);
+}
+
 TEST(MockDiscoveryReportsAdapters) {
     MockDeviceDiscovery discovery;
     discovery.devices = {btDevice("AA:BB:CC:DD:EE:02", "WF-1000XM5", true)};
@@ -1240,10 +1340,10 @@ TEST(MockDiscoveryReportsAdapters) {
     CHECK(snap.ok);
     CHECK_EQ(snap.devices.size(), size_t{1});
     CHECK((snap.adapterAddresses == Macs{"F0:1D:BC:AA:00:01"}));
-    auto found = discovery.findSonyHeadphones("aa:bb:cc:dd:ee:02");
+    auto found = discovery.findByAddress("aa:bb:cc:dd:ee:02");
     REQUIRE(found.has_value());
     CHECK_EQ(found->macAddress, std::string("AA:BB:CC:DD:EE:02"));
-    CHECK(!discovery.findSonyHeadphones("AA:BB:CC:DD:EE:09").has_value());
+    CHECK(!discovery.findByAddress("AA:BB:CC:DD:EE:09").has_value());
 }
 
 int main() {

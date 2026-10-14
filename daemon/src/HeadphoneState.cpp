@@ -66,14 +66,6 @@ bool containsTextIgnoreCase(std::span<const uint8_t> data, std::string_view need
     return it != data.end();
 }
 
-bool equalsIgnoreCase(std::string_view a, std::string_view b) {
-    if (a.size() != b.size()) return false;
-    for (size_t i = 0; i < a.size(); ++i) {
-        if (lowerAscii(static_cast<unsigned char>(a[i])) != lowerAscii(static_cast<unsigned char>(b[i]))) return false;
-    }
-    return true;
-}
-
 bool containsIgnoreCase(std::string_view haystack, std::string_view needle) {
     std::span<const uint8_t> data(reinterpret_cast<const uint8_t*>(haystack.data()), haystack.size());
     return containsTextIgnoreCase(data, needle);
@@ -514,6 +506,14 @@ bool applyT2(std::span<const uint8_t> p, HeadphoneState& s, InboundEvents& ev) {
 // Supported
 // ---------------------------------------------------------------------------
 
+bool equalsIgnoreCase(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (lowerAscii(static_cast<unsigned char>(a[i])) != lowerAscii(static_cast<unsigned char>(b[i]))) return false;
+    }
+    return true;
+}
+
 Supported Supported::fallback(std::string_view model) {
     Supported s;
     if (model == kModelWh) {
@@ -535,6 +535,11 @@ Supported Supported::fallback(std::string_view model) {
     s.ear_detection = true;
     s.volume = true;
     return s;
+}
+
+std::optional<int> earbudLevel(const std::optional<int>& level, const std::optional<uint8_t>& chargingRaw) {
+    if (level && *level == 0 && chargingRaw && *chargingRaw == 0x00) return std::nullopt;
+    return level;
 }
 
 std::optional<bool> chargingFromRaw(const std::optional<uint8_t>& raw) {
@@ -981,9 +986,9 @@ void writeHeadset(json::Writer& w, const HeadphoneState& s) {
 
     w.field("battery_level", gate(sup.battery, s.batteryLevel));
     w.field("battery_charging", gate(sup.battery, s.batteryCharging()));
-    w.field("battery_left", gate(sup.battery_lr, s.batteryLeft));
+    w.field("battery_left", gate(sup.battery_lr, earbudLevel(s.batteryLeft, s.batteryLeftChargingRaw)));
     w.field("battery_left_charging", gate(sup.battery_lr, chargingFromRaw(s.batteryLeftChargingRaw)));
-    w.field("battery_right", gate(sup.battery_lr, s.batteryRight));
+    w.field("battery_right", gate(sup.battery_lr, earbudLevel(s.batteryRight, s.batteryRightChargingRaw)));
     w.field("battery_right_charging", gate(sup.battery_lr, chargingFromRaw(s.batteryRightChargingRaw)));
     w.field("battery_case", gate(sup.battery_case, s.batteryCase));
     w.field("battery_case_charging", gate(sup.battery_case, chargingFromRaw(s.batteryCaseChargingRaw)));

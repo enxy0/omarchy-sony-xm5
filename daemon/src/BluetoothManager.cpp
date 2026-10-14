@@ -280,7 +280,7 @@ public:
         return snap;
     }
 
-    std::optional<BluetoothDeviceInfo> findSonyHeadphones(const std::string& preferredMac = "") override {
+    std::optional<BluetoothDeviceInfo> findByAddress(const std::string& preferredMac = "") override {
         return findByMac(getAvailableDevices(), preferredMac);
     }
 
@@ -512,7 +512,7 @@ int MockTransport::checkConnectResult() {
     return connected_ ? 0 : ECONNREFUSED;
 }
 
-std::optional<BluetoothDeviceInfo> MockDeviceDiscovery::findSonyHeadphones(const std::string& preferredMac) {
+std::optional<BluetoothDeviceInfo> MockDeviceDiscovery::findByAddress(const std::string& preferredMac) {
     if (devices.empty()) {
         BluetoothDeviceInfo dev;
         dev.macAddress = preferredMac.empty() ? "AA:BB:CC:DD:EE:FF" : preferredMac;
@@ -549,15 +549,6 @@ BluetoothManager::BluetoothManager(BluetoothConfig config,
 
 BluetoothManager::~BluetoothManager() {
     stop();
-}
-
-std::unique_ptr<BluetoothManager> BluetoothManager::createLinux(BluetoothConfig config) {
-    config.mockMode = false;
-    auto transport = std::make_unique<RfcommTransport>();
-    auto discovery = std::make_unique<DBusDeviceDiscovery>();
-    auto sdp = std::make_unique<BlueZSdpResolver>();
-    return std::make_unique<BluetoothManager>(
-        std::move(config), std::move(transport), std::move(discovery), std::move(sdp));
 }
 
 std::unique_ptr<BluetoothManager> BluetoothManager::createLinuxLink(BluetoothConfig config,
@@ -599,6 +590,11 @@ void BluetoothManager::start() {
     attemptDiscovery();
 }
 
+void BluetoothManager::markHealthy() {
+    retryCount_ = 0;
+    currentBackoffMs_ = config_.initialBackoffMs;
+}
+
 void BluetoothManager::stop() {
     disconnect();
     setState(ConnectionState::DISCONNECTED);
@@ -625,7 +621,7 @@ void BluetoothManager::attemptDiscovery() {
         return;
     }
 
-    auto devOpt = discovery_->findSonyHeadphones(config_.preferredMac);
+    auto devOpt = discovery_->findByAddress(config_.preferredMac);
     if (!devOpt.has_value()) {
         scheduleReconnect("No paired Sony headphones found");
         return;
@@ -670,8 +666,7 @@ void BluetoothManager::attemptConnect() {
         fprintf(stderr, "[BT] RFCOMM connected immediately\n");
         fflush(stderr);
         setState(ConnectionState::CONNECTED);
-        retryCount_ = 0;
-        currentBackoffMs_ = config_.initialBackoffMs;
+        if (config_.maxReconnectAttempts == 0) markHealthy();
         if (callbacks_.onConnected) {
             callbacks_.onConnected();
         }
@@ -727,8 +722,7 @@ void BluetoothManager::handleConnecting(short revents) {
             fprintf(stderr, "[BT] RFCOMM async connect succeeded\n");
             fflush(stderr);
             setState(ConnectionState::CONNECTED);
-            retryCount_ = 0;
-            currentBackoffMs_ = config_.initialBackoffMs;
+            if (config_.maxReconnectAttempts == 0) markHealthy();
             if (callbacks_.onConnected) {
                 callbacks_.onConnected();
             }
@@ -823,10 +817,20 @@ void BluetoothManager::scheduleReconnect(const std::string& reason) {
 
     retryCount_++;
     if (config_.maxReconnectAttempts > 0 && retryCount_ > config_.maxReconnectAttempts) {
-        fprintf(stderr, "[BT] %s: giving up after %u attempts; waiting for BlueZ to report a new connection\n",
-                currentDevice_.macAddress.c_str(), config_.maxReconnectAttempts);
+        if (config_.slowRetryMs == 0) {
+            fprintf(stderr, "[BT] %s: giving up after %u attempts; waiting for BlueZ to report a new connection\n",
+                    currentDevice_.macAddress.c_str(), config_.maxReconnectAttempts);
+            fflush(stderr);
+            setState(ConnectionState::DISCONNECTED);
+            return;
+        }
+        // One attempt per slow cycle until a handshake succeeds (markHealthy).
+        retryCount_ = config_.maxReconnectAttempts;
+        currentBackoffMs_ = config_.slowRetryMs;
+        nextReconnectTime_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(currentBackoffMs_);
+        fprintf(stderr, "[BT] %s: %u attempts failed; next attempt in %u ms\n",
+                currentDevice_.macAddress.c_str(), config_.maxReconnectAttempts, currentBackoffMs_);
         fflush(stderr);
-        setState(ConnectionState::DISCONNECTED);
         return;
     }
     auto delay = static_cast<uint32_t>(config_.initialBackoffMs *

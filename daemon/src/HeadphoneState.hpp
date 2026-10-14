@@ -236,6 +236,10 @@ struct HeadphoneState {
 };
 
 std::optional<bool> chargingFromRaw(const std::optional<uint8_t>& raw);
+// ASCII case-insensitive comparison (models, addresses).
+bool equalsIgnoreCase(std::string_view a, std::string_view b);
+// Contract 3.3: an earbud level of 0 with status "not charging" is unknown.
+std::optional<int> earbudLevel(const std::optional<int>& level, const std::optional<uint8_t>& chargingRaw);
 
 void selectVariants(HeadphoneState& state);
 Supported deriveSupported(const HeadphoneState& state);

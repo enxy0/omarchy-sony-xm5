@@ -44,7 +44,6 @@ public:
     // Closes the session (queued requests fail) and forgets it.
     void remove(const std::string& id, Clock::time_point now);
     [[nodiscard]] HeadsetSession* find(const std::string& id);
-    [[nodiscard]] std::vector<std::string> ids() const;
 
     void setAdapterAddresses(std::vector<std::string> addresses);
 
