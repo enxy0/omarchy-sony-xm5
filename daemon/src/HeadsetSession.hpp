@@ -20,7 +20,7 @@ public:
 
     struct Hooks {
         std::function<bool(const protocol::Bytes& bytes)> write;
-        std::function<void()> stateChanged;
+        std::function<void(const std::string& statusJson)> stateChanged;
         std::function<void(const std::string& reason)> dropLink;
         std::function<void(const std::string& line)> log;
     };

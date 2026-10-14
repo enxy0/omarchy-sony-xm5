@@ -66,7 +66,11 @@ void MdrLink::transmit(Clock::time_point now) {
     record(true, packetTypeFor(c.request.table), seq_, c.request.payload);
     log(std::string("TX ") + (c.request.table == Table::T1 ? "T1" : "T2") + " seq=" + std::to_string(seq_) +
         (c.attempts > 1 ? " retry=" + std::to_string(c.attempts - 1) : "") + ": " + hexBytes(c.request.payload));
-    if (!writer_(c.frame)) {
+    const Bytes frame = c.frame;
+    const uint64_t gen = generation_;
+    const bool written = writer_(frame);
+    if (gen != generation_ || !current_) return;
+    if (!written) {
         finish(LinkResult::NoAck, now);
     }
 }
@@ -120,12 +124,13 @@ void MdrLink::handleFrame(const UnpackedFrame& frame, Clock::time_point now) {
         return;
     }
 
+    const uint64_t gen = generation_;
     writer_(serializeACK(frame.seq));
+    if (gen != generation_) return;
     record(false, frame.type, frame.seq, frame.payload);
     log(std::string("RX ") + (*table == Table::T1 ? "T1" : "T2") + " seq=" + std::to_string(frame.seq) + ": " +
         hexBytes(frame.payload));
 
-    uint64_t gen = generation_;
     dispatch_(*table, frame.payload);
     if (gen != generation_) return;
 

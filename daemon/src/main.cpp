@@ -153,12 +153,9 @@ int main(int argc, char* argv[]) {
     std::unique_ptr<BluetoothManager> btManager;
     std::shared_ptr<FakeHeadset> fakeHeadset;
     FakeHeadsetTransport* fakeTransport = nullptr;
-    HeadsetSession* sessionPtr = nullptr;
 
     HeadsetSession::Hooks hooks;
-    hooks.stateChanged = [&stateEngine, &sessionPtr]() {
-        if (sessionPtr) stateEngine.writeAtomic(sessionPtr->statusJson(unixNow()));
-    };
+    hooks.stateChanged = [&stateEngine](const std::string& statusJson) { stateEngine.writeAtomic(statusJson); };
     hooks.write = [&btManager](const Bytes& bytes) {
         return btManager && btManager->getState() == ConnectionState::CONNECTED && btManager->sendPacket(bytes);
     };
@@ -172,7 +169,6 @@ int main(int argc, char* argv[]) {
         };
     }
     HeadsetSession session(std::move(hooks));
-    sessionPtr = &session;
 
     if (!stateEngine.initialize(session.statusJson(unixNow()))) {
         std::cerr << "Fatal: Failed to initialize status file under " << stateDir << "\n";

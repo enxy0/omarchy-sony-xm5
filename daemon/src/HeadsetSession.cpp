@@ -133,11 +133,9 @@ void HeadsetSession::tick(Clock::time_point now) {
 }
 
 std::optional<HeadsetSession::Clock::time_point> HeadsetSession::nextDeadline() const {
-    auto deadline = link_.nextDeadline();
-    if (initDone_ && state_.connected) {
-        if (!deadline || nextSync_ < *deadline) deadline = nextSync_;
-    }
-    return deadline;
+    if (!link_.idle()) return link_.nextDeadline();
+    if (initDone_ && state_.connected) return nextSync_;
+    return std::nullopt;
 }
 
 // ---------------------------------------------------------------------------
@@ -409,8 +407,14 @@ void HeadsetSession::updateLateSupport() {
 void HeadsetSession::publishIfChanged() {
     std::string json = statusJson(0);
     if (json == lastPublished_) return;
-    lastPublished_ = std::move(json);
-    if (hooks_.stateChanged) hooks_.stateChanged();
+    lastPublished_ = json;
+    if (!hooks_.stateChanged) return;
+    constexpr std::string_view kPlaceholder = "\"last_updated\":0";
+    auto pos = json.find(kPlaceholder);
+    if (pos != std::string::npos) {
+        json.replace(pos, kPlaceholder.size(), "\"last_updated\":" + std::to_string(unixNow()));
+    }
+    hooks_.stateChanged(json);
 }
 
 std::string HeadsetSession::statusJson(int64_t lastUpdated) const {

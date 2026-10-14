@@ -97,10 +97,9 @@ struct Json {
     std::vector<std::string> keyOrder;
 
     [[nodiscard]] bool has(const std::string& key) const { return object.count(key) != 0; }
-    [[nodiscard]] const Json& operator[](const std::string& key) const {
-        static const Json null;
+    [[nodiscard]] Json operator[](const std::string& key) const {
         auto it = object.find(key);
-        return it == object.end() ? null : it->second;
+        return it == object.end() ? Json{} : it->second;
     }
     [[nodiscard]] bool isNull() const { return type == Type::Null; }
 };

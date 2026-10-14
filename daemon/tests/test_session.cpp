@@ -27,6 +27,7 @@ struct Harness {
     int forwarded{0};
     std::vector<std::string> drops;
     int changes{0};
+    std::string lastWritten;
     Clock::time_point now{Clock::time_point{} + std::chrono::hours(1)};
     std::unique_ptr<HeadsetSession> session;
 
@@ -40,7 +41,10 @@ struct Harness {
             if (!answer.empty()) inbox.push_back(std::move(answer));
             return true;
         };
-        hooks.stateChanged = [this] { ++changes; };
+        hooks.stateChanged = [this](const std::string& json) {
+            ++changes;
+            lastWritten = json;
+        };
         hooks.dropLink = [this](const std::string& reason) { drops.push_back(reason); };
         session = std::make_unique<HeadsetSession>(std::move(hooks));
     }
@@ -480,6 +484,38 @@ TEST(StatusIsWrittenOnlyWhenSomethingChanges) {
     CHECK_EQ(h.status()["battery_level"].number, 79.0);
 }
 
+TEST(DeadlineIsNotInThePastWhileARequestIsInFlight) {
+    Harness h;
+    h.connect();
+    h.advance(200);
+    h.advance(29600);
+    h.forwardLimit = h.forwarded;
+    auto parsed = cmd::parseLine("dsee on", false);
+    h.session->execute(*parsed.command, [](std::string) {}, h.now);
+    h.advance(400);
+    auto deadline = h.session->nextDeadline();
+    REQUIRE(deadline.has_value());
+    CHECK(*deadline > h.now);
+    h.advance(2000);
+    deadline = h.session->nextDeadline();
+    REQUIRE(deadline.has_value());
+    CHECK(*deadline > h.now);
+}
+
+TEST(StatusHookGetsFinishedDocumentOnlyOnChange) {
+    Harness h;
+    h.connect();
+    h.advance(200);
+    int before = h.changes;
+    auto written = testutil::parseJson(h.lastWritten);
+    REQUIRE(written.has_value());
+    CHECK((*written)["last_updated"].number > 1.0e9);
+    CHECK_EQ(testutil::jsonDiff(*written, h.status(), {"last_updated"}), std::string(""));
+    Bytes line = B({0xC9, 0x01, 0x00, 'x'});
+    h.push(Table::T1, line);
+    CHECK_EQ(h.changes, before);
+}
+
 TEST(DisconnectWritesThreeKeyDocument) {
     Harness h;
     h.connect();
@@ -680,7 +716,8 @@ TEST(LateEqValueTurnsEqCustomOn) {
     CHECK(!h.status()["supported"]["eq_custom"].boolean);
     h.push(Table::T1, B({0x59, 0x00, 0xA0, 0x06, 10, 10, 10, 10, 10, 12}));
     CHECK(h.status()["supported"]["eq_custom"].boolean);
-    CHECK_EQ(h.status()["eq_custom_bands"].array[4].number, 2.0);
+    const Json bands = h.status()["eq_custom_bands"];
+    CHECK_EQ(bands.array[4].number, 2.0);
 }
 
 TEST(PeriodicSyncRereadsBatteryVolumeAndWorn) {
@@ -736,7 +773,8 @@ TEST(ProbeReportsDeviceData) {
     CHECK_EQ((*j)["eq_capability"]["presets"].array.size(), size_t{10});
     CHECK_EQ((*j)["assignable"]["type"].string, std::string("0x03"));
     CHECK_EQ((*j)["assignable"]["keys"].array[0]["key"].string, std::string("0x04"));
-    CHECK_EQ((*j)["assignable"]["value"].array[0].string, std::string("0x00"));
+    const Json assignableValue = (*j)["assignable"]["value"];
+    CHECK_EQ(assignableValue.array[0].string, std::string("0x00"));
     CHECK_EQ((*j)["recent_frames"].array.size(), size_t{64});
     CHECK(reply.find('\n') == std::string::npos);
 }
