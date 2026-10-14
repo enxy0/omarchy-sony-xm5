@@ -54,6 +54,9 @@ struct AssignableCapability {
 inline constexpr uint8_t kActionDoubleTap = 0x01;
 inline constexpr uint8_t kActionTripleTap = 0x02;
 
+inline constexpr uint8_t kKeyLeftSide = 0x00;
+inline constexpr uint8_t kKeyRightSide = 0x01;
+
 struct QuickAccessAction {
     uint8_t action{0};
     uint8_t defaultFunction{0};
@@ -74,6 +77,8 @@ struct PairedDevice {
 
 struct Supported {
     bool battery{false};
+    bool battery_lr{false};
+    bool battery_case{false};
     bool noise_control{false};
     bool eq_preset{false};
     bool eq_custom{false};
@@ -84,6 +89,7 @@ struct Supported {
     bool auto_power_off{false};
     bool nc_amb_button{false};
     bool button_function{false};
+    bool touch_function{false};
     bool ear_detection{false};
     bool worn{false};
     bool volume{false};
@@ -93,14 +99,17 @@ struct Supported {
     bool devices{false};
     bool source_switch{false};
     bool touch_panel{false};
+    bool sidetone{false};
     bool quick_access{false};
 
-    static Supported fallback();
+    static Supported fallback(std::string_view model);
     bool operator==(const Supported&) const = default;
 };
 
 struct Variants {
     uint8_t batteryType{0x00};
+    uint8_t lrBatteryType{0x09};
+    uint8_t caseBatteryType{0x0A};
     std::optional<uint8_t> ncAsmType;
     uint8_t autoPowerOffType{0x05};
     uint8_t voiceGuidanceType{0x01};
@@ -109,12 +118,19 @@ struct Variants {
     uint8_t deviceListType{0x02};
     std::optional<uint8_t> multipointSlot;
     std::optional<uint8_t> touchPanelSlot;
+    std::optional<uint8_t> sidetoneSlot;
 };
+
+inline constexpr std::string_view kModelWh = "wh-1000xm5";
+inline constexpr std::string_view kModelWf = "wf-1000xm5";
+inline constexpr std::string_view kModelOther = "other";
 
 struct HeadphoneState {
     bool connected{false};
-    std::string deviceName{"WH-1000XM5"};
+    std::string alias;
+    std::string bluezName;
     std::optional<std::string> address;
+    int64_t connectedSince{0};
 
     bool protocolKnown{false};
     uint32_t protocolVersion{0};
@@ -134,6 +150,8 @@ struct HeadphoneState {
     std::optional<AssignableCapability> assignableCapability;
     std::optional<QuickAccessCapability> quickAccessCapability;
     std::optional<uint8_t> upscalingType;
+    std::optional<Bytes> connectionModeCapability;
+    std::optional<Bytes> connectionModeStatus;
 
     std::optional<Supported> supported;
     bool fallback{false};
@@ -142,6 +160,12 @@ struct HeadphoneState {
 
     std::optional<int> batteryLevel;
     std::optional<uint8_t> batteryChargingRaw;
+    std::optional<int> batteryLeft;
+    std::optional<uint8_t> batteryLeftChargingRaw;
+    std::optional<int> batteryRight;
+    std::optional<uint8_t> batteryRightChargingRaw;
+    std::optional<int> batteryCase;
+    std::optional<uint8_t> batteryCaseChargingRaw;
     std::optional<uint8_t> ncTotalEffect;
     std::optional<uint8_t> ncMode;
     std::optional<uint8_t> ncAmbientMode;
@@ -178,8 +202,14 @@ struct HeadphoneState {
     [[nodiscard]] const GeneralSettingSlot* settingSlot(std::string_view subject) const;
     [[nodiscard]] const GeneralSettingSlot* multipointSlot() const;
     [[nodiscard]] const GeneralSettingSlot* touchPanelSlot() const;
+    [[nodiscard]] const GeneralSettingSlot* sidetoneSlot() const;
     [[nodiscard]] const AssignableKey* ncAmbKey() const;
     [[nodiscard]] std::optional<uint8_t> ncAmbKeyIndex() const;
+    [[nodiscard]] std::optional<size_t> assignableKeyIndex(uint8_t key) const;
+
+    [[nodiscard]] std::string_view model() const;
+    [[nodiscard]] std::string_view kind() const;
+    [[nodiscard]] std::string displayName() const;
 
     [[nodiscard]] std::optional<std::string> noiseModeString() const;
     [[nodiscard]] std::optional<int> ambientLevelValue() const;
@@ -188,15 +218,24 @@ struct HeadphoneState {
     [[nodiscard]] std::vector<std::string> autoPowerOffOptions() const;
     [[nodiscard]] std::optional<std::string> buttonFunctionString() const;
     [[nodiscard]] std::optional<std::vector<std::string>> buttonFunctionOptions() const;
+    [[nodiscard]] std::optional<std::string> touchFunctionString(uint8_t key) const;
+    [[nodiscard]] std::optional<std::vector<std::string>> touchFunctionOptions(uint8_t key) const;
+    [[nodiscard]] uint8_t touchPresetFor(uint8_t key, std::string_view name) const;
     [[nodiscard]] std::optional<bool> multipointValue() const;
     [[nodiscard]] std::optional<bool> touchPanelValue() const;
+    [[nodiscard]] std::optional<bool> sidetoneValue() const;
     [[nodiscard]] std::optional<bool> worn() const;
+    [[nodiscard]] std::optional<bool> wornLeft() const;
+    [[nodiscard]] std::optional<bool> wornRight() const;
     [[nodiscard]] std::optional<size_t> quickAccessIndex(uint8_t action) const;
     [[nodiscard]] std::optional<std::string> quickAccessString(uint8_t action) const;
     [[nodiscard]] std::optional<std::vector<std::string>> quickAccessOptions(uint8_t action) const;
 
-    void resetForConnection(const std::string& name, const std::optional<std::string>& addr);
+    void resetForConnection(const std::string& alias, const std::string& bluezName,
+                            const std::optional<std::string>& addr);
 };
+
+std::optional<bool> chargingFromRaw(const std::optional<uint8_t>& raw);
 
 void selectVariants(HeadphoneState& state);
 Supported deriveSupported(const HeadphoneState& state);
@@ -232,7 +271,20 @@ struct FrameRecord {
     Bytes payload;
 };
 
-std::string statusJson(const HeadphoneState& state, int64_t lastUpdated);
+// One entry of `headsets` (contract 3.3).
+std::string headsetJson(const HeadphoneState& state);
+
+// Contract 2.4: does this headset play audio from one of the local adapters?
+bool playsFromHere(const HeadphoneState& state, const std::vector<std::string>& adapterAddresses);
+// Contract 3.2: headphones before earbuds, then id ascending.
+std::vector<const HeadphoneState*> orderHeadsets(std::vector<const HeadphoneState*> headsets);
+// Contract 2.4, on headsets already in `orderHeadsets` order.
+std::optional<std::string> choosePrimary(const std::vector<const HeadphoneState*>& ordered,
+                                         const std::vector<std::string>& adapterAddresses);
+// The whole status.json document (schema 3).
+std::string statusDocument(const std::vector<const HeadphoneState*>& ordered, const std::optional<std::string>& primary,
+                           int64_t lastUpdated);
+
 std::string probeJson(const HeadphoneState& state, std::span<const FrameRecord> recentFrames);
 
 } // namespace omarchy::sony::protocol

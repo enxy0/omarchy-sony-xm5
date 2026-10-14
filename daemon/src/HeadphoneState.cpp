@@ -12,6 +12,7 @@ namespace {
 
 constexpr std::string_view kMultipointSubject = "MULTIPOINT_SETTING";
 constexpr std::string_view kTouchPanelSubject = "TOUCH_PANEL_SETTING";
+constexpr std::string_view kSidetoneSubject = "SIDETONE_SETTING";
 
 // Bounds-checked reader over one payload.
 class Reader {
@@ -56,11 +57,26 @@ std::string normalizeAddress(std::string address) {
 
 bool isNcAsmType(uint8_t type) { return type == 0x15 || type == 0x17 || type == 0x19; }
 
-bool containsText(std::span<const uint8_t> data, std::string_view needle) {
+int lowerAscii(int c) { return (c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c; }
+
+bool containsTextIgnoreCase(std::span<const uint8_t> data, std::string_view needle) {
     if (needle.empty() || data.size() < needle.size()) return false;
     auto it = std::search(data.begin(), data.end(), needle.begin(), needle.end(),
-                          [](uint8_t a, char b) { return a == static_cast<uint8_t>(b); });
+                          [](uint8_t a, char b) { return lowerAscii(a) == lowerAscii(static_cast<unsigned char>(b)); });
     return it != data.end();
+}
+
+bool equalsIgnoreCase(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (lowerAscii(static_cast<unsigned char>(a[i])) != lowerAscii(static_cast<unsigned char>(b[i]))) return false;
+    }
+    return true;
+}
+
+bool containsIgnoreCase(std::string_view haystack, std::string_view needle) {
+    std::span<const uint8_t> data(reinterpret_cast<const uint8_t*>(haystack.data()), haystack.size());
+    return containsTextIgnoreCase(data, needle);
 }
 
 std::optional<std::vector<SupportEntry>> parseSupportList(Reader& r) {
@@ -84,8 +100,8 @@ bool parseAssignableKey(Reader& r, AssignableKey& key) {
     for (uint8_t p = 0; p < presetCount && r.ok(); ++p) {
         uint8_t preset = r.u8();
         uint8_t actionCount = r.u8();
-        r.skip(static_cast<size_t>(actionCount) * 2);
         uint8_t customizableCount = r.u8();
+        r.skip(static_cast<size_t>(actionCount) * 2);
         for (uint8_t c = 0; c < customizableCount && r.ok(); ++c) {
             r.skip(2);
             uint8_t functionCount = r.u8();
@@ -155,14 +171,38 @@ bool applyT1(std::span<const uint8_t> p, HeadphoneState& s, InboundEvents& ev) {
         return true;
     }
     case 0x23: case 0x25: { // POWER_RET_STATUS / POWER_NTFY_STATUS
-        if (type != 0x00 && type != 0x08) return false;
-        uint8_t level = r.u8();
-        uint8_t charging = r.u8();
-        if (type == 0x08) r.u8();
-        if (!r.ok()) return false;
-        s.batteryLevel = std::min<int>(level, 100);
-        s.batteryChargingRaw = charging;
-        return true;
+        if (type == 0x00 || type == 0x08) {
+            uint8_t level = r.u8();
+            uint8_t charging = r.u8();
+            if (type == 0x08) r.u8();
+            if (!r.ok()) return false;
+            s.batteryLevel = std::min<int>(level, 100);
+            s.batteryChargingRaw = charging;
+            return true;
+        }
+        if (type == 0x01 || type == 0x09) { // left / right earbud
+            uint8_t left = r.u8();
+            uint8_t leftCharging = r.u8();
+            uint8_t right = r.u8();
+            uint8_t rightCharging = r.u8();
+            if (type == 0x09) { r.u8(); r.u8(); }
+            if (!r.ok()) return false;
+            s.batteryLeft = std::min<int>(left, 100);
+            s.batteryLeftChargingRaw = leftCharging;
+            s.batteryRight = std::min<int>(right, 100);
+            s.batteryRightChargingRaw = rightCharging;
+            return true;
+        }
+        if (type == 0x02 || type == 0x0A) { // charging case
+            uint8_t level = r.u8();
+            uint8_t charging = r.u8();
+            if (type == 0x0A) r.u8();
+            if (!r.ok()) return false;
+            s.batteryCase = std::min<int>(level, 100);
+            s.batteryCaseChargingRaw = charging;
+            return true;
+        }
+        return false;
     }
     case 0x27: case 0x29: { // POWER_RET_PARAM / POWER_NTFY_PARAM (auto power off)
         if (type != 0x04 && type != 0x05) return false;
@@ -251,7 +291,7 @@ bool applyT1(std::span<const uint8_t> p, HeadphoneState& s, InboundEvents& ev) {
         return true;
     }
     case 0xC9: { // LOG_NTFY_PARAM
-        if (containsText(p, "unitWear") || containsText(p, "unitRemove")) ev.wearLogLine = true;
+        if (containsTextIgnoreCase(p, "unitWear") || containsTextIgnoreCase(p, "unitRemove")) ev.wearLogLine = true;
         return true;
     }
     case 0xD1: { // GENERAL_SETTING_RET_CAPABILITY
@@ -282,6 +322,10 @@ bool applyT1(std::span<const uint8_t> p, HeadphoneState& s, InboundEvents& ev) {
         return true;
     }
     case 0xE1: { // AUDIO_RET_CAPABILITY
+        if (type == 0x05) {
+            s.connectionModeCapability = Bytes(p.begin(), p.end());
+            return true;
+        }
         if (type != 0x01) return false;
         uint8_t upscaling = r.u8();
         if (!r.ok()) return false;
@@ -289,6 +333,10 @@ bool applyT1(std::span<const uint8_t> p, HeadphoneState& s, InboundEvents& ev) {
         return true;
     }
     case 0xE3: case 0xE5: { // AUDIO_RET_STATUS / AUDIO_NTFY_STATUS
+        if (type == 0x05) {
+            s.connectionModeStatus = Bytes(p.begin(), p.end());
+            return true;
+        }
         if (type != 0x01) return false;
         uint8_t available = r.u8();
         if (!r.ok()) return false;
@@ -357,6 +405,8 @@ bool applyT1(std::span<const uint8_t> p, HeadphoneState& s, InboundEvents& ev) {
         }
         return false;
     }
+    case 0xF5: // SYSTEM_NTFY_STATUS, head gesture training state (protocol.md 9.1): ignored
+        return type == 0x10;
     case 0xFB: case 0xFD: { // SYSTEM_RET_EXT_PARAM / SYSTEM_NTFY_EXT_PARAM
         if (type != 0x0C) return false;
         uint8_t sensitivity = r.u8();
@@ -464,19 +514,37 @@ bool applyT2(std::span<const uint8_t> p, HeadphoneState& s, InboundEvents& ev) {
 // Supported
 // ---------------------------------------------------------------------------
 
-Supported Supported::fallback() {
+Supported Supported::fallback(std::string_view model) {
     Supported s;
-    s.battery = true;
+    if (model == kModelWh) {
+        s.battery = true;
+        s.nc_amb_button = true;
+    } else if (model == kModelWf) {
+        s.battery_lr = true;
+        s.battery_case = true;
+        s.voice_guidance_volume = true;
+    } else {
+        return s;
+    }
     s.noise_control = true;
     s.eq_preset = true;
     s.eq_custom = true;
     s.speak_to_chat = true;
     s.voice_guidance = true;
     s.auto_power_off = true;
-    s.nc_amb_button = true;
     s.ear_detection = true;
     s.volume = true;
     return s;
+}
+
+std::optional<bool> chargingFromRaw(const std::optional<uint8_t>& raw) {
+    if (!raw) return std::nullopt;
+    switch (*raw) {
+        case 0x00: return false;
+        case 0x01: return true;
+        case 0x03: return true;
+        default:   return std::nullopt;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -501,6 +569,43 @@ const GeneralSettingSlot* HeadphoneState::settingSlot(std::string_view subject) 
 const GeneralSettingSlot* HeadphoneState::multipointSlot() const { return settingSlot(kMultipointSubject); }
 
 const GeneralSettingSlot* HeadphoneState::touchPanelSlot() const { return settingSlot(kTouchPanelSubject); }
+
+const GeneralSettingSlot* HeadphoneState::sidetoneSlot() const { return settingSlot(kSidetoneSubject); }
+
+std::optional<size_t> HeadphoneState::assignableKeyIndex(uint8_t key) const {
+    if (!assignableCapability) return std::nullopt;
+    const auto& keys = assignableCapability->keys;
+    for (size_t i = 0; i < keys.size(); ++i) {
+        if (keys[i].key == key) return i;
+    }
+    return std::nullopt;
+}
+
+std::string_view HeadphoneState::model() const {
+    if (modelName) {
+        if (equalsIgnoreCase(*modelName, kModelWh)) return kModelWh;
+        if (equalsIgnoreCase(*modelName, kModelWf)) return kModelWf;
+        return kModelOther;
+    }
+    if (containsIgnoreCase(bluezName, kModelWh)) return kModelWh;
+    if (containsIgnoreCase(bluezName, kModelWf)) return kModelWf;
+    return kModelOther;
+}
+
+std::string_view HeadphoneState::kind() const {
+    const auto m = model();
+    if (m == kModelWh) return "headphones";
+    if (m == kModelWf) return "earbuds";
+    return (supported && supported->battery_lr) ? "earbuds" : "headphones";
+}
+
+std::string HeadphoneState::displayName() const {
+    if (!alias.empty()) return alias;
+    const auto m = model();
+    if (m == kModelWh) return "WH-1000XM5";
+    if (m == kModelWf) return "WF-1000XM5";
+    return "Sony headset";
+}
 
 std::optional<uint8_t> HeadphoneState::ncAmbKeyIndex() const {
     if (!assignableCapability) return std::nullopt;
@@ -531,15 +636,7 @@ std::optional<int> HeadphoneState::ambientLevelValue() const {
     return static_cast<int>(*ncLevel);
 }
 
-std::optional<bool> HeadphoneState::batteryCharging() const {
-    if (!batteryChargingRaw) return std::nullopt;
-    switch (*batteryChargingRaw) {
-        case 0x00: return false;
-        case 0x01: return true;
-        case 0x03: return true;
-        default:   return std::nullopt;
-    }
-}
+std::optional<bool> HeadphoneState::batteryCharging() const { return chargingFromRaw(batteryChargingRaw); }
 
 std::optional<std::vector<std::string>> HeadphoneState::eqPresetNames() const {
     if (!eqCapability) return std::nullopt;
@@ -576,6 +673,43 @@ std::optional<std::vector<std::string>> HeadphoneState::buttonFunctionOptions() 
     }
     if (names.empty()) return std::nullopt;
     return names;
+}
+
+std::optional<std::string> HeadphoneState::touchFunctionString(uint8_t key) const {
+    auto idx = assignableKeyIndex(key);
+    if (!idx || !assignableValue || *idx >= assignableValue->size()) return std::nullopt;
+    return touchFunctionName((*assignableValue)[*idx]);
+}
+
+std::optional<std::vector<std::string>> HeadphoneState::touchFunctionOptions(uint8_t key) const {
+    auto idx = assignableKeyIndex(key);
+    if (!idx) return std::nullopt;
+    std::vector<std::string> names;
+    for (uint8_t preset : assignableCapability->keys[*idx].presets) {
+        auto name = touchFunctionName(preset);
+        if (name == "other") continue;
+        if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
+    }
+    if (names.empty()) return std::nullopt;
+    return names;
+}
+
+uint8_t HeadphoneState::touchPresetFor(uint8_t key, std::string_view name) const {
+    const uint8_t preferred = touchFunctionValue(name).value_or(0xFF);
+    auto idx = assignableKeyIndex(key);
+    if (!idx) return preferred;
+    const auto& presets = assignableCapability->keys[*idx].presets;
+    if (std::find(presets.begin(), presets.end(), preferred) != presets.end()) return preferred;
+    for (uint8_t preset : presets) {
+        if (touchFunctionName(preset) == name) return preset;
+    }
+    return preferred;
+}
+
+std::optional<bool> HeadphoneState::sidetoneValue() const {
+    const auto* slot = sidetoneSlot();
+    if (!slot) return std::nullopt;
+    return slot->value;
 }
 
 std::optional<bool> HeadphoneState::multipointValue() const {
@@ -625,16 +759,38 @@ std::optional<std::vector<std::string>> HeadphoneState::quickAccessOptions(uint8
 
 std::optional<bool> HeadphoneState::worn() const {
     if (!wornStatus) return std::nullopt;
+    const bool earbuds = kind() == "earbuds";
     switch (*wornStatus) {
         case 0x00: return true;
-        case 0x02: case 0x03: case 0x04: return false;
+        case 0x02: case 0x03: return earbuds;
+        case 0x04: return false;
         default: return std::nullopt;
     }
 }
 
-void HeadphoneState::resetForConnection(const std::string& name, const std::optional<std::string>& addr) {
+std::optional<bool> HeadphoneState::wornLeft() const {
+    if (!wornStatus || kind() != "earbuds") return std::nullopt;
+    switch (*wornStatus) {
+        case 0x00: case 0x03: return true;
+        case 0x02: case 0x04: return false;
+        default: return std::nullopt;
+    }
+}
+
+std::optional<bool> HeadphoneState::wornRight() const {
+    if (!wornStatus || kind() != "earbuds") return std::nullopt;
+    switch (*wornStatus) {
+        case 0x00: case 0x02: return true;
+        case 0x03: case 0x04: return false;
+        default: return std::nullopt;
+    }
+}
+
+void HeadphoneState::resetForConnection(const std::string& newAlias, const std::string& newBluezName,
+                                        const std::optional<std::string>& addr) {
     HeadphoneState fresh;
-    fresh.deviceName = name.empty() ? "WH-1000XM5" : name;
+    fresh.alias = newAlias;
+    fresh.bluezName = newBluezName;
     if (addr) fresh.address = normalizeAddress(*addr);
     *this = std::move(fresh);
 }
@@ -648,6 +804,10 @@ void selectVariants(HeadphoneState& s) {
     using fn1::BATTERY_LEVEL_INDICATOR;
     v.batteryType = s.hasFunction(Table::T1, BATTERY_LEVEL_INDICATOR) ? 0x00
                   : s.hasFunction(Table::T1, fn1::BATTERY_LEVEL_WITH_THRESHOLD) ? 0x08 : 0x00;
+    v.lrBatteryType = s.hasFunction(Table::T1, fn1::LR_BATTERY_LEVEL_WITH_THRESHOLD) ? 0x09
+                    : s.hasFunction(Table::T1, fn1::LEFT_RIGHT_BATTERY_LEVEL_INDICATOR) ? 0x01 : 0x09;
+    v.caseBatteryType = s.hasFunction(Table::T1, fn1::CRADLE_BATTERY_LEVEL_WITH_THRESHOLD) ? 0x0A
+                      : s.hasFunction(Table::T1, fn1::CRADLE_BATTERY_LEVEL_INDICATOR) ? 0x02 : 0x0A;
 
     if (s.hasFunction(Table::T1, fn1::NC_ASM_DUAL)) v.ncAsmType = 0x17;
     else if (s.hasFunction(Table::T1, fn1::NC_ASM_NOISE_ADAPTATION)) v.ncAsmType = 0x19;
@@ -680,6 +840,8 @@ void selectVariants(HeadphoneState& s) {
     if (mp) v.multipointSlot = mp->slot; else v.multipointSlot.reset();
     const auto* tp = s.touchPanelSlot();
     if (tp) v.touchPanelSlot = tp->slot; else v.touchPanelSlot.reset();
+    const auto* st = s.sidetoneSlot();
+    if (st) v.sidetoneSlot = st->slot; else v.sidetoneSlot.reset();
 }
 
 Supported deriveSupported(const HeadphoneState& s) {
@@ -688,6 +850,8 @@ Supported deriveSupported(const HeadphoneState& s) {
 
     Supported out;
     out.battery = t1(fn1::BATTERY_LEVEL_INDICATOR) || t1(fn1::BATTERY_LEVEL_WITH_THRESHOLD);
+    out.battery_lr = t1(fn1::LR_BATTERY_LEVEL_WITH_THRESHOLD) || t1(fn1::LEFT_RIGHT_BATTERY_LEVEL_INDICATOR);
+    out.battery_case = t1(fn1::CRADLE_BATTERY_LEVEL_WITH_THRESHOLD) || t1(fn1::CRADLE_BATTERY_LEVEL_INDICATOR);
     out.noise_control = t1(fn1::NC_ASM_DUAL) || t1(fn1::NC_ASM_NOISE_ADAPTATION) || t1(fn1::NC_ASM_AUTO);
     out.eq_preset = t1(fn1::PRESET_EQ);
     out.eq_custom = out.eq_preset &&
@@ -700,8 +864,10 @@ Supported deriveSupported(const HeadphoneState& s) {
     out.voice_guidance_volume = t2(fn2::VOICE_GUIDANCE_WITH_VOLUME) || t2(fn2::VOICE_GUIDANCE_VOLUME_FIXED_5_STEPS);
     out.auto_power_off = t1(fn1::AUTO_POWER_OFF) || t1(fn1::AUTO_POWER_OFF_WITH_WEARING_DETECTION);
     out.nc_amb_button = t1(fn1::AMBIENT_SOUND_CONTROL_MODE_SELECT);
-    out.button_function = (t1(fn1::ASSIGNABLE_SETTING) || t1(fn1::ASSIGNABLE_SETTING_WITH_LIMITATION)) &&
-                          s.ncAmbKey() != nullptr;
+    const bool assignable = t1(fn1::ASSIGNABLE_SETTING) || t1(fn1::ASSIGNABLE_SETTING_WITH_LIMITATION);
+    out.button_function = assignable && s.ncAmbKey() != nullptr;
+    out.touch_function = assignable && s.assignableKeyIndex(kKeyLeftSide).has_value() &&
+                         s.assignableKeyIndex(kKeyRightSide).has_value();
     out.ear_detection = t1(fn1::PLAYBACK_CONTROL_BY_WEARING);
     out.worn = s.table2Supported && s.support2.has_value() &&
                (t2(fn2::WEARING_STATUS_CHECKER) || t1(fn1::WEARING_STATUS_DETECTOR));
@@ -716,14 +882,19 @@ Supported deriveSupported(const HeadphoneState& s) {
                   t2(fn2::PAIRING_DEVICE_MANAGEMENT_WITH_COD_CLASSIC_LE);
     out.source_switch = t2(fn2::SOURCE_SWITCH_CONTROL) && out.devices;
     out.touch_panel = s.touchPanelSlot() != nullptr;
-    out.quick_access = t1(fn1::QUICK_ACCESS);
+    out.sidetone = s.sidetoneSlot() != nullptr;
+    out.quick_access = t1(fn1::QUICK_ACCESS) && s.quickAccessCapability &&
+        std::any_of(s.quickAccessCapability->actions.begin(), s.quickAccessCapability->actions.end(),
+                    [](const QuickAccessAction& a) { return !a.functions.empty(); });
     return out;
 }
 
 void applyFallback(HeadphoneState& s) {
     s.fallback = true;
-    s.supported = Supported::fallback();
+    s.supported = Supported::fallback(s.model());
     s.variants.batteryType = 0x00;
+    s.variants.lrBatteryType = 0x09;
+    s.variants.caseBatteryType = 0x0A;
     s.variants.ncAsmType = 0x17;
     s.variants.autoPowerOffType = 0x05;
     s.variants.voiceGuidanceType = 0x01;
@@ -758,24 +929,18 @@ void writeIntArray(json::Writer& w, const std::optional<std::array<int, 5>>& val
     w.endArray();
 }
 
-} // namespace
-
-std::string statusJson(const HeadphoneState& s, int64_t lastUpdated) {
-    json::Writer w;
+void writeHeadset(json::Writer& w, const HeadphoneState& s) {
     w.beginObject();
-    w.field("schema_version", 2);
-    w.field("connected", s.connected);
-    w.field("last_updated", lastUpdated);
-    if (!s.connected) {
-        w.endObject();
-        return w.str();
-    }
-
     const Supported sup = s.supported.value_or(Supported{});
     const bool ready = s.supported.has_value();
+    const std::string id = s.address.value_or("unknown");
 
-    w.field("device_name", s.deviceName);
-    w.field("address", s.address);
+    w.field("id", id);
+    w.field("model", s.model());
+    w.field("kind", s.kind());
+    w.field("connected_since", s.connectedSince);
+    w.field("device_name", s.displayName());
+    w.field("address", id);
     w.field("model_name", s.modelName);
     w.field("firmware_version", s.firmwareVersion);
     if (ready) w.field("supported_source", s.fallback ? "fallback" : "device");
@@ -787,6 +952,8 @@ std::string statusJson(const HeadphoneState& s, int64_t lastUpdated) {
     } else {
         w.beginObject();
         w.field("battery", sup.battery);
+        w.field("battery_lr", sup.battery_lr);
+        w.field("battery_case", sup.battery_case);
         w.field("noise_control", sup.noise_control);
         w.field("eq_preset", sup.eq_preset);
         w.field("eq_custom", sup.eq_custom);
@@ -797,6 +964,7 @@ std::string statusJson(const HeadphoneState& s, int64_t lastUpdated) {
         w.field("auto_power_off", sup.auto_power_off);
         w.field("nc_amb_button", sup.nc_amb_button);
         w.field("button_function", sup.button_function);
+        w.field("touch_function", sup.touch_function);
         w.field("ear_detection", sup.ear_detection);
         w.field("worn", sup.worn);
         w.field("volume", sup.volume);
@@ -806,23 +974,24 @@ std::string statusJson(const HeadphoneState& s, int64_t lastUpdated) {
         w.field("devices", sup.devices);
         w.field("source_switch", sup.source_switch);
         w.field("touch_panel", sup.touch_panel);
+        w.field("sidetone", sup.sidetone);
         w.field("quick_access", sup.quick_access);
         w.endObject();
     }
 
-    auto battery = gate(sup.battery, s.batteryLevel);
-    auto charging = gate(sup.battery, s.batteryCharging());
-    w.field("battery_level", battery);
-    w.field("battery_charging", charging);
-    w.field("charging", charging);
+    w.field("battery_level", gate(sup.battery, s.batteryLevel));
+    w.field("battery_charging", gate(sup.battery, s.batteryCharging()));
+    w.field("battery_left", gate(sup.battery_lr, s.batteryLeft));
+    w.field("battery_left_charging", gate(sup.battery_lr, chargingFromRaw(s.batteryLeftChargingRaw)));
+    w.field("battery_right", gate(sup.battery_lr, s.batteryRight));
+    w.field("battery_right_charging", gate(sup.battery_lr, chargingFromRaw(s.batteryRightChargingRaw)));
+    w.field("battery_case", gate(sup.battery_case, s.batteryCase));
+    w.field("battery_case_charging", gate(sup.battery_case, chargingFromRaw(s.batteryCaseChargingRaw)));
 
-    auto mode = gate(sup.noise_control, s.noiseModeString());
-    auto level = gate(sup.noise_control, s.ambientLevelValue());
     std::optional<bool> voice;
     if (sup.noise_control && s.ncAmbientMode) voice = (*s.ncAmbientMode == 0x01);
-    w.field("noise_mode", mode);
-    w.field("ambient_sound_level", level);
-    w.field("ambient_level", level);
+    w.field("noise_mode", gate(sup.noise_control, s.noiseModeString()));
+    w.field("ambient_sound_level", gate(sup.noise_control, s.ambientLevelValue()));
     w.field("voice_passthrough", voice);
 
     std::optional<std::string> preset;
@@ -830,16 +999,11 @@ std::string statusJson(const HeadphoneState& s, int64_t lastUpdated) {
     w.field("eq_preset", preset);
     w.key("eq_presets");
     writeStringArray(w, sup.eq_preset ? s.eqPresetNames() : std::nullopt);
-    auto bands = sup.eq_custom ? s.eqCustomBands : std::nullopt;
     w.key("eq_custom_bands");
-    writeIntArray(w, bands);
-    w.key("eq_bands");
-    writeIntArray(w, bands);
+    writeIntArray(w, sup.eq_custom ? s.eqCustomBands : std::nullopt);
     w.field("clear_bass", gate(sup.eq_custom, s.clearBass));
 
-    auto dsee = gate(sup.dsee, s.dsee);
-    w.field("dsee_extreme", dsee);
-    w.field("dsee", dsee);
+    w.field("dsee_extreme", gate(sup.dsee, s.dsee));
 
     std::optional<std::string> quality;
     if (sup.connection_quality && s.connectionQuality) quality = connectionQualityName(*s.connectionQuality);
@@ -879,8 +1043,17 @@ std::string statusJson(const HeadphoneState& s, int64_t lastUpdated) {
     w.key("button_functions");
     writeStringArray(w, sup.button_function ? s.buttonFunctionOptions() : std::nullopt);
 
+    w.field("touch_function_left", gate(sup.touch_function, s.touchFunctionString(kKeyLeftSide)));
+    w.field("touch_function_right", gate(sup.touch_function, s.touchFunctionString(kKeyRightSide)));
+    w.key("touch_function_left_options");
+    writeStringArray(w, sup.touch_function ? s.touchFunctionOptions(kKeyLeftSide) : std::nullopt);
+    w.key("touch_function_right_options");
+    writeStringArray(w, sup.touch_function ? s.touchFunctionOptions(kKeyRightSide) : std::nullopt);
+
     w.field("ear_detection", gate(sup.ear_detection, s.earDetection));
     w.field("worn", gate(sup.worn, s.worn()));
+    w.field("worn_left", gate(sup.worn, s.wornLeft()));
+    w.field("worn_right", gate(sup.worn, s.wornRight()));
     w.field("multipoint", gate(sup.multipoint, s.multipointValue()));
 
     w.key("devices");
@@ -904,6 +1077,7 @@ std::string statusJson(const HeadphoneState& s, int64_t lastUpdated) {
     }
 
     w.field("touch_panel", gate(sup.touch_panel, s.touchPanelValue()));
+    w.field("sidetone", gate(sup.sidetone, s.sidetoneValue()));
     w.field("quick_access_double_tap", gate(sup.quick_access, s.quickAccessString(kActionDoubleTap)));
     w.field("quick_access_triple_tap", gate(sup.quick_access, s.quickAccessString(kActionTripleTap)));
     w.key("quick_access_double_tap_options");
@@ -912,6 +1086,69 @@ std::string statusJson(const HeadphoneState& s, int64_t lastUpdated) {
     writeStringArray(w, sup.quick_access ? s.quickAccessOptions(kActionTripleTap) : std::nullopt);
 
     w.endObject();
+}
+
+} // namespace
+
+std::string headsetJson(const HeadphoneState& s) {
+    json::Writer w;
+    writeHeadset(w, s);
+    return w.str();
+}
+
+bool playsFromHere(const HeadphoneState& s, const std::vector<std::string>& adapterAddresses) {
+    const Supported sup = s.supported.value_or(Supported{});
+    if (sup.devices && s.devices) {
+        for (const auto& d : *s.devices) {
+            const bool active = d.connectionStatus != 0x00 && d.connectionStatus == s.playbackSlot;
+            if (!active) continue;
+            for (const auto& adapter : adapterAddresses) {
+                if (equalsIgnoreCase(adapter, d.address)) return true;
+            }
+            return false;
+        }
+        return false;
+    }
+    return sup.codec && s.codec && *s.codec != 0x00;
+}
+
+std::vector<const HeadphoneState*> orderHeadsets(std::vector<const HeadphoneState*> headsets) {
+    std::stable_sort(headsets.begin(), headsets.end(), [](const HeadphoneState* a, const HeadphoneState* b) {
+        const bool aPhones = a->kind() == "headphones";
+        const bool bPhones = b->kind() == "headphones";
+        if (aPhones != bPhones) return aPhones;
+        return a->address.value_or("") < b->address.value_or("");
+    });
+    return headsets;
+}
+
+std::optional<std::string> choosePrimary(const std::vector<const HeadphoneState*>& ordered,
+                                         const std::vector<std::string>& adapterAddresses) {
+    std::vector<const HeadphoneState*> pool;
+    for (const auto* s : ordered) {
+        if (playsFromHere(*s, adapterAddresses)) pool.push_back(s);
+    }
+    if (pool.empty()) pool = ordered;
+    const HeadphoneState* best = nullptr;
+    for (const auto* s : pool) {
+        if (!best || s->connectedSince > best->connectedSince) best = s;
+    }
+    if (!best) return std::nullopt;
+    return best->address.value_or("unknown");
+}
+
+std::string statusDocument(const std::vector<const HeadphoneState*>& ordered, const std::optional<std::string>& primary,
+                           int64_t lastUpdated) {
+    json::Writer w;
+    w.beginObject();
+    w.field("schema_version", 3);
+    w.field("connected", !ordered.empty());
+    w.field("last_updated", lastUpdated);
+    w.field("primary", primary);
+    w.key("headsets").beginArray();
+    for (const auto* s : ordered) writeHeadset(w, *s);
+    w.endArray();
+    w.endObject();
     return w.str();
 }
 
@@ -919,7 +1156,11 @@ std::string probeJson(const HeadphoneState& s, std::span<const FrameRecord> rece
     json::Writer w;
     w.beginObject();
     w.field("probe_version", 1);
-    w.field("address", s.address);
+    const std::string id = s.address.value_or("unknown");
+    w.field("id", id);
+    w.field("model", s.model());
+    w.field("kind", s.kind());
+    w.field("address", id);
 
     w.key("protocol");
     if (!s.protocolKnown) {
@@ -1041,6 +1282,13 @@ std::string probeJson(const HeadphoneState& s, std::span<const FrameRecord> rece
         }
         w.endObject();
     }
+
+    w.key("connection_mode").beginObject();
+    if (s.connectionModeCapability) w.field("capability", hexBytes(*s.connectionModeCapability));
+    else w.nullField("capability");
+    if (s.connectionModeStatus) w.field("status", hexBytes(*s.connectionModeStatus));
+    else w.nullField("status");
+    w.endObject();
 
     w.key("recent_frames").beginArray();
     for (const auto& f : recentFrames) {

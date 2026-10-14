@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 #include <sys/socket.h>
@@ -21,7 +22,7 @@ bool is_negative_number(const std::string& str) {
 }
 
 void print_usage(std::ostream& os) {
-    os << "Usage: sony-ctl [-s <socket>] <verb> [args...]\n\n"
+    os << "Usage: sony-ctl [-s <socket>] [-H <headset>] <verb> [args...]\n\n"
        << "Read verbs:\n"
        << "  status | probe\n\n"
        << "Setter verbs:\n";
@@ -30,11 +31,13 @@ void print_usage(std::ostream& os) {
                       cmd::Verb::VoiceGuidance, cmd::Verb::VoiceGuidanceVolume, cmd::Verb::AutoPowerOff,
                       cmd::Verb::NcAmbButton, cmd::Verb::ButtonFunction, cmd::Verb::EarDetect, cmd::Verb::Volume,
                       cmd::Verb::ConnectionQuality, cmd::Verb::Multipoint, cmd::Verb::Source,
-                      cmd::Verb::TouchPanel, cmd::Verb::QuickAccess}) {
+                      cmd::Verb::TouchPanel, cmd::Verb::QuickAccess, cmd::Verb::TouchFunction,
+                      cmd::Verb::Sidetone}) {
         os << "  " << cmd::usage(verb) << "\n";
     }
     os << "\nOptions:\n"
        << "  -s, --socket <path>  Override socket path\n"
+       << "  -H, --headset <sel>  Address or model of the headset (default: the primary headset)\n"
        << "  -h, --help           Show help\n"
        << "  -v, --version        Show version\n";
 }
@@ -130,6 +133,7 @@ int send_command(const std::string& socket_path, const std::string& line, bool e
 
 int main(int argc, char* argv[]) {
     std::string socket_path;
+    std::optional<std::string> headset;
     bool show_help = false;
     bool show_version = false;
     std::vector<std::string> remaining;
@@ -150,6 +154,14 @@ int main(int argc, char* argv[]) {
             socket_path = argv[++i];
         } else if (arg.rfind("--socket=", 0) == 0) {
             socket_path = arg.substr(9);
+        } else if (arg == "-H" || arg == "--headset") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: " << arg << " requires a headset address or model\n";
+                return 1;
+            }
+            headset = argv[++i];
+        } else if (arg.rfind("--headset=", 0) == 0) {
+            headset = arg.substr(10);
         } else if (arg == "--") {
             for (++i; i < argc; ++i) remaining.emplace_back(argv[i]);
             break;
@@ -178,12 +190,24 @@ int main(int argc, char* argv[]) {
         socket_path = get_default_socket_path();
     }
 
+    if (headset && !cmd::validSelector(*headset)) {
+        std::cerr << "Error: usage: " << cmd::kSelectorUsage << "\n";
+        return 1;
+    }
+
     auto parsed = cmd::parse(remaining, false);
     if (!parsed.command) {
         std::cerr << "Error: " << parsed.error << "\n";
         return 1;
     }
+    if (headset) {
+        if (parsed.command->verb == cmd::Verb::Status) {
+            std::cerr << "Error: 'status' does not take --headset\n";
+            return 1;
+        }
+        parsed.command->selector = headset;
+    }
 
     const bool expects_json = parsed.command->verb == cmd::Verb::Status || parsed.command->verb == cmd::Verb::Probe;
-    return send_command(socket_path, parsed.command->line(), expects_json);
+    return send_command(socket_path, parsed.command->requestLine(), expects_json);
 }

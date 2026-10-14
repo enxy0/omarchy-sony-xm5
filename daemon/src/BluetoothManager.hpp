@@ -52,10 +52,20 @@ struct BluetoothConfig {
     uint32_t connectTimeoutMs{5000};   // RFCOMM connect timeout (ms)
     uint8_t defaultChannel{DEFAULT_RFCOMM_CHANNEL}; // Fallback channel if SDP fails
     bool mockMode{false};              // Enable mock transport
+    uint32_t maxReconnectAttempts{0};  // Give up after this many failed attempts in a row (0 = never)
 };
 
-std::optional<BluetoothDeviceInfo> selectSonyHeadphones(const std::vector<BluetoothDeviceInfo>& devices,
-                                                        const std::string& preferredMac);
+struct BluezSnapshot {
+    bool ok{false};
+    std::vector<BluetoothDeviceInfo> devices;
+    std::vector<std::string> adapterAddresses;
+};
+
+// Contract 2.2: the paired, connected devices that get a session. Without an
+// allow-list: names containing WH-1000XM5 or WF-1000XM5 (any case). With an
+// allow-list: exactly the listed addresses, whatever their name.
+std::vector<BluetoothDeviceInfo> selectHeadsets(const std::vector<BluetoothDeviceInfo>& devices,
+                                                const std::vector<std::string>& allowList);
 
 // ---------------------------------------------------------------------------
 // Abstract Interfaces
@@ -87,6 +97,23 @@ public:
     virtual ~IDeviceDiscovery() = default;
     virtual std::vector<BluetoothDeviceInfo> getAvailableDevices() = 0;
     virtual std::optional<BluetoothDeviceInfo> findSonyHeadphones(const std::string& preferredMac = "") = 0;
+    virtual BluezSnapshot snapshot() { return BluezSnapshot{true, getAvailableDevices(), {}}; }
+};
+
+std::unique_ptr<IDeviceDiscovery> createBluezDiscovery();
+
+// Answers findSonyHeadphones from a lookup function (the daemon's last BlueZ snapshot).
+class LookupDiscovery : public IDeviceDiscovery {
+public:
+    using Lookup = std::function<std::optional<BluetoothDeviceInfo>(const std::string& mac)>;
+    explicit LookupDiscovery(Lookup lookup) : lookup_(std::move(lookup)) {}
+    std::vector<BluetoothDeviceInfo> getAvailableDevices() override { return {}; }
+    std::optional<BluetoothDeviceInfo> findSonyHeadphones(const std::string& preferredMac = "") override {
+        return lookup_(preferredMac);
+    }
+
+private:
+    Lookup lookup_;
 };
 
 // SDP Resolver abstraction (BlueZ sdp_lib or Mock)
@@ -131,12 +158,14 @@ private:
 class MockDeviceDiscovery : public IDeviceDiscovery {
 public:
     std::vector<BluetoothDeviceInfo> devices;
+    std::vector<std::string> adapterAddresses;
 
     std::vector<BluetoothDeviceInfo> getAvailableDevices() override {
         return devices;
     }
 
     std::optional<BluetoothDeviceInfo> findSonyHeadphones(const std::string& preferredMac = "") override;
+    BluezSnapshot snapshot() override { return BluezSnapshot{true, devices, adapterAddresses}; }
 };
 
 class MockSdpResolver : public ISdpResolver {
@@ -172,6 +201,9 @@ public:
 
     // Factory methods
     static std::unique_ptr<BluetoothManager> createLinux(BluetoothConfig config = {});
+    // RFCOMM link to one device; `discovery` answers for config.preferredMac.
+    static std::unique_ptr<BluetoothManager> createLinuxLink(BluetoothConfig config,
+                                                             std::unique_ptr<IDeviceDiscovery> discovery);
     static std::unique_ptr<BluetoothManager> createMock(BluetoothConfig config = {},
                                                         int* outPeerFd = nullptr);
 

@@ -45,6 +45,8 @@ Json parsed(const std::string& text) {
     return j ? *j : Json{};
 }
 
+Json entryOf(const HeadphoneState& s) { return parsed(headsetJson(s)); }
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -356,12 +358,12 @@ TEST(EqValueForPresetOffCarriesBandsFromXm5Capture) {
     s.connected = true;
     CHECK(apply1(B({0x57, 0x00, 0x00, 0x06, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A}), s));
     s.supported = deriveSupported(s);
-    Json j = parsed(statusJson(s, 1));
+    Json j = entryOf(s);
     CHECK_EQ(j["eq_preset"].string, std::string("off"));
     CHECK(j["supported"]["eq_custom"].boolean);
     REQUIRE(j["eq_custom_bands"].array.size() == 5);
     for (const auto& band : j["eq_custom_bands"].array) CHECK_EQ(band.number, 0.0);
-    REQUIRE(j["eq_bands"].array.size() == 5);
+    CHECK(!j.has("eq_bands"));
     CHECK_EQ(j["clear_bass"].number, 0.0);
 }
 
@@ -388,7 +390,7 @@ TEST(QuickAccessParsesXm5Capture) {
 
     s.supported = deriveSupported(s);
     CHECK(s.supported->quick_access);
-    Json j = parsed(statusJson(s, 1));
+    Json j = entryOf(s);
     CHECK_EQ(j["quick_access_double_tap"].string, std::string("other"));
     CHECK_EQ(j["quick_access_triple_tap"].string, std::string("spotify"));
     const Json options = j["quick_access_double_tap_options"];
@@ -431,7 +433,7 @@ TEST(TouchPanelSlotIsFoundBySubject) {
     CHECK_EQ(s.multipointValue(), std::optional<bool>(true));
     s.supported = deriveSupported(s);
     CHECK(s.supported->touch_panel);
-    Json j = parsed(statusJson(s, 1));
+    Json j = entryOf(s);
     CHECK(!j["touch_panel"].boolean);
     CHECK(!j["touch_panel"].isNull());
     CHECK_EQ(req::setGeneralSettingBool(0xD1, false), B({0xD8, 0xD1, 0x00, 0x01}));
@@ -471,11 +473,12 @@ TEST(SystemParamsParse) {
 
 TEST(AssignableParsesBothCapabilityTypes) {
     HeadphoneState s;
+    // preset = PRESET NA NC (ACTION FUNCTION) x NA (ACTION DEFAULT NF (FUNCTION) x NF) x NC
     Bytes cap03 = B({0xF1, 0x03, 0x02,
-                     0x02, 0x00, 0x00, 0x01, 0x00, 0x01, 0x01, 0x20, 0x00,
+                     0x02, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x20,
                      0x04, 0x01, 0x00, 0x03,
                      0x00, 0x00, 0x00,
-                     0x31, 0x01, 0x01, 0x21, 0x01, 0x01, 0x21, 0x02, 0x21, 0x22,
+                     0x31, 0x01, 0x01, 0x01, 0x21, 0x01, 0x21, 0x02, 0x21, 0x22,
                      0x36, 0x00, 0x00});
     CHECK(apply1(cap03, s));
     REQUIRE(s.assignableCapability.has_value());
@@ -496,6 +499,175 @@ TEST(AssignableParsesBothCapabilityTypes) {
     CHECK(apply1(B({0xF9, 0x0E, 0x01, 0x99}), t));
     CHECK_EQ(t.buttonFunctionString(), std::optional<std::string>("other"));
     CHECK(!apply1(B({0xF1, 0x03, 0x01, 0x04, 0x01}), t));
+}
+
+TEST(AssignableParsesWf1000xm5Capture) {
+    // protocol.md 9.3, WF-1000XM5 fw 6.1.0: two touch sensor keys, the old
+    // parser rejected this reply.
+    const Bytes cap = B({
+        0xF1, 0x03, 0x02,
+        0x00, 0x00, 0x35, 0x03,
+        0x35, 0x04, 0x01, 0x01, 0x43, 0x02, 0x44, 0x22, 0x10, 0x03, 0x24, 0x00, 0x02, 0x04, 0x01, 0x02, 0x03, 0x04,
+        0x20, 0x04, 0x00, 0x00, 0x20, 0x01, 0x21, 0x02, 0x22, 0x03, 0x24,
+        0xFF, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x20, 0x03,
+        0x35, 0x04, 0x01, 0x01, 0x43, 0x02, 0x44, 0x22, 0x10, 0x03, 0x23, 0x00, 0x02, 0x04, 0x01, 0x02, 0x03, 0x04,
+        0x20, 0x04, 0x00, 0x00, 0x20, 0x01, 0x21, 0x02, 0x22, 0x03, 0x23,
+        0xFF, 0x01, 0x00, 0x00, 0x00});
+    HeadphoneState s = withSupport({0xF3});
+    s.connected = true;
+    CHECK(apply1(cap, s));
+    REQUIRE(s.assignableCapability.has_value());
+    REQUIRE(s.assignableCapability->keys.size() == 2);
+    CHECK_EQ(s.assignableCapability->keys[0].key, uint8_t{0x00});
+    CHECK_EQ(s.assignableCapability->keys[0].defaultPreset, uint8_t{0x35});
+    CHECK_EQ(s.assignableCapability->keys[0].presets, B({0x35, 0x20, 0xFF}));
+    CHECK_EQ(s.assignableCapability->keys[1].key, uint8_t{0x01});
+    CHECK_EQ(s.assignableCapability->keys[1].presets, B({0x35, 0x20, 0xFF}));
+    CHECK(!s.ncAmbKeyIndex().has_value());
+    CHECK(!apply1(Bytes(cap.begin(), cap.end() - 1), s));
+
+    CHECK(apply1(B({0xF7, 0x03, 0x02, 0x20, 0x20}), s));
+    CHECK_EQ(s.touchFunctionString(kKeyLeftSide), std::optional<std::string>("playback_control"));
+    CHECK(apply1(B({0xF9, 0x03, 0x02, 0x35, 0x20}), s));
+    CHECK_EQ(s.touchFunctionString(kKeyLeftSide), std::optional<std::string>("ambient_sound_control"));
+    CHECK_EQ(s.touchFunctionString(kKeyRightSide), std::optional<std::string>("playback_control"));
+    auto options = s.touchFunctionOptions(kKeyRightSide);
+    REQUIRE(options.has_value());
+    CHECK((*options == std::vector<std::string>{"ambient_sound_control", "playback_control", "none"}));
+    CHECK_EQ(s.touchPresetFor(kKeyLeftSide, "ambient_sound_control"), uint8_t{0x35});
+    CHECK_EQ(s.touchPresetFor(kKeyLeftSide, "none"), uint8_t{0xFF});
+    CHECK_EQ(req::setAssignableValue(0x03, {0x35, 0x20}), B({0xF8, 0x03, 0x02, 0x35, 0x20}));
+
+    s.supported = deriveSupported(s);
+    CHECK(s.supported->touch_function);
+    CHECK(!s.supported->button_function);
+    Json j = entryOf(s);
+    CHECK_EQ(j["touch_function_left"].string, std::string("ambient_sound_control"));
+    CHECK_EQ(j["touch_function_right_options"].array.size(), size_t{3});
+    CHECK(j["button_function"].isNull());
+
+    // Preset names and the "other" fallback; plain 00 is ambient sound control too.
+    CHECK(apply1(B({0xF9, 0x03, 0x02, 0x00, 0x77}), s));
+    CHECK_EQ(s.touchFunctionString(kKeyLeftSide), std::optional<std::string>("ambient_sound_control"));
+    CHECK_EQ(s.touchFunctionString(kKeyRightSide), std::optional<std::string>("other"));
+    CHECK_EQ(touchFunctionName(0x10), std::string("volume_control"));
+    CHECK_EQ(touchFunctionName(0x36), std::string("quick_access"));
+    CHECK_EQ(touchFunctionValue("ambient_sound_control"), std::optional<uint8_t>(0x35));
+    CHECK_EQ(touchFunctionValue("voice_recognition"), std::optional<uint8_t>(0x30));
+}
+
+TEST(EarbudBatteriesParse) {
+    HeadphoneState s;
+    // mos9527 WF-1000XM5 fw 6.1.0 capture (protocol.md 9.2).
+    CHECK(apply1(B({0x23, 0x09, 0x00, 0x00, 0x64, 0x00, 0x64, 0x64}), s));
+    CHECK_EQ(s.batteryLeft, std::optional<int>(0));
+    CHECK_EQ(chargingFromRaw(s.batteryLeftChargingRaw), std::optional<bool>(false));
+    CHECK_EQ(s.batteryRight, std::optional<int>(100));
+    CHECK(apply1(B({0x23, 0x0A, 0x35, 0x00, 0x1E}), s));
+    CHECK_EQ(s.batteryCase, std::optional<int>(53));
+    CHECK_EQ(chargingFromRaw(s.batteryCaseChargingRaw), std::optional<bool>(false));
+    // This project's WF-1000XM5 run: right earbud out of the ear reads 0 %.
+    CHECK(apply1(B({0x23, 0x09, 0x61, 0x00, 0x00, 0x00, 0x64, 0x64}), s));
+    CHECK_EQ(s.batteryLeft, std::optional<int>(97));
+    CHECK_EQ(s.batteryRight, std::optional<int>(0));
+    CHECK(apply1(B({0x23, 0x0A, 0x57, 0x00, 0x1E}), s));
+    CHECK_EQ(s.batteryCase, std::optional<int>(87));
+    // Notifications and the variants without thresholds.
+    CHECK(apply1(B({0x25, 0x09, 0x32, 0x01, 0x33, 0x03, 0x64, 0x64}), s));
+    CHECK_EQ(chargingFromRaw(s.batteryLeftChargingRaw), std::optional<bool>(true));
+    CHECK_EQ(chargingFromRaw(s.batteryRightChargingRaw), std::optional<bool>(true));
+    CHECK(apply1(B({0x25, 0x01, 0x10, 0x02, 0x11, 0x00}), s));
+    CHECK_EQ(s.batteryLeft, std::optional<int>(16));
+    CHECK(!chargingFromRaw(s.batteryLeftChargingRaw).has_value());
+    CHECK(apply1(B({0x25, 0x02, 0x40, 0x01}), s));
+    CHECK_EQ(s.batteryCase, std::optional<int>(64));
+    CHECK(!apply1(B({0x23, 0x09, 0x00, 0x00, 0x64, 0x00, 0x64}), s));
+    CHECK(!apply1(B({0x23, 0x0A, 0x35, 0x00}), s));
+    CHECK(!s.batteryLevel.has_value());
+
+    s = withSupport({0x29, 0x2A});
+    s.connected = true;
+    s.supported = deriveSupported(s);
+    CHECK(apply1(B({0x23, 0x09, 0x46, 0x00, 0x41, 0x01, 0x64, 0x64}), s));
+    CHECK(apply1(B({0x23, 0x0A, 0x35, 0x01, 0x1E}), s));
+    Json j = entryOf(s);
+    CHECK_EQ(j["battery_left"].number, 70.0);
+    CHECK(!j["battery_left_charging"].boolean);
+    CHECK_EQ(j["battery_right"].number, 65.0);
+    CHECK(j["battery_right_charging"].boolean);
+    CHECK_EQ(j["battery_case"].number, 53.0);
+    CHECK(j["battery_case_charging"].boolean);
+    CHECK(j["battery_level"].isNull());
+    CHECK_EQ(j["kind"].string, std::string("earbuds"));
+}
+
+TEST(WornStatusPerEarbud) {
+    HeadphoneState s = withSupport({0xF6}, {});
+    s.modelName = "WF-1000XM5";
+    s.supported = deriveSupported(s);
+    struct Case {
+        uint8_t ws;
+        std::optional<bool> worn, left, right;
+    };
+    const Case cases[] = {
+        {0x00, true, true, true}, {0x01, std::nullopt, std::nullopt, std::nullopt},
+        {0x02, true, false, true}, {0x03, true, true, false}, {0x04, false, false, false},
+    };
+    for (const auto& c : cases) {
+        CHECK(apply2(B({0xF3, 0x00, c.ws}), s));
+        CHECK_EQ(s.worn(), c.worn);
+        CHECK_EQ(s.wornLeft(), c.left);
+        CHECK_EQ(s.wornRight(), c.right);
+    }
+    HeadphoneState wh = withSupport({}, {0xF0});
+    wh.modelName = "WH-1000XM5";
+    CHECK(apply2(B({0xF5, 0x00, 0x03}), wh));
+    CHECK_EQ(wh.worn(), std::optional<bool>(false));
+    CHECK(!wh.wornLeft().has_value());
+    CHECK(!wh.wornRight().has_value());
+}
+
+TEST(SidetoneSlotIsFoundBySubject) {
+    HeadphoneState s = withSupport({0xD1, 0xD2});
+    s.connected = true;
+    // WF-1000XM5 fw 6.1.0 capture (protocol.md 9.1).
+    CHECK(apply1(withString(withString(B({0xD1, 0xD1, 0x00, 0x01}), "SIDETONE_SETTING"), "SIDETONE_SETTING_SUMMARY"), s));
+    CHECK(apply1(withString(withString(B({0xD1, 0xD2, 0x00, 0x01}), "MULTIPOINT_SETTING"),
+                            "MULTIPOINT_SETTING_SUMMARY_LDAC_AVAILABLE"), s));
+    selectVariants(s);
+    CHECK_EQ(s.variants.sidetoneSlot, std::optional<uint8_t>(0xD1));
+    CHECK_EQ(s.variants.multipointSlot, std::optional<uint8_t>(0xD2));
+    CHECK(!s.variants.touchPanelSlot.has_value());
+    CHECK(apply1(B({0xD7, 0xD1, 0x00, 0x00}), s));
+    CHECK_EQ(s.sidetoneValue(), std::optional<bool>(true));
+    CHECK(apply1(B({0xD9, 0xD1, 0x00, 0x01}), s));
+    CHECK_EQ(s.sidetoneValue(), std::optional<bool>(false));
+    s.supported = deriveSupported(s);
+    CHECK(s.supported->sidetone);
+    CHECK(!s.supported->touch_panel);
+    Json j = entryOf(s);
+    CHECK(!j["sidetone"].boolean);
+    CHECK(!j["sidetone"].isNull());
+    CHECK(j["touch_panel"].isNull());
+    CHECK_EQ(req::setGeneralSettingBool(0xD1, true), B({0xD8, 0xD1, 0x00, 0x00}));
+}
+
+TEST(ConnectionModeRepliesAreKeptRaw) {
+    HeadphoneState s;
+    // This project's WF-1000XM5 run (protocol.md 9.5).
+    CHECK(apply1(B({0xE1, 0x05, 0x03, 0x00, 0x01, 0x02, 0x00}), s));
+    CHECK(apply1(B({0xE3, 0x05, 0x00, 0x00}), s));
+    REQUIRE(s.connectionModeCapability.has_value());
+    CHECK_EQ(hexBytes(*s.connectionModeCapability), std::string("E1 05 03 00 01 02 00"));
+    CHECK_EQ(hexBytes(*s.connectionModeStatus), std::string("E3 05 00 00"));
+    CHECK(apply1(B({0xE5, 0x05, 0x01, 0x00}), s));
+    CHECK_EQ(hexBytes(*s.connectionModeStatus), std::string("E5 05 01 00"));
+    CHECK(!s.upscalingType.has_value());
+    CHECK(!s.dseeAvailable.has_value());
+    Json probe = parsed(probeJson(s, {}));
+    CHECK_EQ(probe["connection_mode"]["capability"].string, std::string("E1 05 03 00 01 02 00"));
+    CHECK_EQ(probe["connection_mode"]["status"].string, std::string("E5 05 01 00"));
 }
 
 TEST(SmallParamsParse) {
@@ -620,6 +792,16 @@ TEST(EventsAreReported) {
     CHECK(applyInbound(Table::T1, line, s, log));
     CHECK(log.wearLogLine);
 
+    // WF-1000XM5 lines carry the side and an upper case U (protocol.md 9.4).
+    for (const char* text : {"lUnitWear", "rUnitWear", "lUnitRemove", "rUnitRemove", "UNITWEAR"}) {
+        InboundEvents wf;
+        CHECK(applyInbound(Table::T1, withString(B({0xC9, 0x01}), text), s, wf));
+        CHECK(wf.wearLogLine);
+    }
+    InboundEvents other;
+    CHECK(applyInbound(Table::T1, withString(B({0xC9, 0x01}), "unitWea"), s, other));
+    CHECK(!other.wearLogLine);
+
     InboundEvents src;
     Bytes result = B({0x3D, 0x01, 0x00});
     std::string addr = "5c:e9:1e:bb:00:02";
@@ -698,7 +880,12 @@ TEST(SupportedFollowsContractTable) {
     CHECK(deriveSupported(withSupport({0xF6}, {})).worn);
     CHECK(deriveSupported(withSupport({}, {0xF0})).worn);
     CHECK(!deriveSupported(withSupport({0xF1}, {0x41})).worn);
-    CHECK(deriveSupported(withSupport({0xFD})).quick_access);
+    auto quickAccess = withSupport({0xFD});
+    CHECK(!deriveSupported(quickAccess).quick_access);
+    quickAccess.quickAccessCapability = QuickAccessCapability{0x00, 0x00, {{0x01, 0x00, {}}, {0x02, 0x00, {}}}};
+    CHECK(!deriveSupported(quickAccess).quick_access);
+    quickAccess.quickAccessCapability->actions[1].functions = {0x00, 0x01};
+    CHECK(deriveSupported(quickAccess).quick_access);
     auto sourceOnly = withSupport({}, {0x31});
     CHECK(!deriveSupported(sourceOnly).source_switch);
     auto volumeOnly = withSupport({}, {0x43});
@@ -707,26 +894,165 @@ TEST(SupportedFollowsContractTable) {
     CHECK(!deriveSupported(volumeOnly).voice_guidance);
 }
 
+TEST(EarbudFeaturesFollowContractTable) {
+    auto wf = withSupport({0x29, 0x2A, 0xF3, 0xD1, 0xFD, 0xF6, 0xE7}, {0x42, 0x32, 0x31});
+    Supported sup = deriveSupported(wf);
+    CHECK(!sup.battery);
+    CHECK(sup.battery_lr);
+    CHECK(sup.battery_case);
+    CHECK(sup.worn);
+    CHECK(!sup.touch_function);
+    CHECK(!sup.sidetone);
+    CHECK(!sup.quick_access);
+    CHECK(!sup.connection_quality);
+    CHECK_EQ(wf.variants.lrBatteryType, uint8_t{0x09});
+    CHECK_EQ(wf.variants.caseBatteryType, uint8_t{0x0A});
+    auto older = withSupport({0x21, 0x22});
+    CHECK(deriveSupported(older).battery_lr);
+    CHECK(deriveSupported(older).battery_case);
+    CHECK_EQ(older.variants.lrBatteryType, uint8_t{0x01});
+    CHECK_EQ(older.variants.caseBatteryType, uint8_t{0x02});
+    CHECK_EQ(req::getBattery(0x09), B({0x22, 0x09}));
+    CHECK_EQ(req::getBattery(0x0A), B({0x22, 0x0A}));
+    CHECK_EQ(req::getConnectionModeCapability(), B({0xE0, 0x05}));
+    CHECK_EQ(req::getConnectionModeStatus(), B({0xE2, 0x05}));
+
+    // One key only (the NC/AMB key) is not a touch sensor pair.
+    wf.assignableCapability = AssignableCapability{0x03, {{0x00, 0x00, 0x35, {0x35}}}};
+    CHECK(!deriveSupported(wf).touch_function);
+    wf.assignableCapability->keys.push_back({0x01, 0x00, 0x20, {0x20}});
+    CHECK(deriveSupported(wf).touch_function);
+    CHECK(!deriveSupported(wf).button_function);
+}
+
 TEST(FallbackListMatchesContract) {
-    Supported f = Supported::fallback();
-    Supported expected;
-    expected.battery = expected.noise_control = expected.eq_preset = expected.eq_custom = true;
-    expected.speak_to_chat = expected.voice_guidance = expected.auto_power_off = true;
-    expected.nc_amb_button = expected.ear_detection = expected.volume = true;
-    CHECK(f == expected);
+    Supported wh;
+    wh.battery = wh.noise_control = wh.eq_preset = wh.eq_custom = true;
+    wh.speak_to_chat = wh.voice_guidance = wh.auto_power_off = true;
+    wh.nc_amb_button = wh.ear_detection = wh.volume = true;
+    CHECK(Supported::fallback("wh-1000xm5") == wh);
+    Supported wf;
+    wf.battery_lr = wf.battery_case = wf.noise_control = wf.eq_preset = wf.eq_custom = true;
+    wf.speak_to_chat = wf.voice_guidance = wf.voice_guidance_volume = wf.auto_power_off = true;
+    wf.ear_detection = wf.volume = true;
+    CHECK(Supported::fallback("wf-1000xm5") == wf);
+    CHECK(Supported::fallback("other") == Supported{});
 }
 
 // ---------------------------------------------------------------------------
 // status.json and probe
 // ---------------------------------------------------------------------------
 
-TEST(DisconnectedStatusHasThreeKeys) {
-    HeadphoneState s;
-    Json j = parsed(statusJson(s, 1760438400));
-    CHECK_EQ(j.keyOrder.size(), size_t{3});
-    auto fixture = testutil::parseJson(testutil::readFile(SONY_FIXTURES_DIR "/status_v2_disconnected.json"));
+TEST(DisconnectedDocumentHasFiveKeys) {
+    Json j = parsed(statusDocument({}, std::nullopt, 1760438400));
+    const std::vector<std::string> keys = {"schema_version", "connected", "last_updated", "primary", "headsets"};
+    CHECK(j.keyOrder == keys);
+    auto fixture = testutil::parseJson(testutil::readFile(SONY_FIXTURES_DIR "/status_v3_disconnected.json"));
     REQUIRE(fixture.has_value());
     CHECK_EQ(testutil::jsonDiff(j, *fixture, {}), std::string(""));
+}
+
+TEST(HeadsetEntryHasEveryContractKeyInFixtureOrder) {
+    auto fixture = testutil::parseJson(testutil::readFile(SONY_FIXTURES_DIR "/status_v3_wf.json"));
+    REQUIRE(fixture.has_value());
+    const Json expected = (*fixture)["headsets"].array[0];
+    HeadphoneState s = withSupport({0x29});
+    s.connected = true;
+    s.address = "AC:80:0A:65:43:21";
+    s.supported = deriveSupported(s);
+    Json j = entryOf(s);
+    CHECK(j.keyOrder == expected.keyOrder);
+    CHECK(j["supported"].keyOrder == expected["supported"].keyOrder);
+    HeadphoneState initializing;
+    initializing.connected = true;
+    initializing.address = "AC:80:0A:65:43:21";
+    CHECK(entryOf(initializing).keyOrder == expected.keyOrder);
+}
+
+TEST(ModelKindAndNameFollowContract) {
+    HeadphoneState s;
+    s.bluezName = "Living room wf-1000xm5";
+    CHECK_EQ(std::string(s.model()), std::string("wf-1000xm5"));
+    CHECK_EQ(std::string(s.kind()), std::string("earbuds"));
+    CHECK_EQ(s.displayName(), std::string("WF-1000XM5"));
+    s.modelName = "wh-1000XM5";
+    CHECK_EQ(std::string(s.model()), std::string("wh-1000xm5"));
+    CHECK_EQ(std::string(s.kind()), std::string("headphones"));
+    CHECK_EQ(s.displayName(), std::string("WH-1000XM5"));
+    s.alias = "My XM5";
+    CHECK_EQ(s.displayName(), std::string("My XM5"));
+    s.alias.clear();
+    s.modelName = "WH-1000XM6";
+    CHECK_EQ(std::string(s.model()), std::string("other"));
+    CHECK_EQ(s.displayName(), std::string("Sony headset"));
+    CHECK_EQ(std::string(s.kind()), std::string("headphones"));
+    s.supported = Supported{};
+    s.supported->battery_lr = true;
+    CHECK_EQ(std::string(s.kind()), std::string("earbuds"));
+}
+
+namespace {
+
+HeadphoneState listed(const std::string& id, const std::string& model, int64_t since) {
+    HeadphoneState s;
+    s.connected = true;
+    s.address = id;
+    s.modelName = model;
+    s.connectedSince = since;
+    return s;
+}
+
+} // namespace
+
+TEST(HeadsetsAreOrderedByKindThenId) {
+    auto wf1 = listed("AC:80:0A:00:00:01", "WF-1000XM5", 1);
+    auto wh2 = listed("AC:80:0A:00:00:02", "WH-1000XM5", 2);
+    auto wh1 = listed("AC:80:0A:00:00:00", "WH-1000XM5", 3);
+    auto ordered = orderHeadsets({&wf1, &wh2, &wh1});
+    REQUIRE(ordered.size() == 3);
+    CHECK(ordered[0] == &wh1);
+    CHECK(ordered[1] == &wh2);
+    CHECK(ordered[2] == &wf1);
+}
+
+TEST(PrimaryPrefersHeadsetPlayingHere) {
+    const std::vector<std::string> adapters = {"F0:1D:BC:AA:00:01"};
+    auto wh = listed("AC:80:0A:12:34:56", "WH-1000XM5", 1760438430);
+    auto wf = listed("AC:80:0A:65:43:21", "WF-1000XM5", 1760438400);
+    CHECK_EQ(choosePrimary({}, adapters), std::optional<std::string>());
+    // Nobody plays here: the most recent connection.
+    CHECK_EQ(choosePrimary(orderHeadsets({&wh, &wf}), adapters), std::optional<std::string>("AC:80:0A:12:34:56"));
+    // Device lists: the WF plays from the adapter, the WH from a phone.
+    for (auto* s : {&wh, &wf}) {
+        s->support2 = std::vector<SupportEntry>{{0x32, 1}};
+        s->supported = deriveSupported(*s);
+    }
+    wh.devices = std::vector<PairedDevice>{{"F0:1D:BC:AA:00:01", "laptop", 1}, {"5C:E9:1E:BB:00:02", "phone", 2}};
+    wh.playbackSlot = 2;
+    wf.devices = std::vector<PairedDevice>{{"F0:1D:BC:AA:00:01", "laptop", 1}};
+    wf.playbackSlot = 1;
+    CHECK(!playsFromHere(wh, adapters));
+    CHECK(playsFromHere(wf, adapters));
+    CHECK_EQ(choosePrimary(orderHeadsets({&wh, &wf}), adapters), std::optional<std::string>("AC:80:0A:65:43:21"));
+    // Without a device list the codec decides.
+    HeadphoneState codecOnly = listed("AC:80:0A:00:00:09", "WH-1000XM5", 5);
+    codecOnly.support1 = std::vector<SupportEntry>{{0x12, 1}};
+    codecOnly.supported = deriveSupported(codecOnly);
+    CHECK(!playsFromHere(codecOnly, adapters));
+    codecOnly.codec = 0x00;
+    CHECK(!playsFromHere(codecOnly, adapters));
+    codecOnly.codec = 0x10;
+    CHECK(playsFromHere(codecOnly, adapters));
+    // Tie on connected_since: the first in list order.
+    wf.devices = std::vector<PairedDevice>{{"F0:1D:BC:AA:00:01", "laptop", 1}, {"5C:E9:1E:BB:00:02", "phone", 2}};
+    wf.playbackSlot = 2;
+    wf.connectedSince = wh.connectedSince;
+    CHECK_EQ(choosePrimary(orderHeadsets({&wf, &wh}), adapters), std::optional<std::string>("AC:80:0A:12:34:56"));
+    std::string doc = statusDocument(orderHeadsets({&wf, &wh}), choosePrimary(orderHeadsets({&wf, &wh}), adapters), 7);
+    Json j = parsed(doc);
+    CHECK(j["connected"].boolean);
+    CHECK_EQ(j["primary"].string, std::string("AC:80:0A:12:34:56"));
+    CHECK_EQ(j["headsets"].array.size(), size_t{2});
 }
 
 TEST(UnsupportedFeaturesAreNullEvenWhenKnown) {
@@ -738,11 +1064,12 @@ TEST(UnsupportedFeaturesAreNullEvenWhenKnown) {
     s.codec = 0x10;
     s.batteryLevel = 50;
     s.batteryChargingRaw = 0x00;
-    Json j = parsed(statusJson(s, 1));
+    Json j = entryOf(s);
     CHECK(j["dsee_extreme"].isNull());
-    CHECK(j["dsee"].isNull());
     CHECK(j["volume"].isNull());
     CHECK(j["codec"].isNull());
+    CHECK(!j.has("dsee"));
+    CHECK(!j.has("connected"));
     CHECK_EQ(j["battery_level"].number, 50.0);
     CHECK_EQ(j["supported_source"].string, std::string("device"));
     CHECK(!j["supported"]["dsee"].boolean);
@@ -756,7 +1083,7 @@ TEST(EmptyOptionListsAreNull) {
     s.supported = deriveSupported(s);
     CHECK(!s.eqPresetNames().has_value());
     CHECK(!s.buttonFunctionOptions().has_value());
-    Json j = parsed(statusJson(s, 1));
+    Json j = entryOf(s);
     CHECK(j["eq_presets"].isNull());
     CHECK(j["button_functions"].isNull());
     CHECK(j["supported"]["button_function"].boolean);
@@ -786,8 +1113,8 @@ TEST(OutOfRangeValuesAreDropped) {
 TEST(StatusEscapesDeviceStrings) {
     HeadphoneState s;
     s.connected = true;
-    s.deviceName = std::string("My \"XM5\"\n\xff");
-    Json j = parsed(statusJson(s, 1));
+    s.alias = std::string("My \"XM5\"\n\xff");
+    Json j = entryOf(s);
     CHECK_EQ(j["device_name"].string, std::string("My \"XM5\"\n\xEF\xBF\xBD"));
     CHECK(j["supported"].isNull());
     CHECK(j["supported_source"].isNull());
@@ -836,10 +1163,12 @@ TEST(ProbeListsRawData) {
     CHECK_EQ(j["recent_frames"].array[1]["dir"].string, std::string("rx"));
     CHECK_EQ(j["recent_frames"].array[1]["type"].string, std::string("0x0C"));
     CHECK_EQ(j["recent_frames"].array[1]["payload"].string, std::string("07 00 01 20 01"));
-    const std::vector<std::string> keys = {"probe_version", "address", "protocol", "model_name", "firmware_version",
-                                           "series", "color", "unique_id", "nc_asm_type", "support_table1",
-                                           "support_table2", "general_settings", "eq_capability", "assignable",
-                                           "recent_frames"};
+    const std::vector<std::string> keys = {"probe_version", "id", "model", "kind", "address", "protocol",
+                                           "model_name", "firmware_version", "series", "color", "unique_id",
+                                           "nc_asm_type", "support_table1", "support_table2", "general_settings",
+                                           "eq_capability", "assignable", "connection_mode", "recent_frames"};
+    CHECK(j["connection_mode"]["capability"].isNull());
+    CHECK(j["connection_mode"]["status"].isNull());
     CHECK(j.keyOrder == keys);
 }
 
@@ -861,59 +1190,60 @@ BluetoothDeviceInfo btDevice(const std::string& mac, const std::string& name, bo
     return d;
 }
 
-std::optional<std::string> pick(const std::vector<BluetoothDeviceInfo>& devices, const std::string& mac = "") {
-    MockDeviceDiscovery discovery;
-    discovery.devices = devices;
-    auto dev = discovery.findSonyHeadphones(mac);
-    if (!dev) return std::nullopt;
-    return dev->macAddress;
+std::vector<std::string> pick(const std::vector<BluetoothDeviceInfo>& devices,
+                              const std::vector<std::string>& allowList = {}) {
+    std::vector<std::string> out;
+    for (const auto& dev : selectHeadsets(devices, allowList)) out.push_back(dev.macAddress);
+    return out;
 }
+
+using Macs = std::vector<std::string>;
 
 } // namespace
 
-TEST(SelectionPrefersConnectedWh1000xm5OverEarbuds) {
+TEST(SelectionTakesEveryConnectedWhAndWf) {
     std::vector<BluetoothDeviceInfo> devices = {
         btDevice("AA:BB:CC:DD:EE:02", "WF-1000XM5", true),
         btDevice("AA:BB:CC:DD:EE:01", "WH-1000XM5", true),
+        btDevice("AA:BB:CC:DD:EE:03", "WH-1000XM4", true),
+        btDevice("AA:BB:CC:DD:EE:04", "Phone", true, false),
     };
-    CHECK_EQ(pick(devices), std::optional<std::string>("AA:BB:CC:DD:EE:01"));
-    devices[1].connected = false;
-    CHECK_EQ(pick(devices), std::optional<std::string>("AA:BB:CC:DD:EE:01"));
-    devices.push_back(btDevice("AA:BB:CC:DD:EE:03", "WH-1000XM5", true));
-    CHECK_EQ(pick(devices), std::optional<std::string>("AA:BB:CC:DD:EE:03"));
+    CHECK((pick(devices) == Macs{"AA:BB:CC:DD:EE:02", "AA:BB:CC:DD:EE:01"}));
 }
 
-TEST(SelectionNeverPicksOtherModelsWithoutDevice) {
+TEST(SelectionNeverTakesADisconnectedHeadset) {
+    std::vector<BluetoothDeviceInfo> devices = {
+        btDevice("AA:BB:CC:DD:EE:01", "WH-1000XM5", false),
+        btDevice("AA:BB:CC:DD:EE:02", "WF-1000XM5", true, true, false),
+        btDevice("AA:BB:CC:DD:EE:06", "My wf-1000xm5", true, false),
+    };
+    CHECK((pick(devices) == Macs{"AA:BB:CC:DD:EE:06"}));
+    CHECK((pick(devices, {"AA:BB:CC:DD:EE:01"}) == Macs{}));
+}
+
+TEST(SelectionAllowListIgnoresNamesAndUuids) {
     std::vector<BluetoothDeviceInfo> devices = {
         btDevice("AA:BB:CC:DD:EE:02", "WF-1000XM5", true),
-        btDevice("AA:BB:CC:DD:EE:04", "WH-1000XM4", true),
-        btDevice("AA:BB:CC:DD:EE:05", "Phone", true, false),
+        btDevice("AA:BB:CC:DD:EE:07", "", true),
+        btDevice("AA:BB:CC:DD:EE:08", "Speaker", true, false),
     };
-    CHECK(!pick(devices).has_value());
-    CHECK_EQ(pick(devices, "aa:bb:cc:dd:ee:02"), std::optional<std::string>("AA:BB:CC:DD:EE:02"));
-    CHECK(!pick(devices, "AA:BB:CC:DD:EE:09").has_value());
+    CHECK((pick(devices) == Macs{"AA:BB:CC:DD:EE:02"}));
+    CHECK((pick(devices, {"aa:bb:cc:dd:ee:07", "AA:BB:CC:DD:EE:08"}) == Macs{"AA:BB:CC:DD:EE:07", "AA:BB:CC:DD:EE:08"}));
+    CHECK((pick(devices, {"AA:BB:CC:DD:EE:09"}) == Macs{}));
 }
 
-TEST(SelectionMatchesNameCaseInsensitiveAndIgnoresUnpaired) {
-    std::vector<BluetoothDeviceInfo> devices = {
-        btDevice("AA:BB:CC:DD:EE:01", "WH-1000XM5", true, true, false),
-        btDevice("AA:BB:CC:DD:EE:06", "My wh-1000xm5", false, false),
-    };
-    CHECK_EQ(pick(devices), std::optional<std::string>("AA:BB:CC:DD:EE:06"));
-}
-
-TEST(SelectionUsesUuidOnlyForUnnamedDevices) {
-    std::vector<BluetoothDeviceInfo> devices = {
-        btDevice("AA:BB:CC:DD:EE:07", "", false),
-        btDevice("AA:BB:CC:DD:EE:08", "", true),
-        btDevice("AA:BB:CC:DD:EE:09", "", true, false),
-    };
-    CHECK_EQ(pick(devices), std::optional<std::string>("AA:BB:CC:DD:EE:08"));
-    devices.push_back(btDevice("AA:BB:CC:DD:EE:01", "WH-1000XM5", false));
-    CHECK_EQ(pick(devices), std::optional<std::string>("AA:BB:CC:DD:EE:01"));
-    std::vector<BluetoothDeviceInfo> legacy = {btDevice("AA:BB:CC:DD:EE:0A", "", true, false)};
-    legacy[0].uuids.emplace_back(MDR_UUID_LEGACY);
-    CHECK_EQ(pick(legacy), std::optional<std::string>("AA:BB:CC:DD:EE:0A"));
+TEST(MockDiscoveryReportsAdapters) {
+    MockDeviceDiscovery discovery;
+    discovery.devices = {btDevice("AA:BB:CC:DD:EE:02", "WF-1000XM5", true)};
+    discovery.adapterAddresses = {"F0:1D:BC:AA:00:01"};
+    auto snap = discovery.snapshot();
+    CHECK(snap.ok);
+    CHECK_EQ(snap.devices.size(), size_t{1});
+    CHECK((snap.adapterAddresses == Macs{"F0:1D:BC:AA:00:01"}));
+    auto found = discovery.findSonyHeadphones("aa:bb:cc:dd:ee:02");
+    REQUIRE(found.has_value());
+    CHECK_EQ(found->macAddress, std::string("AA:BB:CC:DD:EE:02"));
+    CHECK(!discovery.findSonyHeadphones("AA:BB:CC:DD:EE:09").has_value());
 }
 
 int main() {

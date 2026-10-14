@@ -88,6 +88,17 @@ TEST(UsageTextsMatchContractTable) {
         {"source F0:1D:BC:AA:00", "source <address>"},
         {"source F0-1D-BC-AA-00-01", "source <address>"},
         {"status now", "status"},
+        {"touch-function left", "touch-function left|right <value>"},
+        {"touch-function up none", "touch-function left|right <value>"},
+        {"touch-function right other", "touch-function left|right <value>"},
+        {"touch-function right none extra", "touch-function left|right <value>"},
+        {"sidetone 1", "sidetone on|off"},
+        {"sidetone", "sidetone on|off"},
+        {"@x status", "status"},
+        {"@AC:80:0A:65:43:21 status", "status"},
+        {"@ noise anc", "@<address|model> <verb> [args]"},
+        {"@wf-1000xm5", "@<address|model> <verb> [args]"},
+        {"@wf-1000xm5 noise wind", "noise anc|ambient|off"},
     };
     for (const auto& [line, usage] : cases) {
         std::string got = reply(line);
@@ -109,6 +120,26 @@ TEST(ValidCommandsAreNormalized) {
     CHECK_EQ(reply("auto-power-off when_taken_off"), std::string("CMD auto-power-off when_taken_off"));
     CHECK_EQ(reply("source f0:1d:bc:aa:00:01"), std::string("CMD source F0:1D:BC:AA:00:01"));
     CHECK_EQ(reply("probe"), std::string("CMD probe"));
+    CHECK_EQ(reply("Touch-Function LEFT Playback_Control"), std::string("CMD touch-function left playback_control"));
+    CHECK_EQ(reply("sidetone OFF"), std::string("CMD sidetone off"));
+}
+
+TEST(SelectorIsKeptApartFromTheVerb) {
+    auto r = cmd::parseLine("@wf-1000xm5 VOLUME 5", false);
+    REQUIRE(r.command.has_value());
+    CHECK_EQ(r.command->selector, std::optional<std::string>("wf-1000xm5"));
+    CHECK_EQ(r.command->line(), std::string("volume 5"));
+    CHECK_EQ(r.command->requestLine(), std::string("@wf-1000xm5 volume 5"));
+    auto plain = cmd::parseLine("volume 5", false);
+    REQUIRE(plain.command.has_value());
+    CHECK(!plain.command->selector.has_value());
+    CHECK_EQ(plain.command->requestLine(), std::string("volume 5"));
+    CHECK_EQ(reply("@frob x"), std::string("ERR unknown command 'x'"));
+    CHECK_EQ(reply("@AC:80:0A:65:43:21 _disconnect"), std::string("CMD _disconnect"));
+    CHECK(cmd::validSelector("AC:80:0A:65:43:21"));
+    CHECK(cmd::validSelector("wf-1000xm5"));
+    CHECK(!cmd::validSelector(""));
+    CHECK(!cmd::validSelector("wf 1000xm5"));
 }
 
 TEST(BareEqCustomSelectsThePreset) {
@@ -132,7 +163,9 @@ TEST(BareEqCustomSelectsThePreset) {
 TEST(ServerWithoutBackendStillAnswers) {
     IpcServer server("/tmp/unused-test.sock");
     CHECK_EQ(server.handleCommandLineSync("status").value_or(""),
-             std::string("{\"schema_version\":2,\"connected\":false,\"last_updated\":0}\n"));
+             std::string("{\"schema_version\":3,\"connected\":false,\"last_updated\":0,\"primary\":null,\"headsets\":[]}\n"));
+    CHECK_EQ(server.handleCommandLineSync("@x status").value_or(""), std::string("ERR usage: status\n"));
+    CHECK_EQ(server.handleCommandLineSync("@wf-1000xm5 noise anc").value_or(""), std::string("ERR not connected\n"));
     CHECK_EQ(server.handleCommandLineSync("noise anc").value_or(""), std::string("ERR not connected\n"));
     CHECK_EQ(server.handleCommandLineSync("noise wind").value_or(""), std::string("ERR usage: noise anc|ambient|off\n"));
     CHECK_EQ(server.handleCommandLineSync("").value_or(""), std::string("ERR empty command\n"));

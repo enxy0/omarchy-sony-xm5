@@ -356,6 +356,8 @@ Bytes setEqCustom(const std::array<int, 5>& bands, int clearBass) {
             clampToByte(bands[4], -10, 10, 10)};
 }
 
+Bytes getConnectionModeCapability() { return {0xE0, 0x05}; }
+Bytes getConnectionModeStatus() { return {0xE2, 0x05}; }
 Bytes getConnectionQuality(uint8_t type) { return {0xE6, type}; }
 Bytes setConnectionQuality(uint8_t type, uint8_t priorMode) { return {0xE8, type, priorMode}; }
 
@@ -437,6 +439,12 @@ constexpr NamedValue kButtonFunctions[] = {
     {0x32, "amazon_alexa"}, {0x36, "quick_access"}, {0xFF, "none"},
 };
 
+constexpr NamedValue kTouchFunctions[] = {
+    {0x35, "ambient_sound_control"}, {0x00, "ambient_sound_control"}, {0x10, "volume_control"},
+    {0x20, "playback_control"}, {0x30, "voice_recognition"}, {0x31, "google_assistant"},
+    {0x32, "amazon_alexa"}, {0x36, "quick_access"}, {0xFF, "none"},
+};
+
 constexpr NamedValue kSensitivity[] = {{0x00, "auto"}, {0x01, "high"}, {0x02, "low"}};
 constexpr NamedValue kTimeout[] = {{0x00, "short"}, {0x01, "standard"}, {0x02, "long"}, {0x03, "off"}};
 constexpr NamedValue kConnectionQuality[] = {{0x00, "sound"}, {0x01, "connection"}};
@@ -469,6 +477,8 @@ std::optional<std::string> ncAmbButtonName(uint8_t value) { return nameOf(kNcAmb
 std::optional<uint8_t> ncAmbButtonValue(std::string_view name) { return valueOf(kNcAmbButton, name); }
 std::string buttonFunctionName(uint8_t preset) { return nameOf(kButtonFunctions, preset).value_or("other"); }
 std::optional<uint8_t> buttonFunctionValue(std::string_view name) { return valueOf(kButtonFunctions, name); }
+std::string touchFunctionName(uint8_t preset) { return nameOf(kTouchFunctions, preset).value_or("other"); }
+std::optional<uint8_t> touchFunctionValue(std::string_view name) { return valueOf(kTouchFunctions, name); }
 std::optional<std::string> speakToChatSensitivityName(uint8_t value) { return nameOf(kSensitivity, value); }
 std::optional<uint8_t> speakToChatSensitivityValue(std::string_view name) { return valueOf(kSensitivity, name); }
 std::optional<std::string> speakToChatTimeoutName(uint8_t value) { return nameOf(kTimeout, value); }
