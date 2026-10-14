@@ -25,7 +25,8 @@ Item {
   property color normalColor: Color.foreground
   property color alertColor: Color.urgent
   property color chargingColor: "#2ecc71"
-  property color disconnectedColor: Qt.rgba(normalColor.r, normalColor.g, normalColor.b, 0.35)
+  // 0.45: the alpha first-party WidgetButton uses for `dimmed`.
+  property color disconnectedColor: Qt.rgba(normalColor.r, normalColor.g, normalColor.b, 0.45)
 
   readonly property color effectiveColor: {
     if (!connected) return disconnectedColor
