@@ -11,8 +11,6 @@ import "Model.js" as Model
 Item {
   id: root
 
-  property var settings: ({})
-
   readonly property string cliBinary: {
     var home = Quickshell.env("HOME")
     return home ? (home + "/.local/bin/sony-ctl") : "sony-ctl"

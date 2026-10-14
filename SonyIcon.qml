@@ -18,18 +18,14 @@ Item {
   property real iconSize: Style.font.icon
   property real boxSize: iconSize
   property string fontFamily: Style.font.family
-  property bool connected: true
   property int batteryLevel: -1
   property bool charging: false
 
   property color normalColor: Color.foreground
   property color alertColor: Color.urgent
   property color chargingColor: "#2ecc71"
-  // 0.45: the alpha first-party WidgetButton uses for `dimmed`.
-  property color disconnectedColor: Qt.rgba(normalColor.r, normalColor.g, normalColor.b, 0.45)
 
   readonly property color effectiveColor: {
-    if (!connected) return disconnectedColor
     if (charging) return chargingColor
     if (batteryLevel >= 0 && batteryLevel < 20) return alertColor
     return normalColor

@@ -496,7 +496,6 @@ Panel {
 
   Service {
     id: sony
-    settings: root.settings
   }
 
   // The headset the popup shows (ui-spec 8): kept for the shell session.
@@ -566,10 +565,6 @@ Panel {
   function activate(id, index) {
     var i = index === undefined ? 0 : index
     setCursor(id, i)
-    if (Model.isSettingTarget(id)) {
-      persistSettings(Model.settingActivation(root.settings, id))
-      return
-    }
     if (id === Model.SWITCHER_TARGET) {
       selectHeadset(Model.switcherActivation(sony.status, i))
       return
@@ -670,7 +665,6 @@ Panel {
     case "multipointHeader": return multipointHeader
     case "multipoint": return multipointToggle
     case "devices": return deviceRepeater.itemAt(index)
-    case "barPercentage": return barPercentageToggle
     default: return null
     }
   }
@@ -715,88 +709,33 @@ Panel {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  // ---- widget settings (inline fields of the shell.json bar entry) ----------
-
-  readonly property bool showPercentage: Model.showBarPercentage(root.settings)
-
-  // Same path as the first-party Power and Clock widgets: update the local
-  // copy at once, then let the shell write shell.json.
-  function persistSettings(values) {
-    var entry = Model.settingsEntry(root.moduleName, root.settings, values)
-    root.settings = entry
-    if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
-      root.bar.shell.updateEntryInline(root.moduleName, entry)
-  }
-
   // ---- bar button ----------------------------------------------------------
 
-  readonly property string barText: Model.barText(root.barSt, root.showPercentage, button.vertical)
-  // As Power does with its percentage: the open-panel dot spans what the
-  // button paints, not a fraction of the wider slot.
-  readonly property real openPanelIndicatorWidth: barText !== "" ? barContent.implicitWidth : 0
-
   // BarIconButton gives the first-party icon slot: Style.bar.iconSlot along
-  // the bar, the bar thickness across it. With the percentage the slot is two
-  // icon slots, as Power uses, and grows only when the text needs more, so
-  // the side padding never drops below what an icon slot leaves around its
-  // canvas.
+  // the bar, the bar thickness across it.
   BarIconButton {
     id: button
     anchors.fill: parent
     bar: root.bar
     hasVisualContent: true
-    slotSize: root.barText === ""
-      ? Style.bar.iconSlot
-      : Math.max(Style.bar.iconSlot * 2,
-                 Math.ceil(barContent.implicitWidth) + Style.bar.iconSlot - Style.bar.iconCanvas)
+    slotSize: Style.bar.iconSlot
     tooltipText: Model.barTooltip(root.barSt)
 
     readonly property color contentColor: button.active ? button.activeColor : button.foreground
 
-    // The row is exactly one optical canvas high and centered in the button,
-    // as BarIconButton places its canvas, so the glyph box sits where the
-    // Audio and Bluetooth glyph boxes sit. With the icon alone the row is
-    // that canvas.
-    Row {
-      id: barContent
+    // One optical canvas centered in the button, as BarIconButton places its
+    // canvas, so the glyph box sits where the Audio and Bluetooth glyph boxes
+    // sit.
+    SonyIcon {
       anchors.centerIn: parent
-      height: Style.bar.iconCanvas
-      spacing: Style.space(4)
-
-      SonyIcon {
-        anchors.verticalCenter: parent.verticalCenter
-        kind: root.barSt.kind
-        boxSize: Style.bar.iconCanvas
-        iconSize: Style.bar.iconFont
-        fontFamily: button.fontFamily
-        connected: Model.isLive(root.barSt)
-        batteryLevel: Model.barBatteryLevel(root.barSt)
-        charging: Model.isCharging(root.barSt)
-        // effectiveColor picks charging, low battery and disconnected tints.
-        normalColor: button.contentColor
-      }
-
-      Text {
-        anchors.verticalCenter: parent.verticalCenter
-        visible: text !== ""
-        textFormat: Text.PlainText
-        text: root.barText
-        color: button.contentColor
-        font.family: button.fontFamily
-        font.pixelSize: Style.bar.iconFont
-        renderType: Text.NativeRendering
-      }
-
-      Text {
-        anchors.verticalCenter: parent.verticalCenter
-        visible: Model.barChargingHint(root.barSt, root.showPercentage, button.vertical)
-        textFormat: Text.PlainText
-        text: Model.GLYPH_BOLT
-        color: button.contentColor
-        font.family: button.fontFamily
-        font.pixelSize: Style.bar.iconFont
-        renderType: Text.NativeRendering
-      }
+      kind: root.barSt.kind
+      boxSize: Style.bar.iconCanvas
+      iconSize: Style.bar.iconFont
+      fontFamily: button.fontFamily
+      batteryLevel: Model.barBatteryLevel(root.barSt)
+      charging: Model.isCharging(root.barSt)
+      // effectiveColor picks charging, low battery and disconnected tints.
+      normalColor: button.contentColor
     }
 
     onPressed: function(buttonCode) {
@@ -887,7 +826,6 @@ Panel {
               kind: root.st.kind
               iconSize: Style.space(28)
               fontFamily: root.fontFamily
-              connected: root.live
               batteryLevel: Model.barBatteryLevel(root.st)
               charging: Model.isCharging(root.st)
             }
@@ -1844,29 +1782,13 @@ Panel {
             }
           }
 
-          // -- widget settings and info footer --------------------------------
-          // Omarchy has no settings screen for bar widgets, so the bar
-          // display toggle lives here; it writes the same shell.json field as
-          // `omarchy bar set`. Shown in every state, connected or not.
+          // -- info footer ------------------------------------------------------
           PanelSeparator { foreground: root.foreground }
 
           Column {
             id: infoFooter
             width: parent.width
             spacing: Style.space(6)
-
-            Toggle {
-              id: barPercentageToggle
-              width: parent.width
-              label: "Battery percentage in the bar"
-              description: "Off shows only the icon; the tooltip keeps the level"
-              checked: root.showPercentage
-              hasCursor: root.hasCursor("barPercentage")
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              onClicked: root.activate("barPercentage")
-              onHovered: function(h) { if (h) root.setCursor("barPercentage") }
-            }
 
             Column {
               width: parent.width

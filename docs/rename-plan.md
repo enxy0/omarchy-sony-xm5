@@ -36,11 +36,10 @@ A new plugin id is a new plugin for Omarchy:
    `~/.config/omarchy/plugins/io.github.androydified.omasony` (and the older
    `~/.local/share/omarchy/shell/plugins/io.github.androydified.omasony`,
    which `setup` already removes).
-2. The bar entry and its `showPercentage` setting in
-   `~/.config/omarchy/shell.json` are stored under the old id. `setup`
-   prints that the user must add the "Sony XM5" widget to the bar again and
-   set `showPercentage` again. `setup` does not edit `shell.json` itself:
-   the format belongs to Omarchy.
+2. The bar entry in `~/.config/omarchy/shell.json` is stored under the old
+   id. `setup` prints that the user must add the "Sony XM5" widget to the
+   bar again. `setup` does not edit `shell.json` itself: the format belongs
+   to Omarchy.
 
 Open question for the user: keep the old id instead and skip the migration?
 The cost is only a foreign name in the id.
@@ -49,10 +48,9 @@ The cost is only a foreign name in the id.
 
 | File | What changes |
 |---|---|
-| `manifest.json` | `id`, `name`, `description`, `barWidget.displayName`, `barWidget.description`; the `showPercentage` schema text "Off shows only the headphone icon" → "Off shows only the headset icon" |
+| `manifest.json` | `id`, `name`, `description`, `barWidget.displayName`, `barWidget.description` |
 | `Panel.qml` | `moduleName`, `ipcTarget` (the plugin id); header comment "Sony WH-1000XM5" |
 | `Model.js` | header comment; the fallback name `"WH-1000XM5"` in `deviceTitle` becomes model-aware; texts "The sony-headphones daemon ..." stay (daemon name unchanged) |
-| `tests/model.test.js` | the plugin id in the `Model.settingsEntry` test (lines 598-599) |
 | `setup` | header comments and help text "omarchy-sony (Sony WH-1000XM5 Plugin ...)", log lines "omarchy-sony setup ...", plus the migration of section 2 |
 | `CMakeLists.txt` | `project(omarchy-sony ...)` and `DESCRIPTION "Sony WH-1000XM5 Headless ..."` |
 | `cli/CMakeLists.txt` | `DESCRIPTION "Sony WH-1000XM5 Headless Daemon Control CLI"` |
