@@ -588,6 +588,7 @@ function _commandSpec(action, value, status) {
 // One-line error text for a failed sony-ctl run.
 function commandErrorText(exitCode, stderr, stdout) {
   if (exitCode === 2) return "Daemon not running (sony-ctl could not connect)";
+  if (exitCode === 127 && !stderr && !stdout) return "sony-ctl did not start (is ~/.local/bin/sony-ctl installed?)";
   var text = String(stderr || stdout || "").trim();
   var lines = text.split("\n");
   text = lines[lines.length - 1].trim();

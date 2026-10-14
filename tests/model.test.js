@@ -415,6 +415,7 @@ suite("Suite 16: Command Error Text", () => {
   check("Daemon ERR", Model.commandErrorText(1, "Error from daemon: ERR unsupported dsee\n", ""), "ERR unsupported dsee");
   check("CLI error", Model.commandErrorText(1, "Error: 'volume' requires an integer", ""), "'volume' requires an integer");
   check("Empty output", Model.commandErrorText(1, "", ""), "sony-ctl failed (exit 1)");
+  check("Did not start", Model.commandErrorText(127, "", ""), "sony-ctl did not start (is ~/.local/bin/sony-ctl installed?)");
   check("Long error elided", Model.commandErrorText(1, "Error: " + "a".repeat(300), "").length, 138);
 });
 

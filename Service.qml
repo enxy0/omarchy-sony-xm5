@@ -1,5 +1,7 @@
-// plugin/Service.qml
-// Reactive singleton / manager service for Sony WH-1000XM5 headphones.
+// Service.qml
+// Headset state for the bar widget: watches status.json (schema 2), keeps
+// optimistic values and runs sony-ctl one command at a time.
+// All decisions live in Model.js; this file only wires timers and processes.
 import QtQuick
 import Quickshell
 import Quickshell.Io
@@ -15,7 +17,7 @@ Item {
     return home ? (home + "/.local/bin/sony-ctl") : "sony-ctl"
   }
 
-  // Path to status.json ($XDG_STATE_HOME/sony-headphones/status.json)
+  // $XDG_STATE_HOME/sony-headphones/status.json, else ~/.local/state/...
   readonly property string statusPath: {
     var xdg = Quickshell.env("XDG_STATE_HOME")
     var home = Quickshell.env("HOME")
@@ -23,75 +25,134 @@ Item {
     return base + "/sony-headphones/status.json"
   }
 
-  // Reactive state properties
-  property bool ok: false
-  property string lastError: ""
-  property int schemaVersion: 0
-  property bool schemaTooNew: false
-  property bool connected: false
-  property string deviceName: ""
-  property int batteryLevel: Model.LEVEL_UNKNOWN
-  property bool batteryCharging: false
-  property string codec: ""
-  property bool earDetection: true
-  property var eqCustomBands: [0, 0, 0, 0, 0]
-  property int clearBass: 0
+  // Parsed status.json as the daemon wrote it.
+  property var realStatus: Model.parseStatus("")
+  // Optimistic values: field -> { value, id }.
+  property var pending: ({})
+  // What the UI shows: the real status with the optimistic values applied.
+  readonly property var status: Model.applyPending(realStatus, pending)
 
-  // Real internal states reported by daemon
-  property string _realNoiseMode: Model.NOISE_UNKNOWN
-  property int _realAmbientSoundLevel: 0
-  property string _realEqPreset: Model.EQ_OFF
-  property bool _realSpeakToChat: false
-  property bool _realDseeExtreme: false
-  property bool _realMultipoint: false
+  // Queued commands: [{ args, id }]. One process runs at a time.
+  property var queue: []
+  property var runningCommand: null
+  property int _nextId: 1
+  readonly property bool busy: runningCommand !== null || queue.length > 0
+  // True once a command has been in flight for 300 ms ("Applying…").
+  property bool busyVisible: false
+  property string commandError: ""
 
-  // Optimistic desired states
-  property string _desiredNoiseMode: ""
-  property int _desiredAmbientLevel: -1
-  property string _desiredEqPreset: ""
-  property var _desiredSpeakToChat: null
-  property var _desiredDsee: null
-  property var _desiredMultipoint: null
+  // A keyboard step waits here for 400 ms so a held key sends one command.
+  property var _debounced: null
 
-  // Exposed effective properties (optimistic value if pending, otherwise real value)
-  readonly property string noiseMode: _desiredNoiseMode !== "" ? _desiredNoiseMode : _realNoiseMode
-  readonly property int ambientSoundLevel: _desiredAmbientLevel !== -1 ? _desiredAmbientLevel : _realAmbientSoundLevel
-  readonly property string eqPreset: _desiredEqPreset !== "" ? _desiredEqPreset : _realEqPreset
-  readonly property bool speakToChat: _desiredSpeakToChat !== null ? _desiredSpeakToChat : _realSpeakToChat
-  readonly property bool dseeExtreme: _desiredDsee !== null ? _desiredDsee : _realDseeExtreme
-  readonly property bool multipoint: _desiredMultipoint !== null ? _desiredMultipoint : _realMultipoint
+  onBusyChanged: {
+    if (busy) busyDelay.restart()
+    else {
+      busyDelay.stop()
+      busyVisible = false
+    }
+  }
 
-  // 4000ms optimistic state settlement timer
+  Timer {
+    id: busyDelay
+    interval: 300
+    onTriggered: root.busyVisible = root.busy
+  }
+
+  // Optimistic values expire 4 s after the last command finished.
   Timer {
     id: settleTimer
     interval: 4000
-    repeat: false
-    onTriggered: root.clearOptimisticOverrides()
+    onTriggered: {
+      if (root.busy || root._debounced !== null) restart()
+      else root.pending = ({})
+    }
   }
 
-  function clearOptimisticOverrides() {
-    _desiredNoiseMode = ""
-    _desiredAmbientLevel = -1
-    _desiredEqPreset = ""
-    _desiredSpeakToChat = null
-    _desiredDsee = null
-    _desiredMultipoint = null
+  Timer {
+    id: errorTimer
+    interval: 6000
+    onTriggered: root.commandError = ""
   }
 
-  // Command dispatch queue
-  property var commandQueue: []
+  Timer {
+    id: debounceTimer
+    interval: 400
+    onTriggered: root.flushDebounced()
+  }
 
-  function runCommand(args) {
-    var cmd = [cliBinary].concat(args)
-    commandQueue.push(cmd)
+  // Validates and sends one change. Returns true when the command was queued.
+  function send(action, value) {
+    flushDebounced()
+    var built = Model.buildCommand(action, value, status)
+    if (built.error) {
+      showError(built.error)
+      return false
+    }
+    var id = _nextId++
+    pending = Model.addPending(pending, built.pending, id)
+    enqueue({ args: built.args, id: id, action: action })
+    return true
+  }
+
+  // Shows the value now and sends it after a 400 ms pause. A step for
+  // another action sends the waiting one first.
+  function sendDebounced(action, value) {
+    if (_debounced !== null && _debounced.action !== action) flushDebounced()
+    var built = Model.buildCommand(action, value, status)
+    if (built.error) {
+      showError(built.error)
+      return false
+    }
+    var id = _nextId++
+    if (_debounced !== null) pending = Model.dropPending(pending, _debounced.id)
+    pending = Model.addPending(pending, built.pending, id)
+    _debounced = { args: built.args, id: id, action: action }
+    debounceTimer.restart()
+    settleTimer.restart()
+    return true
+  }
+
+  function flushDebounced() {
+    debounceTimer.stop()
+    if (_debounced === null) return
+    var item = _debounced
+    _debounced = null
+    enqueue(item)
+  }
+
+  function enqueue(item) {
+    var r = Model.enqueueCommand(queue, item)
+    var next = pending
+    for (var i = 0; i < r.dropped.length; i++) next = Model.dropPending(next, r.dropped[i])
+    pending = next
+    queue = r.queue
+    settleTimer.restart()
     dispatchNext()
   }
 
   function dispatchNext() {
-    if (ctlProcess.running || commandQueue.length === 0) return
-    var nextCmd = commandQueue.shift()
-    ctlProcess.command = nextCmd
+    if (runningCommand !== null || queue.length === 0) return
+    var item = queue[0]
+    queue = queue.slice(1)
+    runningCommand = item
+    ctlProcess.command = [cliBinary].concat(item.args)
     ctlProcess.running = true
+  }
+
+  function showError(message) {
+    commandError = Model.elideError(message)
+    errorTimer.restart()
+  }
+
+  function finishCommand(exitCode) {
+    var item = runningCommand
+    runningCommand = null
+    if (item && exitCode !== 0) {
+      pending = Model.dropPending(pending, item.id)
+      showError(Model.commandErrorText(exitCode, ctlStderr.text, ctlStdout.text))
+    }
+    settleTimer.restart()
+    dispatchNext()
   }
 
   Process {
@@ -99,146 +160,44 @@ Item {
     running: false
     stdout: StdioCollector { id: ctlStdout; waitForEnd: true }
     stderr: StdioCollector { id: ctlStderr; waitForEnd: true }
-    onExited: function(exitCode) {
-      if (exitCode !== 0) {
-        var err = String(ctlStderr.text || ctlStdout.text || "").trim()
-        if (err) {
-          root.lastError = Model.elideError(err)
-        }
-      }
-      dispatchNext()
+    onExited: function(exitCode, exitStatus) { root.finishCommand(exitCode) }
+    // A binary that cannot start never exits; do not let it stall the queue.
+    onRunningChanged: {
+      if (running) return
+      var item = root.runningCommand
+      Qt.callLater(function() {
+        if (item !== null && root.runningCommand === item && !ctlProcess.running) root.finishCommand(127)
+      })
     }
   }
 
-  // Reactive FileView watcher (zero periodic polling timers for file reading)
+  // Reactive file watcher; no polling.
   FileView {
     id: fileView
     path: root.statusPath
     watchChanges: true
     atomicWrites: true
     printErrors: false
-    onLoaded: {
-      var content = typeof text === "function" ? text() : (fileView.text || "")
-      root.applyStatus(content)
-    }
+    onLoaded: root.applyStatus(typeof fileView.text === "function" ? fileView.text() : fileView.text)
     onLoadFailed: root.applyStatus("")
     onFileChanged: reload()
   }
 
   function applyStatus(raw) {
-    var content = raw
-    if (content === undefined || content === null) {
-      content = typeof fileView.text === "function" ? fileView.text() : (fileView.text || "")
-    }
-    var parsed = Model.parseStatus(content)
-
-    ok = parsed.ok === true
-    lastError = parsed.lastError || ""
-    schemaVersion = parsed.schemaVersion || 0
-    schemaTooNew = parsed.schemaTooNew === true
-    connected = parsed.connected === true
-    deviceName = parsed.deviceName || ""
-    batteryLevel = parsed.batteryLevel !== undefined ? parsed.batteryLevel : Model.LEVEL_UNKNOWN
-    batteryCharging = parsed.batteryCharging === true
-    codec = parsed.codec || ""
-    earDetection = parsed.earDetection !== undefined ? parsed.earDetection : true
-    eqCustomBands = parsed.eqCustomBands || [0, 0, 0, 0, 0]
-    clearBass = parsed.clearBass !== undefined ? parsed.clearBass : 0
-
-    _realNoiseMode = parsed.noiseMode || Model.NOISE_UNKNOWN
-    _realAmbientSoundLevel = parsed.ambientSoundLevel !== undefined ? parsed.ambientSoundLevel : 0
-    _realEqPreset = parsed.eqPreset || Model.EQ_OFF
-    _realSpeakToChat = parsed.speakToChat === true
-    _realDseeExtreme = parsed.dseeExtreme === true
-    _realMultipoint = parsed.multipoint === true
-
-    // Reconcile optimistic values with settled daemon updates
-    if (_desiredNoiseMode !== "" && _realNoiseMode === _desiredNoiseMode) _desiredNoiseMode = ""
-    if (_desiredAmbientLevel !== -1 && _realAmbientSoundLevel === _desiredAmbientLevel) _desiredAmbientLevel = -1
-    if (_desiredEqPreset !== "" && _realEqPreset === _desiredEqPreset) _desiredEqPreset = ""
-    if (_desiredSpeakToChat !== null && _realSpeakToChat === _desiredSpeakToChat) _desiredSpeakToChat = null
-    if (_desiredDsee !== null && _realDseeExtreme === _desiredDsee) _desiredDsee = null
-    if (_desiredMultipoint !== null && _realMultipoint === _desiredMultipoint) _desiredMultipoint = null
-
-    if (_desiredNoiseMode === "" && _desiredAmbientLevel === -1 && _desiredEqPreset === "" &&
-        _desiredSpeakToChat === null && _desiredDsee === null && _desiredMultipoint === null) {
-      settleTimer.stop()
-    }
-  }
-
-  function setNoiseMode(mode) {
-    var valid = [Model.NOISE_ANC, Model.NOISE_AMBIENT, Model.NOISE_WIND, Model.NOISE_OFF]
-    if (valid.indexOf(mode) === -1) return
-    _desiredNoiseMode = mode
-    settleTimer.restart()
-    runCommand(["noise", mode])
-  }
-
-  function setAmbientLevel(level) {
-    var clamped = Model.clamp(level, 0, 20, 0)
-    _desiredAmbientLevel = clamped
-    settleTimer.restart()
-    runCommand(["ambient-level", String(clamped)])
-  }
-
-  function setEqPreset(preset) {
-    var valid = [
-      Model.EQ_OFF, Model.EQ_BRIGHT, Model.EQ_EXCITED, Model.EQ_MELLOW,
-      Model.EQ_RELAXED, Model.EQ_VOCAL, Model.EQ_TREBLE, Model.EQ_BASS,
-      Model.EQ_SPEECH, Model.EQ_CUSTOM
-    ]
-    if (valid.indexOf(preset) === -1) return
-    _desiredEqPreset = preset
-    settleTimer.restart()
-    runCommand(["eq", preset])
-  }
-
-  function setEqCustom(b1, b2, b3, b4, b5, cb) {
-    _desiredEqPreset = Model.EQ_CUSTOM
-    settleTimer.restart()
-    runCommand([
-      "eq", "custom",
-      String(Model.clamp(b1, -10, 10, 0)),
-      String(Model.clamp(b2, -10, 10, 0)),
-      String(Model.clamp(b3, -10, 10, 0)),
-      String(Model.clamp(b4, -10, 10, 0)),
-      String(Model.clamp(b5, -10, 10, 0)),
-      String(Model.clamp(cb, -10, 10, 0))
-    ])
-  }
-
-  function setSpeakToChat(enabled) {
-    _desiredSpeakToChat = enabled === true
-    settleTimer.restart()
-    runCommand(["speak-to-chat", enabled ? "on" : "off"])
-  }
-
-  function setDsee(enabled) {
-    _desiredDsee = enabled === true
-    settleTimer.restart()
-    runCommand(["dsee", enabled ? "on" : "off"])
-  }
-
-  function setMultipoint(enabled) {
-    _desiredMultipoint = enabled === true
-    settleTimer.restart()
-    runCommand(["multipoint", enabled ? "on" : "off"])
-  }
-
-  function setEarDetect(enabled) {
-    runCommand(["ear-detect", enabled ? "on" : "off"])
+    var parsed = Model.parseStatus(raw)
+    pending = Model.reconcilePending(pending, parsed)
+    realStatus = parsed
   }
 
   function cycleNoiseMode() {
-    var next = Model.cycleNoiseMode(noiseMode)
-    setNoiseMode(next)
+    var s = status
+    if (!Model.isEnabled(s, "noise_control", s.noiseMode)) return
+    send("noise", Model.cycleNoiseMode(s.noiseMode))
   }
 
   function refresh() {
     fileView.reload()
   }
 
-  Component.onCompleted: {
-    fileView.reload()
-  }
+  Component.onCompleted: fileView.reload()
 }
