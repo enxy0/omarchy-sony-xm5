@@ -10,7 +10,10 @@ import threading
 import json
 import stat
 
-DAEMON_BIN = os.environ.get("DAEMON_BIN", "/home/roykevin/Projects/omarchy-sony/build/daemon/sony-headphones-daemon")
+DAEMON_BIN = os.environ.get(
+    "DAEMON_BIN",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "build", "daemon", "sony-headphones-daemon"),
+)
 
 def check_mode(path, expected_mode):
     st = os.stat(path)
@@ -92,7 +95,7 @@ def test_start_stop_cycles(sbox):
         resp = send_ipc_cmd(sock_path, "status\n")
         try:
             st = json.loads(resp)
-            if st.get("schema_version") != 1 or not st.get("connected"):
+            if st.get("schema_version") != 2 or not st.get("connected"):
                 print(f"FAIL: Cycle {i} invalid status payload: {resp}")
                 proc.kill()
                 return False
@@ -386,7 +389,7 @@ def test_stale_socket_recovery(sbox):
         return False
 
     # Verify client can connect immediately
-    resp = send_ipc_cmd(sock_path, "noise wind\n")
+    resp = send_ipc_cmd(sock_path, "noise anc\n")
     if resp != "OK\n":
         print(f"FAIL: Command over recovered socket returned '{resp}'")
         proc2.kill()
