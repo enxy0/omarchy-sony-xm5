@@ -33,6 +33,8 @@ BUTTON_FUNCTION = [
     "ambient_sound_control", "voice_recognition", "google_assistant",
     "amazon_alexa", "quick_access", "none",
 ]
+QUICK_ACCESS_PRESSES = ["double", "triple"]
+QUICK_ACCESS = ["off", "spotify"]
 ON_OFF = ["on", "off"]
 
 # verb -> usage text (contract 3.3 "Verb and syntax" cell).
@@ -56,6 +58,8 @@ USAGE = {
     "connection-quality": "connection-quality sound|connection",
     "multipoint": "multipoint on|off",
     "source": "source <address>",
+    "touch-panel": "touch-panel on|off",
+    "quick-access": "quick-access double|triple <value>",
 }
 ALIASES = {"ear-detection": "ear-detect"}
 READ_VERBS = ("status", "probe")
@@ -116,6 +120,12 @@ def build_request(verb, args):
         timeout = choice(verb, args[1], ["short", "standard", "long", "off"])
         return f"{verb} {sensitivity} {timeout}"
 
+    if verb == "quick-access":
+        need_args(verb, args, 2)
+        press = choice(verb, args[0], QUICK_ACCESS_PRESSES)
+        value = choice(verb, args[1], QUICK_ACCESS)
+        return f"{verb} {press} {value}"
+
     need_args(verb, args, 1)
     arg = args[0]
     if verb == "noise":
@@ -126,7 +136,7 @@ def build_request(verb, args):
         return f"{verb} {parse_int(arg, -2, 2, verb)}"
     if verb == "volume":
         return f"volume {parse_int(arg, 0, 30, verb)}"
-    if verb in ("focus-voice", "dsee", "speak-to-chat", "voice-guidance", "ear-detect", "multipoint"):
+    if verb in ("focus-voice", "dsee", "speak-to-chat", "voice-guidance", "ear-detect", "multipoint", "touch-panel"):
         return f"{verb} {choice(verb, arg, ON_OFF)}"
     if verb == "auto-power-off":
         return f"{verb} {choice(verb, arg, AUTO_POWER_OFF)}"

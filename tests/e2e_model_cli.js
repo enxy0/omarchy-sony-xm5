@@ -68,14 +68,13 @@ const KEYS = {
   ear_detection: { type: "bool", feature: "ear_detection", field: "earDetection" },
   worn: { type: "bool", feature: "worn", field: "worn" },
   multipoint: { type: "bool", feature: "multipoint", field: "multipoint" },
-  devices: { type: "devices", feature: "devices", field: "devices" }
+  devices: { type: "devices", feature: "devices", field: "devices" },
+  touch_panel: { type: "bool", feature: "touch_panel", field: "touchPanel" },
+  quick_access_double_tap: { type: "enum", values: M.QUICK_ACCESS_VALUES, feature: "quick_access", field: "quickAccessDoubleTap" },
+  quick_access_triple_tap: { type: "enum", values: M.QUICK_ACCESS_VALUES, feature: "quick_access", field: "quickAccessTripleTap" },
+  quick_access_double_tap_options: { type: "enumList", values: M.QUICK_ACCESS_VALUES, feature: "quick_access", field: "quickAccessDoubleTapOptions" },
+  quick_access_triple_tap_options: { type: "enumList", values: M.QUICK_ACCESS_VALUES, feature: "quick_access", field: "quickAccessTripleTapOptions" }
 };
-
-const PENDING_FEATURE_KEYS = ["touch_panel", "quick_access"].filter((k) => !M.FEATURE_KEYS.includes(k));
-
-function modelSupported(v) {
-  return Object.fromEntries(Object.entries(v).filter(([k]) => !PENDING_FEATURE_KEYS.includes(k)));
-}
 
 // ---------------------------------------------------------------------------
 // Checks and groups
@@ -204,7 +203,7 @@ function typeOk(spec, v) {
   case "enumList": return Array.isArray(v) && v.length > 0 && v.every((x) => spec.values.includes(x));
   case "bands": return Array.isArray(v) && v.length === 5 && v.every((x) => Number.isInteger(x) && x >= M.EQ_LEVEL_MIN && x <= M.EQ_LEVEL_MAX);
   case "supported": return v && typeof v === "object" && !Array.isArray(v) &&
-      same(Object.keys(modelSupported(v)).sort(), M.FEATURE_KEYS.slice().sort()) &&
+      same(Object.keys(v).sort(), M.FEATURE_KEYS.slice().sort()) &&
       Object.values(v).every((x) => typeof x === "boolean");
   case "devices": return Array.isArray(v) && v.every((x) => x && typeof x === "object" &&
       /^[0-9A-F]{2}(:[0-9A-F]{2}){5}$/.test(x.address) && typeof x.name === "string" &&
@@ -241,9 +240,10 @@ function checkSchema(raw, parsed, where) {
     // Lossless parse: no clamp, no "unknown"/"other" fallback, no dropped value.
     if (spec.field) eq(parsed[spec.field], v, `${where}: Model reads '${key}' unchanged`);
   }
-  if (raw.supported) eq(parsed.supported, modelSupported(raw.supported), `${where}: Model reads 'supported' unchanged`);
+  if (raw.supported) eq(parsed.supported, raw.supported, `${where}: Model reads 'supported' unchanged`);
   ok(parsed.eqPreset !== "unknown" && parsed.connectionQuality !== "other" &&
-    parsed.buttonFunction !== "other" && parsed.codec !== "OTHER", `${where}: no unknown-value fallback`);
+    parsed.buttonFunction !== "other" && parsed.codec !== "OTHER" &&
+    parsed.quickAccessDoubleTap !== "other" && parsed.quickAccessTripleTap !== "other", `${where}: no unknown-value fallback`);
 }
 
 // ---------------------------------------------------------------------------
@@ -293,10 +293,13 @@ const ADJUST_RANGES = {
   voiceGuidanceVolume: [M.GUIDANCE_VOLUME_MIN, M.GUIDANCE_VOLUME_MAX]
 };
 
+// `args` builds the sony-ctl argv for a value; `refusal` is the ERR subject.
 const LIST_TARGETS = {
-  eqPreset: { verb: "eq", values: M.EQ_PRESET_VALUES },
-  autoPowerOff: { verb: "auto-power-off", values: M.AUTO_POWER_OFF_VALUES },
-  buttonFunction: { verb: "button-function", values: M.BUTTON_FUNCTION_VALUES }
+  eqPreset: { args: (v) => ["eq", v], values: M.EQ_PRESET_VALUES },
+  autoPowerOff: { args: (v) => ["auto-power-off", v], values: M.AUTO_POWER_OFF_VALUES },
+  buttonFunction: { args: (v) => ["button-function", v], values: M.BUTTON_FUNCTION_VALUES },
+  quickAccessDouble: { args: (v) => ["quick-access", "double", v], refusal: (v) => `quick_access double ${v}`, values: M.QUICK_ACCESS_VALUES },
+  quickAccessTriple: { args: (v) => ["quick-access", "triple", v], refusal: (v) => `quick_access triple ${v}`, values: M.QUICK_ACCESS_VALUES }
 };
 
 function rangeValues(min, max) {
@@ -339,9 +342,11 @@ async function exerciseTarget(d, id) {
     if (list) {
       for (const v of list.values.filter((x) => !M.targetOptions(s, id).includes(x))) {
         eq(M.buildCommand(t.action, v, s), { error: "Not supported by this headset" }, `${id}=${v}: Model refuses a value outside the list`);
-        const r = cli(d, [list.verb, v]);
+        const args = list.args(v);
+        const r = cli(d, args);
         commandCount++;
-        eq([r.code, r.stderr], [1, `Error from daemon: ERR unsupported ${t.feature} ${v}`], `${id}=${v}: sony-ctl ${list.verb} ${v} -> ERR`);
+        const subject = list.refusal ? list.refusal(v) : `${t.feature} ${v}`;
+        eq([r.code, r.stderr], [1, `Error from daemon: ERR unsupported ${subject}`], `${id}=${v}: sony-ctl ${args.join(" ")} -> ERR`);
       }
     }
     return;
@@ -445,6 +450,28 @@ try {
   await runGroup("E2", "Every target, option and slider value through the real CLI (full XM5)", async () => {
     if (!full) throw new Error("no daemon");
     for (const id of M.TARGET_ORDER) await exerciseTarget(full, id);
+
+    // quick-access sets one press; the other keeps its function (contract 3.3).
+    for (const [press, other] of [["double", "triple"], ["triple", "double"]]) {
+      let s = readStatus(full).parsed;
+      const field = press === "double" ? "quickAccessDoubleTap" : "quickAccessTripleTap";
+      const otherField = other === "double" ? "quickAccessDoubleTap" : "quickAccessTripleTap";
+      const kept = s[otherField];
+      const next = M.quickAccessOptions(s, press).find((v) => v !== s[field]);
+      if (!ok(next !== undefined, `quick access ${press}: a second value exists`)) continue;
+      const action = press === "double" ? "quickAccessDouble" : "quickAccessTriple";
+      s = await send(full, action, next, `quick access ${press}=${next}`);
+      eq(s[otherField], kept, `quick access ${press}=${next}: ${other} tap keeps ${kept}`);
+    }
+
+    // Argument errors: the CLI refuses them before it connects.
+    for (const args of [["touch-panel", "maybe"], ["touch-panel"], ["quick-access", "double"],
+      ["quick-access", "quad", "off"], ["quick-access", "double", "other"]]) {
+      const r = cli(full, args);
+      commandCount++;
+      const usage = args[0] === "touch-panel" ? "touch-panel on|off" : "quick-access double|triple <value>";
+      eq([r.code, r.stdout, r.stderr], [1, "", `Error: usage: ${usage}`], `sony-ctl ${args.join(" ")} -> usage error`);
+    }
   });
 } finally {
   if (full) await stopDaemon(full);

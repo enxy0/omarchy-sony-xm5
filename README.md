@@ -66,6 +66,8 @@ They can fail or be absent:
 - DSEE Extreme
 - Voice guidance volume
 - NC/AMB button function (ambient control, assistants, Quick Access)
+- Quick Access function for a double or triple press (off or Spotify)
+- Touch controls on/off
 - Worn status (headset on the head or not)
 - Connection priority (sound quality or stable connection)
 - Current codec

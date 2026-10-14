@@ -116,7 +116,8 @@ suite("Suite 3: v1 Payload", () => {
     battery: true, noise_control: true, eq_preset: true, eq_custom: true, dsee: true,
     speak_to_chat: true, voice_guidance: false, voice_guidance_volume: false, auto_power_off: false,
     nc_amb_button: false, button_function: false, ear_detection: true, worn: false, volume: false,
-    connection_quality: false, codec: true, multipoint: true, devices: false, source_switch: false
+    connection_quality: false, codec: true, multipoint: true, devices: false, source_switch: false,
+    touch_panel: false, quick_access: false
   });
   check("v1 supported_source is null", r.supportedSource, null);
   check("v1 volume control hidden", Model.controlState(r, "volume", r.volume), "hidden");
@@ -217,8 +218,8 @@ suite("Suite 6: v2 Full Fixture", () => {
   check("Expanded cursor sections", ids(Model.cursorSections(s, { sound: true, customEq: true, speakToChat: true, headset: true, multipoint: true })),
     ["noise", "ambient", "focusVoice", "sound", "eqPreset", "dsee", "connectionQuality", "customEq", "eqBands",
       "speakToChatHeader", "speakToChat", "stcSensitivity", "stcTimeout", "headset", "volume", "voiceGuidance",
-      "voiceGuidanceVolume", "autoPowerOff", "ncAmbButton", "buttonFunction", "earDetection", "multipointHeader",
-      "multipoint", "devices"]);
+      "voiceGuidanceVolume", "autoPowerOff", "ncAmbButton", "buttonFunction", "quickAccessDouble", "quickAccessTriple",
+      "earDetection", "touchPanel", "multipointHeader", "multipoint", "devices"]);
   const sec = Model.cursorSections(s, { sound: true, headset: true });
   const byId = Object.fromEntries(sec.map((x) => [x.id, x]));
   check("Noise preferred is current mode", byId.noise.preferred, 1);
@@ -611,6 +612,74 @@ suite("Suite 24: Bar Display Setting", () => {
   check("Cursor moves from the last section to the setting", [down.section, down.index, down.action], ["barPercentage", 0, null]);
   const side = Model.cursorMove({ section: "barPercentage", index: 0 }, 1, 0, Model.panelCursorSections(s, {}));
   check("h/l on the setting does nothing", [side.section, side.action], ["barPercentage", null]);
+});
+
+suite("Suite 25: Touch Panel and Quick Access", () => {
+  const s = full();
+  check("Parsed fields", [s.touchPanel, s.quickAccessDoubleTap, s.quickAccessTripleTap, s.quickAccessDoubleTapOptions, s.quickAccessTripleTapOptions],
+    [true, "off", "spotify", ["off", "spotify"], ["off", "spotify"]]);
+  check("Supported keys", [s.supported.touch_panel, s.supported.quick_access], [true, true]);
+  const withRaw = (extra) => Model.parseStatus(JSON.stringify(Object.assign(JSON.parse(fixture("status_v2_full.json")), extra)));
+  const other = withRaw({ quick_access_double_tap: "other", quick_access_triple_tap: "SPOTIFY", quick_access_double_tap_options: ["spotify", "other", "bogus", "off"] });
+  check("other is kept, case folded, lists drop other and unknown values", [other.quickAccessDoubleTap, other.quickAccessTripleTap, other.quickAccessDoubleTapOptions],
+    ["other", "spotify", ["spotify", "off"]]);
+  check("Unknown value reads as null", withRaw({ quick_access_triple_tap: "tidal", touch_panel: "yes" }).quickAccessTripleTap, null);
+  check("Non-bool touch panel reads as null", withRaw({ touch_panel: "yes" }).touchPanel, null);
+
+  // A daemon older than the keys: no supported key means false, fields null.
+  const old = JSON.parse(fixture("status_v2_full.json"));
+  delete old.supported.touch_panel;
+  delete old.supported.quick_access;
+  const o = parse(old);
+  check("Missing supported keys read as false", [o.supported.touch_panel, o.supported.quick_access], [false, false]);
+  check("Their fields read as null", [o.touchPanel, o.quickAccessDoubleTap, o.quickAccessTripleTapOptions], [null, null, null]);
+  check("Targets hidden for an older daemon", ["touchPanel", "quickAccessDouble", "quickAccessTriple"].map((id) => Model.targetState(o, id)),
+    ["hidden", "hidden", "hidden"]);
+  check("Supported false hides them", ["touchPanel", "quickAccessDouble"].map((id) => Model.targetState(Model.parseStatus(fixture("status_v2_minimal.json")), id)),
+    ["hidden", "hidden"]);
+  check("Fallback list hides them", ["touchPanel", "quickAccessTriple"].map((id) => Model.targetState(Model.parseStatus(fixture("status_v2_fallback.json")), id)),
+    ["hidden", "hidden"]);
+  const init = Model.parseStatus(fixture("status_v2_initializing.json"));
+  check("Reading settings: disabled", ["touchPanel", "quickAccessDouble"].map((id) => Model.targetState(init, id)), ["disabled", "disabled"]);
+  check("Supported with a null value: disabled", Model.targetState(Object.assign({}, s, { touchPanel: null }), "touchPanel"), "disabled");
+  check("Headset section shows for touch panel alone",
+    Model.sectionVisible(withRaw({ supported: Object.assign({}, JSON.parse(fixture("status_v2_minimal.json")).supported, { touch_panel: true }) }), "headset"), true);
+
+  check("Touch panel command", Model.buildCommand("touchPanel", false, s), { args: ["touch-panel", "off"], pending: { touchPanel: false }, feature: "touch_panel" });
+  check("Touch panel needs a bool", Model.buildCommand("touchPanel", "off", s).error, "Invalid value");
+  check("Toggle activation flips the touch panel", Model.targetActivation(s, "touchPanel", 0), { action: "touchPanel", value: false });
+  check("Double tap command", Model.buildCommand("quickAccessDouble", "spotify", s),
+    { args: ["quick-access", "double", "spotify"], pending: { quickAccessDoubleTap: "spotify" }, feature: "quick_access" });
+  check("Triple tap command", Model.buildCommand("quickAccessTriple", "off", s),
+    { args: ["quick-access", "triple", "off"], pending: { quickAccessTripleTap: "off" }, feature: "quick_access" });
+  check("other cannot be sent", Model.buildCommand("quickAccessDouble", "other", s).error, "Not supported by this headset");
+  const onlyOff = Object.assign({}, s, { quickAccessTripleTapOptions: ["off"] });
+  check("Value outside the press's list is refused", Model.buildCommand("quickAccessTriple", "spotify", onlyOff).error, "Not supported by this headset");
+  check("The other press keeps its own list", Model.buildCommand("quickAccessDouble", "spotify", onlyOff).args, ["quick-access", "double", "spotify"]);
+  check("Unsupported feature", Model.buildCommand("quickAccessDouble", "off", o).error, "Not supported by this headset");
+  check("Schema 1 cannot send the new verbs", Model.isV1Command(["touch-panel", "on"]) || Model.isV1Command(["quick-access", "double", "off"]), false);
+
+  check("Options from the lists", [Model.quickAccessOptions(onlyOff, "double"), Model.quickAccessOptions(onlyOff, "triple")], [["off", "spotify"], ["off"]]);
+  check("Options without a list", Model.quickAccessOptions(Object.assign({}, s, { quickAccessDoubleTapOptions: null }), "double"), ["off", "spotify"]);
+  check("Chips", Model.targetChoices(s, "quickAccessTriple").map((c) => c.value + "|" + c.label), ["off|Off", "spotify|Spotify"]);
+  check("Chip activation", Model.targetActivation(s, "quickAccessTriple", 0), { action: "quickAccessTriple", value: "off" });
+  check("other selects no chip", Model.cursorSections(Object.assign({}, s, { quickAccessDoubleTap: "other" }), { headset: true })
+    .find((x) => x.id === "quickAccessDouble").preferred, -1);
+  check("Labels", ["off", "spotify", "other", null].map(Model.quickAccessLabel), ["Off", "Spotify", "Other", "Unknown"]);
+  check("No other text for named values", Model.quickAccessOtherText(s), "");
+  check("other text for one press", Model.quickAccessOtherText(Object.assign({}, s, { quickAccessTripleTap: "other" })), "Triple tap uses a function this panel does not name.");
+  check("other text for both presses", Model.quickAccessOtherText(Object.assign({}, s, { quickAccessDoubleTap: "other", quickAccessTripleTap: "other" })),
+    "Double tap and Triple tap use functions this panel does not name.");
+
+  let q = Model.enqueueCommand([], { args: ["quick-access", "double", "spotify"], id: 1 });
+  q = Model.enqueueCommand(q.queue, { args: ["quick-access", "triple", "off"], id: 2 });
+  check("Presses queue separately", [q.queue.map((i) => i.id), q.dropped], [[1, 2], []]);
+  q = Model.enqueueCommand(q.queue, { args: ["quick-access", "double", "off"], id: 3 });
+  check("Same press replaces the queued one", [q.queue.map((i) => i.id), q.dropped], [[2, 3], [1]]);
+
+  const pend = Model.addPending({}, { quickAccessDoubleTap: "spotify" }, 7);
+  check("Pending double tap shows at once", Model.applyPending(s, pend).quickAccessDoubleTap, "spotify");
+  check("Pending clears when the daemon reports it", Model.reconcilePending(pend, Object.assign({}, s, { quickAccessDoubleTap: "spotify" })), {});
 });
 
 console.log(`\nSummary: ${passed} passed, ${failed} failed`);
