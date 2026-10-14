@@ -101,7 +101,9 @@ after a 400 ms pause.
 | Headset | Auto power off chips, grid of 4; list from `auto_power_off_options` | `auto_power_off` | `auto-power-off <v>` | `auto_power_off` |
 | Headset | NC/AMB button cycle chips: NC·AMB·Off / NC·AMB / NC·Off / AMB·Off | `nc_amb_button` | `nc-amb-button <v>` | `nc_amb_button` |
 | Headset | NC/AMB button function chips, grid of 3; list from `button_functions` | `button_function` | `button-function <v>` | `button_function` |
+| Headset | Quick Access: a "Double tap" and a "Triple tap" chip row (Off / Spotify); lists from `quick_access_double_tap_options` and `quick_access_triple_tap_options`. `other` selects no chip and shows the caption "Double tap uses a function this panel does not name." (read-only) | `quick_access_double_tap`, `quick_access_triple_tap` | `quick-access double\|triple <v>` | `quick_access` |
 | Headset | Pause when taken off toggle | `ear_detection` | `ear-detect on\|off` | `ear_detection` |
+| Headset | Touch controls toggle ("Tap and swipe the ear cup to play, skip and change the volume") | `touch_panel` | `touch-panel on\|off` | `touch_panel` |
 | Multipoint | Multipoint toggle; caption "The headset reconnects after this change." | `multipoint` | `multipoint on\|off` | `multipoint` |
 | Multipoint | Device rows: name (or address), `Playing` / `Connected` / `Not connected` marker | `devices` | none | `devices` |
 | Multipoint | Activate a connected, not active row: switch the audio source | `devices[].address` | `source <address>` | `source_switch` |
@@ -138,8 +140,12 @@ A disabled control is drawn at 45 % opacity and ignores clicks and keys.
 | command error (`sony-ctl` exit code not 0) | as connected | status line in urgent color with the error text for 6 s; the optimistic value of that command reverts |
 
 Enum values `unknown` (`eq_preset`), `other` (`connection_quality`,
-`button_function`) and `OTHER` (`codec`) select no chip; the summary shows
-`Unknown` or `Other`.
+`button_function`, `quick_access_double_tap`, `quick_access_triple_tap`) and
+`OTHER` (`codec`) select no chip; the summary shows `Unknown` or `Other`.
+
+`touch_panel` and `quick_access` were added within schema 2. A daemon older
+than these keys has no `supported` entry for them: they read as `false`, the
+fields as `null`, and the controls stay hidden (contract 5, rule 4).
 
 ## 5. Optimistic values and the command queue
 
@@ -152,7 +158,9 @@ Enum values `unknown` (`eq_preset`), `other` (`connection_quality`,
   command finished.
 - One `sony-ctl` process runs at a time. A queued (not yet running) command
   with the same verb is replaced by the newer one, which goes to the end of
-  the queue, so a slider wheel never builds a backlog.
+  the queue, so a slider wheel never builds a backlog. For `quick-access` the
+  press is part of the key (`Model.commandKey`): a triple-tap change does not
+  replace a queued double-tap change.
 
 ## 6. Keyboard
 
@@ -171,7 +179,8 @@ Target order follows the layout: noise chips, ambient slider, Focus on
 Voice, Sound header, EQ grid, DSEE, connection priority, Custom EQ header,
 band rows, Speak-to-Chat header, toggle, sensitivity, timeout, Headset
 header, volume, voice guidance, guidance volume, auto power off, NC/AMB
-cycle, button function, pause when taken off, Multipoint header, toggle,
+cycle, button function, Quick Access double tap, triple tap, pause when
+taken off, touch controls, Multipoint header, toggle,
 device rows, the bar percentage toggle. Hidden controls have no target;
 disabled controls keep their target but ignore activation. The bar
 percentage toggle is the only target while the headset is disconnected. The
@@ -183,6 +192,9 @@ panel scrolls to keep the cursor visible.
    `30min`, `60min`, `180min`, plus `when_taken_off` only when it is the
    current value.
 2. `button_functions` is `null`: offer every contract value except `other`.
+   The same holds for `quick_access_double_tap_options` and
+   `quick_access_triple_tap_options` (`off`, `spotify`); the daemon skips its
+   list check while a list is `null` (contract 3.3).
 3. `speak-to-chat-config` needs both values. While the other value is `null`
    the chip row is disabled.
 4. The ambient slider stays usable outside Ambient mode, because

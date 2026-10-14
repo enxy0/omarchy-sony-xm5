@@ -54,13 +54,17 @@ var BUTTON_FUNCTION_VALUES = [
   "ambient_sound_control", "voice_recognition", "google_assistant",
   "amazon_alexa", "quick_access", "none"
 ];
+// Quick Access functions for a double or triple press of a headset key
+// (protocol.md 5.18).
+var QUICK_ACCESS_VALUES = ["off", "spotify"];
+var QUICK_ACCESS_PRESSES = ["double", "triple"];
 
 // Every `supported` key of schema 2 (contract 2.4).
 var FEATURE_KEYS = [
   "battery", "noise_control", "eq_preset", "eq_custom", "dsee", "speak_to_chat",
   "voice_guidance", "voice_guidance_volume", "auto_power_off", "nc_amb_button",
   "button_function", "ear_detection", "worn", "volume", "connection_quality",
-  "codec", "multipoint", "devices", "source_switch"
+  "codec", "multipoint", "devices", "source_switch", "touch_panel", "quick_access"
 ];
 // Contract 2.5: how a schema 1 file is read.
 var V1_SUPPORTED_KEYS = [
@@ -96,7 +100,12 @@ var FIELD_FEATURES = {
   earDetection: "ear_detection",
   worn: "worn",
   multipoint: "multipoint",
-  devices: "devices"
+  devices: "devices",
+  touchPanel: "touch_panel",
+  quickAccessDoubleTap: "quick_access",
+  quickAccessTripleTap: "quick_access",
+  quickAccessDoubleTapOptions: "quick_access",
+  quickAccessTripleTapOptions: "quick_access"
 };
 
 // Popup sections and the supported keys of their controls.
@@ -106,7 +115,7 @@ var SECTION_FEATURES = {
   customEq: ["eq_custom"],
   speakToChat: ["speak_to_chat"],
   headset: ["volume", "voice_guidance", "voice_guidance_volume", "auto_power_off",
-    "nc_amb_button", "button_function", "ear_detection"],
+    "nc_amb_button", "button_function", "quick_access", "ear_detection", "touch_panel"],
   multipoint: ["multipoint", "devices"]
 };
 
@@ -154,7 +163,12 @@ function defaultStatus() {
     earDetection: null,
     worn: null,
     multipoint: null,
-    devices: null
+    devices: null,
+    touchPanel: null,
+    quickAccessDoubleTap: null,
+    quickAccessTripleTap: null,
+    quickAccessDoubleTapOptions: null,
+    quickAccessTripleTapOptions: null
   };
 }
 
@@ -342,6 +356,14 @@ function parseStatus(raw) {
   res.multipoint = _bool(parsed.multipoint);
   res.devices = _devices(parsed.devices);
 
+  // Added within schema 2: an older daemon has neither the fields nor the
+  // supported keys, so they stay null (contract 5, rule 4).
+  res.touchPanel = _bool(parsed.touch_panel);
+  res.quickAccessDoubleTap = _enumValue(parsed.quick_access_double_tap, QUICK_ACCESS_VALUES.concat(["other"]));
+  res.quickAccessTripleTap = _enumValue(parsed.quick_access_triple_tap, QUICK_ACCESS_VALUES.concat(["other"]));
+  res.quickAccessDoubleTapOptions = _enumList(parsed.quick_access_double_tap_options, QUICK_ACCESS_VALUES);
+  res.quickAccessTripleTapOptions = _enumList(parsed.quick_access_triple_tap_options, QUICK_ACCESS_VALUES);
+
   // A false supported key means the matching fields are null (contract 2.4).
   if (res.supported) {
     for (var field in FIELD_FEATURES) {
@@ -425,6 +447,15 @@ function autoPowerOffOptions(status) {
 function buttonFunctionOptions(status) {
   var list = status && Array.isArray(status.buttonFunctions) ? status.buttonFunctions : null;
   return list && list.length > 0 ? list.slice() : BUTTON_FUNCTION_VALUES.slice();
+}
+
+// Functions the headset accepts for a press ("double" or "triple"); without a
+// list, every contract value (the daemon skips its check while the list is
+// null, contract 3.3).
+function quickAccessOptions(status, press) {
+  var field = press === "triple" ? "quickAccessTripleTapOptions" : "quickAccessDoubleTapOptions";
+  var list = status && Array.isArray(status[field]) ? status[field] : null;
+  return list && list.length > 0 ? list.slice() : QUICK_ACCESS_VALUES.slice();
 }
 
 // ---------------------------------------------------------------------------
@@ -594,6 +625,16 @@ function _commandSpec(action, value, status) {
     return _boolSpec("ear_detection", "ear-detect", "earDetection", value);
   case "multipoint":
     return _boolSpec("multipoint", "multipoint", "multipoint", value);
+  case "touchPanel":
+    return _boolSpec("touch_panel", "touch-panel", "touchPanel", value);
+  case "quickAccessDouble":
+  case "quickAccessTriple": {
+    var press = action === "quickAccessTriple" ? "triple" : "double";
+    var field = press === "triple" ? "quickAccessTripleTap" : "quickAccessDoubleTap";
+    var qa = _enumSpec("quick_access", "quick-access", field, value, quickAccessOptions(status, press));
+    if (qa.args) qa.args = ["quick-access", press, value];
+    return qa;
+  }
   case "source": {
     var addr = _address(value);
     if (addr === null) return { feature: "source_switch", error: "Invalid address" };
@@ -677,16 +718,25 @@ function applyPending(status, pending) {
 }
 
 // ---------------------------------------------------------------------------
-// Command queue. Items are { args, id }. A queued command with the same verb
-// is dropped and the new one goes to the end, so the last intent wins.
+// Command queue. Items are { args, id }. A queued command with the same key
+// (the verb; verb and press for quick-access) is dropped and the new one goes
+// to the end, so the last intent wins.
 // Returns { queue, dropped } where `dropped` lists the removed ids.
 // ---------------------------------------------------------------------------
+
+// `quick-access` sets one press per command, so the press is part of the key:
+// a triple-tap change must not drop a queued double-tap change.
+function commandKey(args) {
+  if (args[0] === "quick-access") return args[0] + " " + args[1];
+  return args[0];
+}
 
 function enqueueCommand(queue, item) {
   var out = [];
   var dropped = [];
+  var key = commandKey(item.args);
   for (var i = 0; i < queue.length; i++) {
-    if (queue[i].args[0] === item.args[0]) dropped.push(queue[i].id);
+    if (commandKey(queue[i].args) === key) dropped.push(queue[i].id);
     else out.push(queue[i]);
   }
   out.push(item);
@@ -839,6 +889,25 @@ function buttonFunctionLabel(v) {
     case "other": return "Other";
     default: return "Unknown";
   }
+}
+
+function quickAccessLabel(v) {
+  switch (v) {
+    case "off": return "Off";
+    case "spotify": return "Spotify";
+    case "other": return "Other";
+    default: return "Unknown";
+  }
+}
+
+// Read-only line for a press whose function the contract does not name.
+function quickAccessOtherText(status) {
+  if (!status) return "";
+  var presses = [];
+  if (status.quickAccessDoubleTap === "other") presses.push("Double tap");
+  if (status.quickAccessTripleTap === "other") presses.push("Triple tap");
+  if (presses.length === 0) return "";
+  return presses.join(" and ") + (presses.length > 1 ? " use functions" : " uses a function") + " this panel does not name.";
 }
 
 function formatSigned(n) {
@@ -1127,7 +1196,10 @@ var TARGETS = {
   autoPowerOff: { kind: "grid", columns: 4, section: "headset", feature: "auto_power_off", field: "autoPowerOff", action: "autoPowerOff" },
   ncAmbButton: { kind: "walk", section: "headset", feature: "nc_amb_button", field: "ncAmbButton", action: "ncAmbButton" },
   buttonFunction: { kind: "grid", columns: 3, section: "headset", feature: "button_function", field: "buttonFunction", action: "buttonFunction" },
+  quickAccessDouble: { kind: "walk", section: "headset", feature: "quick_access", field: "quickAccessDoubleTap", action: "quickAccessDouble" },
+  quickAccessTriple: { kind: "walk", section: "headset", feature: "quick_access", field: "quickAccessTripleTap", action: "quickAccessTriple" },
   earDetection: { kind: "single", section: "headset", feature: "ear_detection", field: "earDetection", action: "earDetection", toggle: true },
+  touchPanel: { kind: "single", section: "headset", feature: "touch_panel", field: "touchPanel", action: "touchPanel", toggle: true },
   multipointHeader: { kind: "collapse", section: "multipoint" },
   multipoint: { kind: "single", section: "multipoint", feature: "multipoint", field: "multipoint", action: "multipoint", toggle: true },
   devices: { kind: "rows", section: "multipoint", feature: "devices", field: "devices", action: "source" }
@@ -1138,7 +1210,8 @@ var TARGET_ORDER = [
   "sound", "eqPreset", "dsee", "connectionQuality",
   "customEq", "eqBands",
   "speakToChatHeader", "speakToChat", "stcSensitivity", "stcTimeout",
-  "headset", "volume", "voiceGuidance", "voiceGuidanceVolume", "autoPowerOff", "ncAmbButton", "buttonFunction", "earDetection",
+  "headset", "volume", "voiceGuidance", "voiceGuidanceVolume", "autoPowerOff", "ncAmbButton", "buttonFunction",
+  "quickAccessDouble", "quickAccessTriple", "earDetection", "touchPanel",
   "multipointHeader", "multipoint", "devices"
 ];
 
@@ -1172,6 +1245,8 @@ function targetOptions(status, id) {
   case "autoPowerOff": return autoPowerOffOptions(status);
   case "ncAmbButton": return NC_AMB_BUTTON_OPTIONS.slice();
   case "buttonFunction": return buttonFunctionOptions(status);
+  case "quickAccessDouble": return quickAccessOptions(status, "double");
+  case "quickAccessTriple": return quickAccessOptions(status, "triple");
   default: return [];
   }
 }
@@ -1181,7 +1256,8 @@ function targetChoices(status, id) {
   var label = {
     noise: noiseModeLabel, eqPreset: eqPresetButtonLabel, connectionQuality: connectionQualityLabel,
     stcSensitivity: stcSensitivityLabel, stcTimeout: stcTimeoutLabel, autoPowerOff: autoPowerOffLabel,
-    ncAmbButton: ncAmbButtonLabel, buttonFunction: buttonFunctionLabel
+    ncAmbButton: ncAmbButtonLabel, buttonFunction: buttonFunctionLabel,
+    quickAccessDouble: quickAccessLabel, quickAccessTriple: quickAccessLabel
   }[id];
   var tip = { autoPowerOff: autoPowerOffTooltip, ncAmbButton: ncAmbButtonTooltip }[id];
   var values = targetOptions(status, id);

@@ -123,6 +123,52 @@ Panel {
     }
   }
 
+  // A caption on the left, one row of chips on the right (one column per
+  // option). options: [{ value, label, tooltip }]
+  component PressRow: Item {
+    id: pressRow
+
+    property string label: ""
+    property var options: []
+    property var value: null
+    property int cursorIndex: -1
+    property color foreground: Color.foreground
+    property string fontFamily: Style.font.family
+
+    signal picked(int index)
+    signal hoveredIndex(int index, bool isHovered)
+
+    implicitHeight: Math.max(pressLabel.implicitHeight, pressGrid.implicitHeight)
+
+    Text {
+      id: pressLabel
+      anchors.left: parent.left
+      anchors.leftMargin: Style.space(6)
+      anchors.verticalCenter: parent.verticalCenter
+      width: Style.space(80)
+      textFormat: Text.PlainText
+      text: pressRow.label
+      color: Qt.darker(pressRow.foreground, 1.2)
+      font.family: pressRow.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+
+    ChoiceGrid {
+      id: pressGrid
+      anchors.left: pressLabel.right
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      columns: Math.max(1, pressRow.options.length)
+      options: pressRow.options
+      value: pressRow.value
+      cursorIndex: pressRow.cursorIndex
+      foreground: pressRow.foreground
+      fontFamily: pressRow.fontFamily
+      onPicked: function(i) { pressRow.picked(i) }
+      onHoveredIndex: function(i, h) { pressRow.hoveredIndex(i, h) }
+    }
+  }
+
   // Cursor row: title and value on one line, a slider under it.
   // Commits on release (drag) and per wheel notch.
   component SliderRow: CursorSurface {
@@ -491,7 +537,10 @@ Panel {
     case "autoPowerOff": return autoPowerOffBlock
     case "ncAmbButton": return ncAmbBlock
     case "buttonFunction": return buttonFunctionBlock
+    case "quickAccessDouble": return quickAccessDoubleRow
+    case "quickAccessTriple": return quickAccessTripleRow
     case "earDetection": return earDetectionToggle
+    case "touchPanel": return touchPanelToggle
     case "multipointHeader": return multipointHeader
     case "multipoint": return multipointToggle
     case "devices": return deviceRepeater.itemAt(index)
@@ -1336,6 +1385,57 @@ Panel {
                 }
               }
 
+              // Quick Access: one chip row per key press (double, triple).
+              Column {
+                width: parent.width
+                spacing: Style.space(6)
+                visible: quickAccessDoubleRow.visible || quickAccessTripleRow.visible
+
+                PanelSectionHeader {
+                  text: "QUICK ACCESS"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                PressRow {
+                  id: quickAccessDoubleRow
+                  width: parent.width
+                  label: "Double tap"
+                  visible: root.shownFor("quickAccessDouble")
+                  enabled: root.enabledFor("quickAccessDouble")
+                  opacity: enabled ? 1 : root.disabledOpacity
+                  options: root.choicesFor("quickAccessDouble")
+                  value: root.st.quickAccessDoubleTap
+                  cursorIndex: root.cursorIndexFor("quickAccessDouble")
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onPicked: function(i) { root.activate("quickAccessDouble", i) }
+                  onHoveredIndex: function(i, h) { if (h) root.setCursor("quickAccessDouble", i) }
+                }
+
+                PressRow {
+                  id: quickAccessTripleRow
+                  width: parent.width
+                  label: "Triple tap"
+                  visible: root.shownFor("quickAccessTriple")
+                  enabled: root.enabledFor("quickAccessTriple")
+                  opacity: enabled ? 1 : root.disabledOpacity
+                  options: root.choicesFor("quickAccessTriple")
+                  value: root.st.quickAccessTripleTap
+                  cursorIndex: root.cursorIndexFor("quickAccessTriple")
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onPicked: function(i) { root.activate("quickAccessTriple", i) }
+                  onHoveredIndex: function(i, h) { if (h) root.setCursor("quickAccessTriple", i) }
+                }
+
+                Caption {
+                  text: Model.quickAccessOtherText(root.st)
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+              }
+
               Toggle {
                 id: earDetectionToggle
                 width: parent.width
@@ -1350,6 +1450,22 @@ Panel {
                 opacity: enabled ? 1 : root.disabledOpacity
                 onClicked: root.activate("earDetection")
                 onHovered: function(h) { if (h) root.setCursor("earDetection") }
+              }
+
+              Toggle {
+                id: touchPanelToggle
+                width: parent.width
+                visible: root.shownFor("touchPanel")
+                label: "Touch controls"
+                description: "Tap and swipe the ear cup to play, skip and change the volume"
+                checked: root.st.touchPanel === true
+                hasCursor: root.hasCursor("touchPanel")
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                enabled: root.enabledFor("touchPanel")
+                opacity: enabled ? 1 : root.disabledOpacity
+                onClicked: root.activate("touchPanel")
+                onHovered: function(h) { if (h) root.setCursor("touchPanel") }
               }
             }
           }
