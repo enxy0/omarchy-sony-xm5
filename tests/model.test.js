@@ -74,14 +74,17 @@ suite("Suite 2: Schema Version Handling", () => {
   const r1 = parse({ connected: true });
   check("Missing schema_version returns ok: false", r1.ok, false);
   check("Missing schema_version error text", r1.lastError.includes("no schema_version"), true);
-  check("SUPPORTED_SCHEMA is 2", Model.SUPPORTED_SCHEMA, 2);
+  check("SUPPORTED_SCHEMA is 3", Model.SUPPORTED_SCHEMA, 3);
   const r2 = parse({ schema_version: 1, connected: true });
   check("Schema 1 accepted", [r2.ok, r2.schemaTooNew, r2.schemaVersion], [true, false, 1]);
   const r3 = parse({ schema_version: 2, connected: true });
   check("Schema 2 accepted", [r3.ok, r3.schemaTooNew, r3.schemaVersion], [true, false, 2]);
-  const r4 = parse({ schema_version: 3, connected: true, device_name: "x" });
-  check("Schema 3 is too new", [r4.ok, r4.schemaTooNew, r4.schemaVersion, r4.connected], [false, true, 3, false]);
-  check("Schema 3 message", r4.lastError, "sony daemon speaks status schema 3, this panel reads 2");
+  const r3b = parse({ schema_version: 3, connected: false, primary: null, headsets: [] });
+  check("Schema 3 accepted", [r3b.ok, r3b.schemaTooNew, r3b.schemaVersion], [true, false, 3]);
+  const r4 = parse({ schema_version: 4, connected: true, device_name: "x" });
+  check("Schema 4 is too new", [r4.ok, r4.schemaTooNew, r4.schemaVersion, r4.connected], [false, true, 4, false]);
+  check("Schema 4 message", r4.lastError, "sony daemon speaks status schema 4, this panel reads 3");
+  check("Schema 4: no headsets", [r4.headsets, r4.primary], [[], null]);
   const r5 = parse({ schema_version: "two", connected: true });
   check("Non-numeric schema is too new", [r5.ok, r5.schemaTooNew], [false, true]);
   const r6 = Model.parseStatus(fixture("status_schema_too_new.json"));
@@ -113,12 +116,15 @@ suite("Suite 3: v1 Payload", () => {
   check("Codec", r.codec, "LDAC");
   check("Ear detection", r.earDetection, true);
   check("v1 supported table", r.supported, {
-    battery: true, noise_control: true, eq_preset: true, eq_custom: true, dsee: true,
-    speak_to_chat: true, voice_guidance: false, voice_guidance_volume: false, auto_power_off: false,
-    nc_amb_button: false, button_function: false, ear_detection: true, worn: false, volume: false,
-    connection_quality: false, codec: true, multipoint: true, devices: false, source_switch: false,
-    touch_panel: false, quick_access: false
+    battery: true, battery_lr: false, battery_case: false, noise_control: true, eq_preset: true,
+    eq_custom: true, dsee: true, speak_to_chat: true, voice_guidance: false, voice_guidance_volume: false,
+    auto_power_off: false, nc_amb_button: false, button_function: false, touch_function: false,
+    ear_detection: true, worn: false, volume: false, connection_quality: false, codec: true,
+    multipoint: true, devices: false, source_switch: false, touch_panel: false, sidetone: false,
+    quick_access: false
   });
+  check("v1 is one headphones entry", [r.headsets.length, r.id, r.model, r.kind, r.primary], [1, "unknown", "wh-1000xm5", "headphones", "unknown"]);
+  check("v1 command has no --headset", Model.buildCommand("noise", "off", r).args, ["noise", "off"]);
   check("v1 supported_source is null", r.supportedSource, null);
   check("v1 volume control hidden", Model.controlState(r, "volume", r.volume), "hidden");
   check("v1 footer mentions old daemon", Model.footerLines(r), ["Old daemon (status schema 1)"]);
@@ -190,7 +196,17 @@ suite("Suite 6: v2 Full Fixture", () => {
   check("ok, connected, schema 2", [s.ok, s.connected, s.schemaVersion], [true, true, 2]);
   check("Identity", [s.deviceName, s.address, s.modelName, s.firmwareVersion], ["WH-1000XM5", "AC:80:0A:12:34:56", "WH-1000XM5", "2.3.1"]);
   check("supported_source device", s.supportedSource, "device");
-  check("Every feature supported", Model.FEATURE_KEYS.every((k) => s.supported[k] === true), true);
+  const v3Keys = ["battery_lr", "battery_case", "touch_function", "sidetone"];
+  check("Every v2 feature supported", Model.FEATURE_KEYS.filter((k) => !v3Keys.includes(k)).every((k) => s.supported[k] === true), true);
+  check("v3 keys read as false", v3Keys.map((k) => s.supported[k]), [false, false, false, false]);
+  check("One entry built from the top level", [s.headsets.length, s.id, s.model, s.kind, s.connectedSince, s.primary],
+    [1, "AC:80:0A:12:34:56", "wh-1000xm5", "headphones", s.lastUpdated, "AC:80:0A:12:34:56"]);
+  check("Earbuds fields null", [s.batteryLeft, s.batteryCase, s.touchFunctionLeft, s.wornLeft, s.sidetone], [null, null, null, null, null]);
+  check("v2 command has no --headset", Model.buildCommand("volume", 3, s).args, ["volume", "3"]);
+  check("v2 command still names its headset", Model.buildCommand("volume", 3, s).headset, "AC:80:0A:12:34:56");
+  check("v2: new targets hidden", ["batteryLr", "batteryCase", "touchFunctionLeft", "touchFunctionRight", "sidetone"].map((id) => Model.targetState(s, id)),
+    ["hidden", "hidden", "hidden", "hidden", "hidden"]);
+  check("v2: no switcher", [Model.switcherVisible(s), Model.switcherTabs(s, s.id)], [false, []]);
   check("Noise", [s.noiseMode, s.ambientSoundLevel, s.focusOnVoice], ["ambient", 14, true]);
   check("EQ", [s.eqPreset, s.eqPresets.length, s.eqCustomBands, s.clearBass], ["custom", 10, [2, 1, -1, 3, 0], 4]);
   check("Sound", [s.dseeExtreme, s.connectionQuality, s.codec, s.volume], [true, "sound", "LDAC", 12]);
@@ -211,7 +227,7 @@ suite("Suite 6: v2 Full Fixture", () => {
   check("Bar text", Model.barBatteryText(s), "80%");
   check("Tooltip", Model.barTooltip(s), "WH-1000XM5\nAmbient Sound · LDAC\nBattery 80%");
   check("Hero meta", Model.heroMeta(s), "Connected · LDAC · On head");
-  check("Footer", Model.footerLines(s), ["WH-1000XM5 · firmware 2.3.1 · AC:80:0A:12:34:56"]);
+  check("Footer", Model.footerLines(s), ["WH-1000XM5 · firmware 2.3.1 · AC:80:0A:12:34:56", "Old daemon (status schema 2)"]);
   check("Not reading", Model.isReading(s), false);
   check("Collapsed cursor sections", ids(Model.cursorSections(s, {})),
     ["noise", "ambient", "focusVoice", "sound", "customEq", "speakToChatHeader", "headset", "multipointHeader"]);
@@ -239,7 +255,7 @@ suite("Suite 7: v2 Minimal Fixture", () => {
   check("Charging", Model.isCharging(s), true);
   check("Tooltip without codec", Model.barTooltip(s), "WH-1000XM5\nNoise Cancelling\nBattery 45% (charging)");
   check("Hero meta without codec", Model.heroMeta(s), "Connected");
-  check("Footer without firmware", Model.footerLines(s), ["WH-1000XM5 · AC:80:0A:12:34:56"]);
+  check("Footer without firmware", Model.footerLines(s), ["WH-1000XM5 · AC:80:0A:12:34:56", "Old daemon (status schema 2)"]);
   check("EQ command refused", Model.buildCommand("eqPreset", "bass", s), { error: "Not supported by this headset" });
 });
 
@@ -280,7 +296,7 @@ suite("Suite 9: v2 Initializing Fixture", () => {
   check("Every control disabled", Model.FEATURE_KEYS.every((k) => Model.controlState(s, k, "x") === "disabled"), true);
   check("Every section visible", ["noise", "sound", "customEq", "speakToChat", "headset", "multipoint"].every((n) => Model.sectionVisible(s, n)), true);
   check("Bar text unknown battery", Model.barBatteryText(s), "—");
-  check("Tooltip", Model.barTooltip(s), "WH-1000XM5\nReading headset settings…");
+  check("Tooltip", Model.barTooltip(s), "WH-1000XM5: reading headset settings…");
   check("Hero meta", Model.heroMeta(s), "Reading settings");
   check("Commands refused", Model.buildCommand("noise", "anc", s), { error: "Reading headset settings…" });
   check("Cursor still lists headers", ids(Model.cursorSections(s, {})),
@@ -292,7 +308,7 @@ suite("Suite 9: v2 Initializing Fixture", () => {
 suite("Suite 10: v2 Fallback Fixture", () => {
   const s = Model.parseStatus(fixture("status_v2_fallback.json"));
   check("supported_source fallback", s.supportedSource, "fallback");
-  check("Footer hint", Model.footerLines(s), ["WH-1000XM5 · firmware 2.3.1 · AC:80:0A:12:34:56", "Limited: headset did not report its features"]);
+  check("Footer hint", Model.footerLines(s), ["WH-1000XM5 · firmware 2.3.1 · AC:80:0A:12:34:56", "Limited: headset did not report its features", "Old daemon (status schema 2)"]);
   check("DSEE hidden", Model.controlState(s, "dsee", s.dseeExtreme), "hidden");
   check("Codec hidden", Model.controlState(s, "codec", s.codec), "hidden");
   check("Volume enabled", Model.controlState(s, "volume", s.volume), "enabled");
@@ -320,9 +336,10 @@ suite("Suite 11: supported false nulls its fields", () => {
 suite("Suite 12: Command Building", () => {
   const s = full();
   const cmd = (a, v, st) => Model.buildCommand(a, v, st || s);
-  check("noise", cmd("noise", "anc"), { args: ["noise", "anc"], pending: { noiseMode: "anc" }, feature: "noise_control" });
+  const hid = "AC:80:0A:12:34:56";
+  check("noise", cmd("noise", "anc"), { args: ["noise", "anc"], pending: { noiseMode: "anc" }, feature: "noise_control", headset: hid });
   check("noise wind refused", cmd("noise", "wind").error, "Not supported by this headset");
-  check("ambient-level sets ambient mode", cmd("ambientLevel", 5), { args: ["ambient-level", "5"], pending: { ambientSoundLevel: 5, noiseMode: "ambient" }, feature: "noise_control" });
+  check("ambient-level sets ambient mode", cmd("ambientLevel", 5), { args: ["ambient-level", "5"], pending: { ambientSoundLevel: 5, noiseMode: "ambient" }, feature: "noise_control", headset: hid });
   check("ambient-level 0 refused", cmd("ambientLevel", 0).error, "Value out of range");
   check("ambient-level 21 refused", cmd("ambientLevel", 21).error, "Value out of range");
   check("ambient-level fraction refused", cmd("ambientLevel", 2.5).error, "Value out of range");
@@ -332,7 +349,7 @@ suite("Suite 12: Command Building", () => {
   check("eq preset not in list", cmd("eqPreset", "user2").error, "Not supported by this headset");
   check("eq custom", cmd("eqCustom", { bands: [1, 2, 3, 4, 5], clearBass: -3 }), {
     args: ["eq", "custom", "1", "2", "3", "4", "5", "-3"],
-    pending: { eqPreset: "custom", eqCustomBands: [1, 2, 3, 4, 5], clearBass: -3 }, feature: "eq_custom"
+    pending: { eqPreset: "custom", eqCustomBands: [1, 2, 3, 4, 5], clearBass: -3 }, feature: "eq_custom", headset: hid
   });
   check("eq custom out of range", cmd("eqCustom", { bands: [1, 2, 3, 4, 11], clearBass: 0 }).error, "Value out of range");
   check("eq custom short", cmd("eqCustom", { bands: [1, 2], clearBass: 0 }).error, "Value out of range");
@@ -346,7 +363,7 @@ suite("Suite 12: Command Building", () => {
   check("volume", cmd("volume", 30).args, ["volume", "30"]);
   check("volume 31 refused", cmd("volume", 31).error, "Value out of range");
   check("speak-to-chat", cmd("speakToChat", true).args, ["speak-to-chat", "on"]);
-  check("stc sensitivity keeps timeout", cmd("stcSensitivity", "low"), { args: ["speak-to-chat-config", "low", "standard"], pending: { stcSensitivity: "low", stcTimeout: "standard" }, feature: "speak_to_chat" });
+  check("stc sensitivity keeps timeout", cmd("stcSensitivity", "low"), { args: ["speak-to-chat-config", "low", "standard"], pending: { stcSensitivity: "low", stcTimeout: "standard" }, feature: "speak_to_chat", headset: hid });
   check("stc timeout keeps sensitivity", cmd("stcTimeout", "off").args, ["speak-to-chat-config", "auto", "off"]);
   check("stc config needs other value", cmd("stcTimeout", "off", Object.assign({}, s, { stcSensitivity: null })).error, "Speak-to-Chat settings are not known yet");
   check("stc bad value", cmd("stcSensitivity", "max").error, "Invalid value");
@@ -379,24 +396,33 @@ suite("Suite 13: Option Lists", () => {
 
 suite("Suite 14: Optimistic Values", () => {
   const s = full();
+  const hid = s.id;
   let pending = {};
-  pending = Model.addPending(pending, { noiseMode: "anc" }, 1);
-  pending = Model.addPending(pending, { volume: 20 }, 2);
+  pending = Model.addPending(pending, { noiseMode: "anc" }, 1, hid);
+  pending = Model.addPending(pending, { volume: 20 }, 2, hid);
   check("hasPending", Model.hasPending(pending), true);
+  check("Entries are keyed by headset and field", Object.keys(pending), [hid + "|noiseMode", hid + "|volume"]);
   const eff = Model.applyPending(s, pending);
   check("applyPending overrides", [eff.noiseMode, eff.volume, eff.dseeExtreme], ["anc", 20, true]);
-  check("applyPending does not mutate", s.noiseMode, "ambient");
+  check("applyPending patches the headset entry", [eff.headsets[0].noiseMode, eff.id], ["anc", hid]);
+  check("applyPending does not mutate", [s.noiseMode, s.headsets[0].noiseMode], ["ambient", "ambient"]);
   check("applyPending without pending returns same object", Model.applyPending(s, {}) === s, true);
-  check("dropPending by id", Object.keys(Model.dropPending(pending, 1)), ["volume"]);
+  check("dropPending by id", Object.keys(Model.dropPending(pending, 1)), [hid + "|volume"]);
   const confirmed = Object.assign({}, s, { noiseMode: "anc" });
-  check("reconcile drops confirmed", Object.keys(Model.reconcilePending(pending, confirmed)), ["volume"]);
+  check("reconcile drops confirmed", Object.keys(Model.reconcilePending(pending, confirmed)), [hid + "|volume"]);
   check("reconcile keeps object when nothing matches", Model.reconcilePending(pending, s) === pending, true);
   const disc = Model.parseStatus(fixture("status_v2_disconnected.json"));
-  check("reconcile keeps pending while disconnected", Model.reconcilePending(pending, disc) === pending, true);
+  check("reconcile drops the values of a headset that left", Model.reconcilePending(pending, disc), {});
+  check("reconcile keeps pending while the file is unreadable", Model.reconcilePending(pending, Model.parseStatus("")) === pending, true);
   check("applyPending ignores disconnected", Model.applyPending(disc, pending) === disc, true);
-  const bands = Model.addPending({}, { eqCustomBands: [1, 2, 3, 4, 5] }, 3);
+  const bands = Model.addPending({}, { eqCustomBands: [1, 2, 3, 4, 5] }, 3, hid);
   check("reconcile compares arrays by value", Model.hasPending(Model.reconcilePending(bands, Object.assign({}, s, { eqCustomBands: [1, 2, 3, 4, 5] }))), false);
-  check("newer id owns the field", Model.dropPending(Model.addPending(pending, { noiseMode: "off" }, 4), 1).noiseMode.value, "off");
+  check("newer id owns the field", Model.dropPending(Model.addPending(pending, { noiseMode: "off" }, 4, hid), 1)[hid + "|noiseMode"].value, "off");
+  // Without a headset id an entry is for the primary headset (tests/e2e_model_cli.js).
+  const plain = Model.addPending({}, { volume: 5 }, 9);
+  check("Headset-less entry applies to the primary", Model.applyPending(s, plain).volume, 5);
+  check("Headset-less entry reconciles against the primary", Model.reconcilePending(plain, Object.assign({}, s, { volume: 5 })), {});
+  check("Headset-less entry survives a disconnect", Model.reconcilePending(plain, disc) === plain, true);
 });
 
 suite("Suite 15: Command Queue", () => {
@@ -494,7 +520,7 @@ suite("Suite 19: Display Formatters & Helpers", () => {
   const elided = Model.elideError("Error: " + "a".repeat(200));
   check("elideError length <= 140", elided.length <= 140, true);
   check("elideError ends with ellipsis", elided.endsWith("…"), true);
-  check("deviceTitle fallback", Model.deviceTitle(Model.defaultStatus()), "WH-1000XM5");
+  check("deviceTitle without a headset", Model.deviceTitle(Model.defaultStatus()), "Sony headset");
   check("Error state tooltip", Model.barTooltip(Model.parseStatus("")), "Sony headphones: The sony status file is empty");
   check("Error state hero meta", Model.heroMeta(Model.parseStatus("")), "No status");
 });
@@ -508,7 +534,7 @@ suite("Suite 20: Schema Version Values", () => {
   check("numeric string \"2\" accepted", parse({ schema_version: "2", connected: false }).schemaVersion, 2);
   check("numeric string \" 1 \" accepted", parse({ schema_version: " 1 ", connected: false }).schemaVersion, 1);
   check("schemaVersionOf", [1, 2, "7", "x", 2.5, 0].map(Model.schemaVersionOf), [1, 2, 7, null, null, null]);
-  check("Empty-string message", parse({ schema_version: "", connected: true }).lastError, "sony daemon speaks status schema \"\", this panel reads 2");
+  check("Empty-string message", parse({ schema_version: "", connected: true }).lastError, "sony daemon speaks status schema \"\", this panel reads 3");
   check("Unknown schema empty state text", Model.emptyStateText(parse({ schema_version: [] })).includes("an unknown status schema"), true);
 });
 
@@ -516,7 +542,7 @@ suite("Suite 21: Custom EQ Chip", () => {
   const s = full();
   check("Custom chip with known values sends the full form", Model.buildCommand("eqPreset", "custom", s), {
     args: ["eq", "custom", "2", "1", "-1", "3", "0", "4"],
-    pending: { eqPreset: "custom", eqCustomBands: [2, 1, -1, 3, 0], clearBass: 4 }, feature: "eq_preset"
+    pending: { eqPreset: "custom", eqCustomBands: [2, 1, -1, 3, 0], clearBass: 4 }, feature: "eq_preset", headset: s.id
   });
   check("Custom chip without bands sends the bare form", Model.buildCommand("eqPreset", "custom", Object.assign({}, s, { eqCustomBands: null })).args, ["eq", "custom"]);
   check("Custom chip without Clear Bass sends the bare form", Model.buildCommand("eqPreset", "custom", Object.assign({}, s, { clearBass: null })).args, ["eq", "custom"]);
@@ -645,13 +671,13 @@ suite("Suite 25: Touch Panel and Quick Access", () => {
   check("Headset section shows for touch panel alone",
     Model.sectionVisible(withRaw({ supported: Object.assign({}, JSON.parse(fixture("status_v2_minimal.json")).supported, { touch_panel: true }) }), "headset"), true);
 
-  check("Touch panel command", Model.buildCommand("touchPanel", false, s), { args: ["touch-panel", "off"], pending: { touchPanel: false }, feature: "touch_panel" });
+  check("Touch panel command", Model.buildCommand("touchPanel", false, s), { args: ["touch-panel", "off"], pending: { touchPanel: false }, feature: "touch_panel", headset: s.id });
   check("Touch panel needs a bool", Model.buildCommand("touchPanel", "off", s).error, "Invalid value");
   check("Toggle activation flips the touch panel", Model.targetActivation(s, "touchPanel", 0), { action: "touchPanel", value: false });
   check("Double tap command", Model.buildCommand("quickAccessDouble", "spotify", s),
-    { args: ["quick-access", "double", "spotify"], pending: { quickAccessDoubleTap: "spotify" }, feature: "quick_access" });
+    { args: ["quick-access", "double", "spotify"], pending: { quickAccessDoubleTap: "spotify" }, feature: "quick_access", headset: s.id });
   check("Triple tap command", Model.buildCommand("quickAccessTriple", "off", s),
-    { args: ["quick-access", "triple", "off"], pending: { quickAccessTripleTap: "off" }, feature: "quick_access" });
+    { args: ["quick-access", "triple", "off"], pending: { quickAccessTripleTap: "off" }, feature: "quick_access", headset: s.id });
   check("other cannot be sent", Model.buildCommand("quickAccessDouble", "other", s).error, "Not supported by this headset");
   const onlyOff = Object.assign({}, s, { quickAccessTripleTapOptions: ["off"] });
   check("Value outside the press's list is refused", Model.buildCommand("quickAccessTriple", "spotify", onlyOff).error, "Not supported by this headset");
@@ -677,9 +703,267 @@ suite("Suite 25: Touch Panel and Quick Access", () => {
   q = Model.enqueueCommand(q.queue, { args: ["quick-access", "double", "off"], id: 3 });
   check("Same press replaces the queued one", [q.queue.map((i) => i.id), q.dropped], [[2, 3], [1]]);
 
-  const pend = Model.addPending({}, { quickAccessDoubleTap: "spotify" }, 7);
+  const pend = Model.addPending({}, { quickAccessDoubleTap: "spotify" }, 7, s.id);
   check("Pending double tap shows at once", Model.applyPending(s, pend).quickAccessDoubleTap, "spotify");
   check("Pending clears when the daemon reports it", Model.reconcilePending(pend, Object.assign({}, s, { quickAccessDoubleTap: "spotify" })), {});
+});
+
+const WH = "AC:80:0A:12:34:56";
+const WF = "AC:80:0A:65:43:21";
+const v3 = (name) => Model.parseStatus(fixture(name));
+const rawFixture = (name) => JSON.parse(fixture(name));
+
+suite("Suite 26: v3 WH-1000XM5 Fixture", () => {
+  const s = v3("status_v3_wh.json");
+  check("ok, connected, schema 3", [s.ok, s.connected, s.schemaVersion], [true, true, 3]);
+  check("Identity", [s.id, s.model, s.kind, s.address, s.deviceName, s.modelName, s.firmwareVersion, s.primary],
+    [WH, "wh-1000xm5", "headphones", WH, "WH-1000XM5", "WH-1000XM5", "2.5.1", WH]);
+  check("connected_since", s.connectedSince, 1760438380);
+  check("One headset, no switcher", [s.headsets.length, Model.switcherVisible(s)], [1, false]);
+  check("Headphones battery", [s.batteryLevel, s.batteryCharging, Model.barBattery(s), Model.barCharging(s)], [53, false, 53, false]);
+  check("Earbuds fields null", [s.batteryLeft, s.batteryRight, s.batteryCase, s.wornLeft, s.touchFunctionLeft, s.sidetone], [null, null, null, null, null, null]);
+  check("v3 keys", [s.supported.battery_lr, s.supported.battery_case, s.supported.touch_function, s.supported.sidetone], [false, false, false, false]);
+  check("Bar text", Model.barText(s, true, false), "53%");
+  check("Tooltip", Model.barTooltip(s), "WH-1000XM5\nOff · LDAC\nBattery 53%");
+  check("Hero meta: worn unsupported", Model.heroMeta(s), "Connected · LDAC");
+  check("Footer: no old-daemon line", Model.footerLines(s), ["WH-1000XM5 · firmware 2.5.1 · AC:80:0A:12:34:56"]);
+  check("Hero targets", ["battery", "batteryLr", "batteryCase", "wornSides"].map((id) => Model.targetState(s, id)), ["enabled", "hidden", "hidden", "hidden"]);
+  check("Earbuds controls hidden", ["touchFunctionLeft", "touchFunctionRight", "sidetone"].map((id) => Model.targetState(s, id)), ["hidden", "hidden", "hidden"]);
+  check("Headphones controls shown", ["touchPanel", "quickAccessDouble", "ncAmbButton", "connectionQuality"].map((id) => Model.targetState(s, id)),
+    ["enabled", "enabled", "enabled", "enabled"]);
+  check("Every command names the headset", Model.buildCommand("noise", "anc", s),
+    { args: ["--headset", WH, "noise", "anc"], pending: { noiseMode: "anc" }, feature: "noise_control", headset: WH });
+  check("Verb args without the selector", [Model.commandVerbArgs(Model.buildCommand("volume", 3, s).args), Model.commandHeadset(Model.buildCommand("volume", 3, s).args)],
+    [["volume", "3"], WH]);
+  check("touch-function refused on headphones", Model.buildCommand("touchFunctionLeft", "none", s).error, "Not supported by this headset");
+  check("sidetone refused on headphones", Model.buildCommand("sidetone", true, s).error, "Not supported by this headset");
+  check("Glyph", Model.headsetGlyph(s.kind), "\u{F02CB}");
+  check("Icon tint input", [Model.barBatteryLevel(s), Model.isCharging(s)], [53, false]);
+  check("Expanded headset section", ids(Model.cursorSections(s, { headset: true })).filter((i) => Model.TARGETS[i].section === "headset"),
+    ["headset", "volume", "voiceGuidance", "autoPowerOff", "ncAmbButton", "quickAccessDouble", "quickAccessTriple", "earDetection", "touchPanel"]);
+  check("Popup cursor has no switcher", ids(Model.panelCursorSections(s, {}))[0], "noise");
+});
+
+suite("Suite 27: v3 WF-1000XM5 Fixture", () => {
+  const s = v3("status_v3_wf.json");
+  check("Identity", [s.id, s.model, s.kind, s.deviceName, s.firmwareVersion, s.primary], [WF, "wf-1000xm5", "earbuds", "WF-1000XM5", "6.1.0", WF]);
+  check("Earbuds battery", [s.batteryLeft, s.batteryLeftCharging, s.batteryRight, s.batteryRightCharging, s.batteryCase, s.batteryCaseCharging],
+    [70, false, 65, false, 53, false]);
+  check("Headphones battery unsupported", [s.batteryLevel, s.batteryCharging, s.supported.battery], [-1, null, false]);
+  check("Bar battery is the lower earbud", [Model.barBattery(s), Model.barBatteryText(s), Model.barText(s, true, false)], [65, "65%", "65%"]);
+  check("Bar not charging", [Model.barCharging(s), Model.isCharging(s), Model.barChargingHint(s, true, false)], [false, false, false]);
+  check("Icon tint input", Model.barBatteryLevel(s), 65);
+  check("Worn per side", [s.worn, s.wornLeft, s.wornRight], [true, true, true]);
+  check("Hero meta", Model.heroMeta(s), "Connected · LDAC · In ears");
+  check("Tooltip", Model.barTooltip(s), "WF-1000XM5\nOff · LDAC\nBattery L 70% · R 65% · case 53%");
+  check("Hero battery parts", Model.earbudBatteryParts(s), [
+    { side: "L", text: "L 70%", low: false, charging: false },
+    { side: "R", text: "R 65%", low: false, charging: false }
+  ]);
+  check("Case text", [Model.caseBatteryText(s), Model.caseCharging(s)], ["Case 53%", false]);
+  check("Hero targets", ["battery", "batteryLr", "batteryCase", "wornSides"].map((id) => Model.targetState(s, id)), ["hidden", "enabled", "enabled", "enabled"]);
+  check("Touch functions", [s.touchFunctionLeft, s.touchFunctionRight, s.touchFunctionLeftOptions, s.touchFunctionRightOptions],
+    ["playback_control", "playback_control", ["ambient_sound_control", "playback_control", "none"], ["ambient_sound_control", "playback_control", "none"]]);
+  check("Sidetone", s.sidetone, true);
+  check("WF hides headphones controls", ["connectionQuality", "ncAmbButton", "buttonFunction", "touchPanel", "quickAccessDouble"].map((id) => Model.targetState(s, id)),
+    ["hidden", "hidden", "hidden", "hidden", "hidden"]);
+  check("Expanded headset section", ids(Model.cursorSections(s, { headset: true })).filter((i) => Model.TARGETS[i].section === "headset"),
+    ["headset", "volume", "voiceGuidance", "voiceGuidanceVolume", "autoPowerOff", "earDetection", "touchFunctionLeft", "touchFunctionRight", "sidetone"]);
+  check("Display targets have no cursor", ids(Model.cursorSections(s, { sound: true, headset: true })).some((i) => Model.TARGETS[i].kind === "display"), false);
+  const sec = Model.cursorSections(s, { headset: true });
+  const left = sec.find((x) => x.id === "touchFunctionLeft");
+  check("Left touch row", [left.kind, left.count, left.preferred], ["walk", 3, 1]);
+  check("Touch chips", Model.targetChoices(s, "touchFunctionRight").map((c) => c.value + "|" + c.label),
+    ["ambient_sound_control|Noise control", "playback_control|Playback", "none|Off"]);
+  check("Touch chip tooltip", Model.targetChoices(s, "touchFunctionLeft")[2].tooltip, "Taps do nothing");
+  check("touch-function left", Model.buildCommand("touchFunctionLeft", "none", s),
+    { args: ["--headset", WF, "touch-function", "left", "none"], pending: { touchFunctionLeft: "none" }, feature: "touch_function", headset: WF });
+  check("touch-function right", Model.buildCommand("touchFunctionRight", "ambient_sound_control", s).args,
+    ["--headset", WF, "touch-function", "right", "ambient_sound_control"]);
+  check("Value outside the side's list refused", Model.buildCommand("touchFunctionLeft", "volume_control", s).error, "Not supported by this headset");
+  check("other cannot be sent", Model.buildCommand("touchFunctionLeft", "other", s).error, "Not supported by this headset");
+  const ownLists = Object.assign({}, s, { touchFunctionLeftOptions: ["none"], touchFunctionRightOptions: null });
+  check("Each side has its own list", [Model.touchFunctionOptions(ownLists, "left"), Model.touchFunctionOptions(ownLists, "right")],
+    [["none"], ["ambient_sound_control", "playback_control", "none"]]);
+  check("Null list offers the WF-1000XM5 list", Model.buildCommand("touchFunctionRight", "none", ownLists).args.slice(2), ["touch-function", "right", "none"]);
+  check("Touch activation", Model.targetActivation(s, "touchFunctionLeft", 0), { action: "touchFunctionLeft", value: "ambient_sound_control" });
+  check("sidetone command", Model.buildCommand("sidetone", false, s),
+    { args: ["--headset", WF, "sidetone", "off"], pending: { sidetone: false }, feature: "sidetone", headset: WF });
+  check("sidetone toggle flips", Model.targetActivation(s, "sidetone", 0), { action: "sidetone", value: false });
+  check("sidetone needs a bool", Model.buildCommand("sidetone", "on", s).error, "Invalid value");
+  check("Labels", Model.TOUCH_FUNCTION_VALUES.concat(["other", null]).map(Model.touchFunctionLabel),
+    ["Noise control", "Playback", "Volume", "Voice assistant", "Google Assistant", "Alexa", "Quick Access", "Off", "Other", "Unknown"]);
+  check("No other text", Model.touchFunctionOtherText(s), "");
+  check("other text, one side", Model.touchFunctionOtherText(Object.assign({}, s, { touchFunctionLeft: "other" })), "Left earbud uses a function this panel does not name.");
+  check("other text, both sides", Model.touchFunctionOtherText(Object.assign({}, s, { touchFunctionLeft: "other", touchFunctionRight: "other" })),
+    "Left earbud and Right earbud use functions this panel does not name.");
+  check("other selects no chip", Model.cursorSections(Object.assign({}, s, { touchFunctionRight: "other" }), { headset: true })
+    .find((x) => x.id === "touchFunctionRight").preferred, -1);
+  check("Glyph", Model.headsetGlyph(s.kind), "\u{F184F}");
+  check("Headset section shows for touch functions alone", Model.sectionVisible(Object.assign({}, s, {
+    supported: Object.assign({}, ...Model.FEATURE_KEYS.map((k) => ({ [k]: false })), { touch_function: true })
+  }), "headset"), true);
+  check("Missing sidetone key reads false", parse(Object.assign(rawFixture("status_v3_wf.json"), {
+    headsets: [Object.assign(rawFixture("status_v3_wf.json").headsets[0], { supported: Object.assign({}, rawFixture("status_v3_wf.json").headsets[0].supported, { sidetone: undefined }) })]
+  })).sidetone, null);
+});
+
+suite("Suite 28: v3 Both Headsets", () => {
+  const s = v3("status_v3_both.json");
+  check("Order kept, headphones first", s.headsets.map((h) => [h.id, h.kind]), [[WH, "headphones"], [WF, "earbuds"]]);
+  check("parseStatus gives the primary view", [s.primary, s.id, s.kind, s.connected], [WF, WF, "earbuds", true]);
+  check("Bar follows the primary", [Model.barBatteryText(s), Model.headsetGlyph(s.kind)], ["65%", "\u{F184F}"]);
+  check("Tooltip, one line per headset", Model.barTooltip(s),
+    "WH-1000XM5: Off · 53%\nWF-1000XM5: Off · L 70% R 65% case 53% (bar)");
+  check("Switcher visible", [Model.switcherVisible(s), Model.headsetCount(s)], [true, 2]);
+  check("Tabs", Model.switcherTabs(s, WF), [
+    { id: WH, kind: "headphones", label: "WH-1000XM5", battery: "53%", charging: false, selected: false },
+    { id: WF, kind: "earbuds", label: "WF-1000XM5", battery: "65%", charging: false, selected: true }
+  ]);
+
+  // Shown headset (ui-spec 8).
+  check("No selection shows primary", Model.shownHeadsetId(s, null), WF);
+  check("Selection shows that headset", [Model.shownHeadsetId(s, WH), Model.shownHeadset(s, WH).id, Model.shownHeadset(s, WH).kind], [WH, WH, "headphones"]);
+  check("Unknown selection shows primary", Model.shownHeadsetId(s, "00:11:22:33:44:55"), WF);
+  const wh = Model.shownHeadset(s, WH);
+  check("View keeps the file keys", [wh.primary, wh.headsets.length, wh.schemaVersion, wh.connected], [WF, 2, 3, true]);
+  check("View has its own fields", [wh.batteryLevel, wh.supported.touch_panel, wh.supported.sidetone], [53, true, false]);
+  check("Selection on open: null -> primary", Model.selectionOnOpen(s, null), WF);
+  check("Selection on open: kept while connected", Model.selectionOnOpen(s, WH), WH);
+  check("Selection on open: gone -> primary", Model.selectionOnOpen(s, "00:11:22:33:44:55"), WF);
+  const onlyWf = Model.parseStatus(fixture("status_v3_wf.json"));
+  check("Shown headset disconnects: primary shown, selection kept", [Model.shownHeadsetId(onlyWf, WH), Model.selectionOnOpen(onlyWf, WH)], [WF, WF]);
+  check("Same id back: shown again", Model.shownHeadsetId(s, WH), WH);
+  check("[ and ]: no wrap", [Model.stepHeadset(s, WH, 1), Model.stepHeadset(s, WF, 1), Model.stepHeadset(s, WF, -1), Model.stepHeadset(s, WH, -1)],
+    [WF, null, WH, null]);
+  check("[ and ] need two headsets", Model.stepHeadset(onlyWf, WF, -1), null);
+
+  // Cursor: the switcher is the first row.
+  const secWh = Model.panelCursorSections(wh, {});
+  check("Switcher row first, on the shown tab", secWh[0], { id: "switcher", kind: "walk", count: 2, preferred: 0 });
+  check("Switcher row then the status targets", ids(secWh).slice(1, 3), ["noise", "ambient"]);
+  check("Switcher preferred follows the shown headset", Model.panelCursorSections(s, {})[0].preferred, 1);
+  check("Switcher activation", [Model.switcherActivation(s, 0), Model.switcherActivation(s, 1), Model.switcherActivation(s, 2)], [WH, WF, null]);
+  check("No switcher target with one headset", ids(Model.panelCursorSections(onlyWf, {}))[0], "noise");
+  const down = Model.cursorMove({ section: "switcher", index: 1 }, 0, 1, secWh);
+  check("Down from the switcher", down.section, "noise");
+  check("h/l walk the tabs", Model.cursorMove({ section: "switcher", index: 0 }, 1, 0, secWh).index, 1);
+
+  // Commands per headset.
+  check("Commands go to the shown headset", [Model.buildCommand("volume", 5, wh).args, Model.buildCommand("volume", 5, s).args],
+    [["--headset", WH, "volume", "5"], ["--headset", WF, "volume", "5"]]);
+  check("Gating per headset", [Model.buildCommand("touchPanel", false, wh).args.length, Model.buildCommand("touchPanel", false, s).error], [4, "Not supported by this headset"]);
+  check("Command key includes the headset", [Model.commandKey(["--headset", WH, "volume", "5"]), Model.commandKey(["--headset", WF, "touch-function", "left", "none"]), Model.commandKey(["volume", "5"])],
+    [WH + " volume", WF + " touch-function left", "volume"]);
+  let q = Model.enqueueCommand([], { args: ["--headset", WF, "volume", "5"], id: 1, headset: WF });
+  q = Model.enqueueCommand(q.queue, { args: ["--headset", WH, "volume", "9"], id: 2, headset: WH });
+  check("Volume of one headset never replaces the other's", [q.queue.map((i) => i.id), q.dropped], [[1, 2], []]);
+  q = Model.enqueueCommand(q.queue, { args: ["--headset", WF, "volume", "6"], id: 3, headset: WF });
+  check("Same headset and verb replaces", [q.queue.map((i) => i.id), q.dropped], [[2, 3], [1]]);
+  q = Model.enqueueCommand(q.queue, { args: ["--headset", WF, "touch-function", "left", "none"], id: 4, headset: WF });
+  q = Model.enqueueCommand(q.queue, { args: ["--headset", WF, "touch-function", "right", "none"], id: 5, headset: WF });
+  check("Sides queue separately", q.queue.map((i) => i.id), [2, 3, 4, 5]);
+  const pruned = Model.pruneQueue(q.queue, onlyWf);
+  check("Queue drops commands of a headset that left", [pruned.queue.map((i) => i.id), pruned.dropped], [[3, 4, 5], [2]]);
+  check("Queue unchanged while both are connected", Model.pruneQueue(q.queue, s).queue === q.queue, true);
+  check("Queue kept while the file is unreadable", Model.pruneQueue(q.queue, Model.parseStatus("")).dropped, []);
+
+  // Optimistic values per headset.
+  let p = Model.addPending({}, { volume: 3 }, 1, WH);
+  p = Model.addPending(p, { volume: 25 }, 2, WF);
+  const eff = Model.applyPending(s, p);
+  check("Values go to their own headset", [eff.id, eff.volume, Model.shownHeadset(eff, WH).volume], [WF, 25, 3]);
+  check("Unpatched entries are shared", Model.applyPending(s, Model.addPending({}, { volume: 1 }, 1, WF)).headsets[0] === s.headsets[0], true);
+  check("Reconcile per headset", Object.keys(Model.reconcilePending(p, Model.applyPending(s, Model.addPending({}, { volume: 3 }, 9, WH)))), [WF + "|volume"]);
+  check("Reconcile against another view", Object.keys(Model.reconcilePending(p, Model.shownHeadset(Model.applyPending(s, Model.addPending({}, { volume: 25 }, 9, WF)), WH))), [WH + "|volume"]);
+  check("Values of a headset that left are cleared", Object.keys(Model.reconcilePending(p, onlyWf)), [WF + "|volume"]);
+  check("Values for a missing headset are not applied", Model.applyPending(onlyWf, Model.addPending({}, { volume: 1 }, 1, WH)) === onlyWf, true);
+});
+
+suite("Suite 29: v3 Initializing and Disconnected Fixtures", () => {
+  const s = v3("status_v3_initializing.json");
+  check("Reading", [Model.isReading(s), s.supported, s.kind, s.id], [true, null, "earbuds", WF]);
+  check("Every target disabled", Model.TARGET_ORDER.filter((id) => Model.TARGETS[id].kind !== "collapse").every((id) => Model.targetState(s, id) === "disabled"), true);
+  check("Commands refused", Model.buildCommand("sidetone", true, s), { error: "Reading headset settings…" });
+  check("Tooltip", Model.barTooltip(s), "WF-1000XM5: reading headset settings…");
+  check("Hero meta", Model.heroMeta(s), "Reading settings");
+  check("Bar text unknown", [Model.barText(s, true, false), Model.barBatteryLevel(s)], ["—", -1]);
+  check("Footer without identity", Model.footerLines(s), ["AC:80:0A:65:43:21"]);
+  const both = rawFixture("status_v3_both.json");
+  both.headsets[0] = rawFixture("status_v3_initializing.json").headsets[0];
+  both.headsets[0].id = both.headsets[0].address = WH;
+  both.headsets[0].model = "wh-1000xm5";
+  both.headsets[0].kind = "headphones";
+  both.headsets[0].device_name = "WH-1000XM5";
+  const mixed = parse(both);
+  check("Initializing tab shows …", Model.switcherTabs(mixed, WF).map((t) => t.battery), ["…", "65%"]);
+  check("Initializing tooltip line", Model.barTooltip(mixed).split("\n")[0], "WH-1000XM5: reading headset settings…");
+
+  const off = v3("status_v3_disconnected.json");
+  check("Disconnected", [off.ok, off.connected, off.headsets, off.primary, off.id], [true, false, [], null, null]);
+  check("No controls, no switcher", [Model.cursorSections(off, { headset: true }), Model.switcherVisible(off)], [[], false]);
+  check("Only the bar setting", ids(Model.panelCursorSections(off, {})), ["barPercentage"]);
+  check("Headphones glyph when disconnected", Model.headsetGlyph(off.kind), "\u{F02CB}");
+  check("Tooltip", Model.barTooltip(off), "Sony headphones: disconnected");
+  check("Hero", [Model.heroMeta(off), Model.deviceTitle(off), Model.emptyStateText(off).includes("Bluetooth")], ["Disconnected", "Sony headset", true]);
+  check("Commands refused", Model.buildCommand("noise", "anc", off).error, "Headset not connected");
+  check("connected:true with no entries is disconnected", parse({ schema_version: 3, connected: true, primary: WH, headsets: [] }).connected, false);
+});
+
+suite("Suite 30: v3 Defensive Reading", () => {
+  const base = () => rawFixture("status_v3_wf.json");
+  const one = (patch) => { const r = base(); Object.assign(r.headsets[0], patch); return parse(r); };
+  check("Unknown model reads as other", one({ model: "wf-2000xm9" }).model, "other");
+  check("Unknown kind reads as headphones", one({ kind: "speaker" }).kind, "headphones");
+  check("Case-folded model and kind", [one({ model: "WF-1000XM5", kind: "EARBUDS" }).model, one({ kind: "EARBUDS" }).kind], ["wf-1000xm5", "earbuds"]);
+  check("Lower-case address normalized", one({ id: "ac:80:0a:65:43:21" }).id, WF);
+  const noId = base();
+  noId.headsets.push(Object.assign({}, noId.headsets[0], { id: "not-an-address" }));
+  noId.headsets.push(Object.assign({}, noId.headsets[0]));
+  noId.headsets.push("junk");
+  check("Entries without a valid id, duplicates and junk are skipped", parse(noId).headsets.map((h) => h.id), [WF]);
+  const badPrimary = rawFixture("status_v3_both.json");
+  badPrimary.primary = "00:11:22:33:44:55";
+  check("primary not in headsets reads as the first entry", [parse(badPrimary).primary, parse(badPrimary).id], [WH, WH]);
+  check("Missing primary reads as the first entry", parse(Object.assign(rawFixture("status_v3_both.json"), { primary: null })).primary, WH);
+  check("Aliases are not read in v3", one({ battery_charging: null, charging: true, ambient_sound_level: null, ambient_level: 5 }).ambientSoundLevel, null);
+  check("Negative earbud levels are unknown", [one({ battery_left: -1 }).batteryLeft, one({ battery_case: 120 }).batteryCase], [null, 100]);
+  check("Supported false nulls earbud fields", one({ supported: Object.assign({}, base().headsets[0].supported, { battery_lr: false, battery_case: false }) }).batteryLeft, null);
+  check("Options list drops other and unknown values", one({ touch_function_left_options: ["none", "other", "x", "NONE", "volume_control"] }).touchFunctionLeftOptions, ["none", "volume_control"]);
+  check("Unknown touch function is null, other kept", [one({ touch_function_left: "tap_dance" }).touchFunctionLeft, one({ touch_function_left: "OTHER" }).touchFunctionLeft], [null, "other"]);
+
+  // Bar battery and charging rules (contract 3.3).
+  const ear = (l, r, lc, rc) => ({ kind: "earbuds", batteryLeft: l, batteryRight: r, batteryLeftCharging: lc, batteryRightCharging: rc });
+  check("Earbuds: lower side", Model.barBattery(ear(70, 65)), 65);
+  check("Earbuds: one side unknown", [Model.barBattery(ear(null, 40)), Model.barBattery(ear(30, null))], [40, 30]);
+  check("Earbuds: both unknown", Model.barBattery(ear(null, null)), null);
+  check("Earbuds: 0 is a level", Model.barBattery(ear(0, 50)), 0);
+  check("Charging: both true", Model.barCharging(ear(1, 1, true, true)), true);
+  check("Charging: one known true", Model.barCharging(ear(1, 1, true, null)), true);
+  check("Charging: one false", Model.barCharging(ear(1, 1, true, false)), false);
+  check("Charging: none known", Model.barCharging(ear(1, 1, null, null)), false);
+  check("Headphones: battery_level", [Model.barBattery({ kind: "headphones", batteryLevel: 80 }), Model.barBattery({ kind: "headphones", batteryLevel: -1 })], [80, null]);
+  const wf = v3("status_v3_wf.json");
+  const charging = Object.assign({}, wf, { batteryLeftCharging: true, batteryRightCharging: true, batteryCaseCharging: true });
+  check("Earbuds charging tooltip", Model.barTooltip(charging).split("\n")[2], "Battery L 70% (charging) · R 65% (charging) · case 53% (charging)");
+  check("Earbuds bolt and tint", [Model.isCharging(charging), Model.barChargingHint(charging, true, false), Model.caseCharging(charging)], [true, true, true]);
+  const low = Object.assign({}, wf, { batteryLeft: 15, batteryRight: null, batteryCase: 5 });
+  check("Low side is urgent, unknown side is a dash", Model.earbudBatteryParts(low).map((p) => [p.text, p.low]), [["L 15%", true], ["R —", false]]);
+  check("Low earbud drives the icon tint", Model.barBatteryLevel(low), 15);
+  check("Unknown case", Model.caseBatteryText(Object.assign({}, wf, { batteryCase: null })), "Case —");
+  check("No case part without battery_case", Model.barTooltip(Object.assign({}, wf, { supported: Object.assign({}, wf.supported, { battery_case: false }) })).split("\n")[2], "Battery L 70% · R 65%");
+  check("Showing battery needs battery or battery_lr", Model.barText(Object.assign({}, wf, { supported: Object.assign({}, wf.supported, { battery_lr: false }) }), true, false), "");
+
+  // Worn text per side (ui-spec 2, earbuds hero).
+  const worn = (l, r) => Model.heroMeta(Object.assign({}, wf, { wornLeft: l, wornRight: r }));
+  check("Worn texts", [worn(true, true), worn(true, false), worn(false, true), worn(false, false), worn(null, null), worn(true, null)],
+    ["Connected · LDAC · In ears", "Connected · LDAC · Left in ear", "Connected · LDAC · Right in ear", "Connected · LDAC · Not in ears", "Connected · LDAC", "Connected · LDAC"]);
+  check("Headphones keep On head", Model.heroMeta(Object.assign({}, v3("status_v3_wh.json"), { supported: Object.assign({}, wf.supported), worn: false })), "Connected · LDAC · Off head");
+
+  check("headsetLabel fallbacks", [Model.headsetLabel({ deviceName: "", modelName: "X" }), Model.headsetLabel({ deviceName: "", modelName: null, model: "wf-1000xm5" }), Model.headsetLabel({})],
+    ["X", "WF-1000XM5", "Sony headset"]);
+  check("Every v3 fixture parses", ["status_v3_wh.json", "status_v3_wf.json", "status_v3_both.json", "status_v3_initializing.json", "status_v3_disconnected.json"]
+    .map((f) => [v3(f).ok, v3(f).schemaVersion, v3(f).headsets.length]), [[true, 3, 1], [true, 3, 1], [true, 3, 2], [true, 3, 1], [true, 3, 0]]);
 });
 
 console.log(`\nSummary: ${passed} passed, ${failed} failed`);

@@ -1,10 +1,20 @@
 // Model.js
-// Pure ECMAScript model for the Sony WH-1000XM5 bar widget.
+// Pure ECMAScript model for the Sony WH-1000XM5 / WF-1000XM5 bar widget.
 // No QML dependencies; runs in QML, Deno and Node (tests/model.test.js).
-// Contract: docs/backend-contract.md (status schema 2). UI: docs/ui-spec.md.
+// Contract: docs/backend-contract.md (status schema 3). UI: docs/ui-spec.md.
 
-var SUPPORTED_SCHEMA = 2;
+var SUPPORTED_SCHEMA = 3;
 var LEVEL_UNKNOWN = -1;
+
+var KIND_HEADPHONES = "headphones";
+var KIND_EARBUDS = "earbuds";
+var KINDS = [KIND_HEADPHONES, KIND_EARBUDS];
+var MODELS = ["wh-1000xm5", "wf-1000xm5", "other"];
+// Material Design Icons in the Nerd Font, the set the first-party bar
+// widgets use (Audio shows the same headphones glyph for a headphone sink).
+var GLYPH_HEADPHONES = "\u{F02CB}";
+var GLYPH_EARBUDS = "\u{F184F}";
+var GLYPH_BOLT = "\u{F0241}";
 
 var NOISE_ANC = "anc";
 var NOISE_AMBIENT = "ambient";
@@ -58,15 +68,24 @@ var BUTTON_FUNCTION_VALUES = [
 // (protocol.md 5.18).
 var QUICK_ACCESS_VALUES = ["off", "spotify"];
 var QUICK_ACCESS_PRESSES = ["double", "triple"];
-
-// Every `supported` key of schema 2 (contract 2.4).
-var FEATURE_KEYS = [
-  "battery", "noise_control", "eq_preset", "eq_custom", "dsee", "speak_to_chat",
-  "voice_guidance", "voice_guidance_volume", "auto_power_off", "nc_amb_button",
-  "button_function", "ear_detection", "worn", "volume", "connection_quality",
-  "codec", "multipoint", "devices", "source_switch", "touch_panel", "quick_access"
+// Earbud touch sensor presets (contract 3.3, "Touch sensor function").
+var TOUCH_FUNCTION_VALUES = [
+  "ambient_sound_control", "playback_control", "volume_control", "voice_recognition",
+  "google_assistant", "amazon_alexa", "quick_access", "none"
 ];
-// Contract 2.5: how a schema 1 file is read.
+// ui-spec 7.9: offered while the headset sent no list (WF-1000XM5 fw 6.1.0).
+var TOUCH_FUNCTION_DEFAULTS = ["ambient_sound_control", "playback_control", "none"];
+var TOUCH_SIDES = ["left", "right"];
+
+// Every `supported` key of schema 3 (contract 3.4).
+var FEATURE_KEYS = [
+  "battery", "battery_lr", "battery_case", "noise_control", "eq_preset", "eq_custom",
+  "dsee", "speak_to_chat", "voice_guidance", "voice_guidance_volume", "auto_power_off",
+  "nc_amb_button", "button_function", "touch_function", "ear_detection", "worn", "volume",
+  "connection_quality", "codec", "multipoint", "devices", "source_switch", "touch_panel",
+  "sidetone", "quick_access"
+];
+// Contract 6, rule 2: how a schema 1 file is read.
 var V1_SUPPORTED_KEYS = [
   "battery", "noise_control", "eq_preset", "eq_custom", "dsee",
   "speak_to_chat", "ear_detection", "multipoint", "codec"
@@ -76,6 +95,12 @@ var V1_SUPPORTED_KEYS = [
 var FIELD_FEATURES = {
   batteryLevel: "battery",
   batteryCharging: "battery",
+  batteryLeft: "battery_lr",
+  batteryLeftCharging: "battery_lr",
+  batteryRight: "battery_lr",
+  batteryRightCharging: "battery_lr",
+  batteryCase: "battery_case",
+  batteryCaseCharging: "battery_case",
   noiseMode: "noise_control",
   ambientSoundLevel: "noise_control",
   focusOnVoice: "noise_control",
@@ -97,11 +122,18 @@ var FIELD_FEATURES = {
   ncAmbButton: "nc_amb_button",
   buttonFunction: "button_function",
   buttonFunctions: "button_function",
+  touchFunctionLeft: "touch_function",
+  touchFunctionRight: "touch_function",
+  touchFunctionLeftOptions: "touch_function",
+  touchFunctionRightOptions: "touch_function",
   earDetection: "ear_detection",
   worn: "worn",
+  wornLeft: "worn",
+  wornRight: "worn",
   multipoint: "multipoint",
   devices: "devices",
   touchPanel: "touch_panel",
+  sidetone: "sidetone",
   quickAccessDoubleTap: "quick_access",
   quickAccessTripleTap: "quick_access",
   quickAccessDoubleTapOptions: "quick_access",
@@ -115,7 +147,8 @@ var SECTION_FEATURES = {
   customEq: ["eq_custom"],
   speakToChat: ["speak_to_chat"],
   headset: ["volume", "voice_guidance", "voice_guidance_volume", "auto_power_off",
-    "nc_amb_button", "button_function", "quick_access", "ear_detection", "touch_panel"],
+    "nc_amb_button", "button_function", "quick_access", "ear_detection", "touch_panel",
+    "touch_function", "sidetone"],
   multipoint: ["multipoint", "devices"]
 };
 
@@ -123,14 +156,35 @@ var SECTION_FEATURES = {
 // Parsing
 // ---------------------------------------------------------------------------
 
+// A parsed status is a "view": the file-level keys (FILE_KEYS) plus the
+// fields of one headset of `headsets` (the primary one for parseStatus, any
+// one for headsetView). Every gating, label and command function takes a
+// view, so they work the same for one headset or several.
+var FILE_KEYS = ["ok", "lastError", "schemaVersion", "schemaTooNew", "lastUpdated", "primary", "headsets"];
+
 function defaultStatus() {
-  return {
+  var out = {
     ok: false,
     lastError: "",
     schemaVersion: 0,
     schemaTooNew: false,
     connected: false,
     lastUpdated: 0,
+    primary: null,
+    headsets: []
+  };
+  var h = defaultHeadset();
+  for (var k in h) out[k] = h[k];
+  return out;
+}
+
+// Fields of one headset entry, all unknown.
+function defaultHeadset() {
+  return {
+    id: null,
+    model: null,
+    kind: KIND_HEADPHONES,
+    connectedSince: 0,
     deviceName: "",
     address: null,
     modelName: null,
@@ -139,6 +193,12 @@ function defaultStatus() {
     supportedSource: null,
     batteryLevel: LEVEL_UNKNOWN,
     batteryCharging: null,
+    batteryLeft: null,
+    batteryLeftCharging: null,
+    batteryRight: null,
+    batteryRightCharging: null,
+    batteryCase: null,
+    batteryCaseCharging: null,
     noiseMode: null,
     ambientSoundLevel: null,
     focusOnVoice: null,
@@ -160,11 +220,18 @@ function defaultStatus() {
     ncAmbButton: null,
     buttonFunction: null,
     buttonFunctions: null,
+    touchFunctionLeft: null,
+    touchFunctionRight: null,
+    touchFunctionLeftOptions: null,
+    touchFunctionRightOptions: null,
     earDetection: null,
     worn: null,
+    wornLeft: null,
+    wornRight: null,
     multipoint: null,
     devices: null,
     touchPanel: null,
+    sidetone: null,
     quickAccessDoubleTap: null,
     quickAccessTripleTap: null,
     quickAccessDoubleTapOptions: null,
@@ -181,6 +248,12 @@ function clamp(val, min, max, def) {
 
 function _bool(v) {
   return v === true ? true : (v === false ? false : null);
+}
+
+// Battery percentage 0..100, or null when unknown (negative or not a number).
+function _level(v) {
+  var n = clamp(v, -1, 100, null);
+  return n === null || n < 0 ? null : n;
 }
 
 function _firstDefined(a, b) {
@@ -293,13 +366,61 @@ function parseStatus(raw) {
   var res = defaultStatus();
   res.ok = true;
   res.schemaVersion = version;
-  res.connected = parsed.connected === true;
   res.lastUpdated = clamp(parsed.last_updated, 0, Number.MAX_SAFE_INTEGER, 0);
-  if (!res.connected) return res;
 
+  var headsets = [];
+  if (version >= 3) {
+    var list = Array.isArray(parsed.headsets) ? parsed.headsets : [];
+    var seen = {};
+    for (var n = 0; n < list.length; n++) {
+      if (!list[n] || typeof list[n] !== "object" || Array.isArray(list[n])) continue;
+      var h = _parseHeadset(list[n], version, res.lastUpdated);
+      // Contract 3.1: `id` is a Bluetooth address, the selector and the tab
+      // key. An entry without one cannot be addressed, so it is skipped.
+      if (h === null || seen[h.id] === true) continue;
+      seen[h.id] = true;
+      headsets.push(h);
+    }
+  } else if (parsed.connected === true) {
+    // Contract 6, rule 2: a schema 1 or 2 file is one headset.
+    headsets.push(_parseHeadset(parsed, version, res.lastUpdated));
+  }
+  res.headsets = headsets;
+  // Contract 3.5: a `primary` that names no entry is read as the first entry.
+  var primary = version >= 3 ? _address(parsed.primary) : (headsets.length > 0 ? headsets[0].id : null);
+  if (findHeadset(res, primary) === null) primary = headsets.length > 0 ? headsets[0].id : null;
+  res.primary = primary;
+  return headsetView(res, primary);
+}
+
+// One headset entry: a schema 3 `headsets[]` object, or the top level of a
+// schema 1 or 2 file. Returns null for a schema 3 entry without a valid id.
+function _parseHeadset(parsed, version, lastUpdated) {
+  var res = defaultHeadset();
   var v1 = version < 2;
+  // Schema 3 removed the deprecated aliases; older files may carry them.
+  var legacy = version < 3;
+
+  if (legacy) {
+    res.address = _address(parsed.address);
+    res.id = res.address !== null ? res.address : "unknown";
+    res.model = "wh-1000xm5";
+    res.kind = KIND_HEADPHONES;
+    res.connectedSince = lastUpdated;
+  } else {
+    res.id = _address(parsed.id);
+    if (res.id === null) return null;
+    var addr = _address(parsed.address);
+    res.address = addr !== null ? addr : res.id;
+    // Contract 6, rules 5 and 6: unknown model reads as other, unknown kind
+    // as headphones.
+    var model = _enumValue(parsed.model, MODELS);
+    res.model = model !== null ? model : "other";
+    var kind = _enumValue(parsed.kind, KINDS);
+    res.kind = kind !== null ? kind : KIND_HEADPHONES;
+    res.connectedSince = clamp(parsed.connected_since, 0, Number.MAX_SAFE_INTEGER, 0);
+  }
   res.deviceName = typeof parsed.device_name === "string" ? parsed.device_name : "";
-  res.address = _address(parsed.address);
   res.modelName = _string(parsed.model_name);
   res.firmwareVersion = _string(parsed.firmware_version);
 
@@ -311,18 +432,24 @@ function parseStatus(raw) {
     res.supportedSource = res.supported ? _enumValue(parsed.supported_source, ["device", "fallback"]) : null;
   }
 
-  // Battery: v1 used -1 for unknown, v2 writes null.
+  // Battery: v1 used -1 for unknown, v2 and v3 write null.
   var bl = clamp(parsed.battery_level, -1, 100, LEVEL_UNKNOWN);
   res.batteryLevel = bl < 0 ? LEVEL_UNKNOWN : bl;
-  res.batteryCharging = _bool(_firstDefined(parsed.battery_charging, parsed.charging));
+  res.batteryCharging = _bool(_firstDefined(parsed.battery_charging, legacy ? parsed.charging : null));
+  res.batteryLeft = _level(parsed.battery_left);
+  res.batteryLeftCharging = _bool(parsed.battery_left_charging);
+  res.batteryRight = _level(parsed.battery_right);
+  res.batteryRightCharging = _bool(parsed.battery_right_charging);
+  res.batteryCase = _level(parsed.battery_case);
+  res.batteryCaseCharging = _bool(parsed.battery_case_charging);
 
   res.noiseMode = _enumValue(parsed.noise_mode, v1 ? [NOISE_ANC, NOISE_AMBIENT, NOISE_WIND, NOISE_OFF] : NOISE_MODES);
-  res.ambientSoundLevel = clamp(_firstDefined(parsed.ambient_sound_level, parsed.ambient_level), AMBIENT_MIN, AMBIENT_MAX, null);
+  res.ambientSoundLevel = clamp(_firstDefined(parsed.ambient_sound_level, legacy ? parsed.ambient_level : null), AMBIENT_MIN, AMBIENT_MAX, null);
   res.focusOnVoice = _bool(parsed.voice_passthrough);
 
   res.eqPreset = _enumValue(parsed.eq_preset, EQ_PRESET_VALUES.concat([EQ_UNKNOWN]));
   res.eqPresets = _enumList(parsed.eq_presets, EQ_PRESET_VALUES);
-  var rawBands = _firstDefined(parsed.eq_custom_bands, parsed.eq_bands);
+  var rawBands = _firstDefined(parsed.eq_custom_bands, legacy ? parsed.eq_bands : null);
   if (Array.isArray(rawBands)) {
     var bands = [];
     for (var i = 0; i < 5; i++) bands.push(clamp(rawBands[i], EQ_LEVEL_MIN, EQ_LEVEL_MAX, 0));
@@ -330,7 +457,7 @@ function parseStatus(raw) {
   }
   res.clearBass = clamp(parsed.clear_bass, EQ_LEVEL_MIN, EQ_LEVEL_MAX, null);
 
-  res.dseeExtreme = _bool(_firstDefined(parsed.dsee_extreme, parsed.dsee));
+  res.dseeExtreme = _bool(_firstDefined(parsed.dsee_extreme, legacy ? parsed.dsee : null));
   res.connectionQuality = _enumValue(parsed.connection_quality, CONNECTION_QUALITY_OPTIONS.concat(["other"]));
   if (typeof parsed.codec === "string" && parsed.codec !== "") {
     var codec = parsed.codec.toUpperCase();
@@ -350,21 +477,28 @@ function parseStatus(raw) {
   res.ncAmbButton = _enumValue(parsed.nc_amb_button, NC_AMB_BUTTON_OPTIONS);
   res.buttonFunction = _enumValue(parsed.button_function, BUTTON_FUNCTION_VALUES.concat(["other"]));
   res.buttonFunctions = _enumList(parsed.button_functions, BUTTON_FUNCTION_VALUES);
+  res.touchFunctionLeft = _enumValue(parsed.touch_function_left, TOUCH_FUNCTION_VALUES.concat(["other"]));
+  res.touchFunctionRight = _enumValue(parsed.touch_function_right, TOUCH_FUNCTION_VALUES.concat(["other"]));
+  res.touchFunctionLeftOptions = _enumList(parsed.touch_function_left_options, TOUCH_FUNCTION_VALUES);
+  res.touchFunctionRightOptions = _enumList(parsed.touch_function_right_options, TOUCH_FUNCTION_VALUES);
 
   res.earDetection = _bool(parsed.ear_detection);
   res.worn = _bool(parsed.worn);
+  res.wornLeft = _bool(parsed.worn_left);
+  res.wornRight = _bool(parsed.worn_right);
   res.multipoint = _bool(parsed.multipoint);
   res.devices = _devices(parsed.devices);
 
-  // Added within schema 2: an older daemon has neither the fields nor the
-  // supported keys, so they stay null (contract 5, rule 4).
+  // Added within schema 2 or 3: a daemon without the supported key has no
+  // field either, so it stays null (contract 6, rules 2 and 5).
   res.touchPanel = _bool(parsed.touch_panel);
+  res.sidetone = _bool(parsed.sidetone);
   res.quickAccessDoubleTap = _enumValue(parsed.quick_access_double_tap, QUICK_ACCESS_VALUES.concat(["other"]));
   res.quickAccessTripleTap = _enumValue(parsed.quick_access_triple_tap, QUICK_ACCESS_VALUES.concat(["other"]));
   res.quickAccessDoubleTapOptions = _enumList(parsed.quick_access_double_tap_options, QUICK_ACCESS_VALUES);
   res.quickAccessTripleTapOptions = _enumList(parsed.quick_access_triple_tap_options, QUICK_ACCESS_VALUES);
 
-  // A false supported key means the matching fields are null (contract 2.4).
+  // A false supported key means the matching fields are null (contract 3.4).
   if (res.supported) {
     for (var field in FIELD_FEATURES) {
       if (res.supported[FIELD_FEATURES[field]] !== true) {
@@ -373,6 +507,118 @@ function parseStatus(raw) {
     }
   }
   return res;
+}
+
+// ---------------------------------------------------------------------------
+// Headsets and selection (ui-spec 8)
+// ---------------------------------------------------------------------------
+
+function _headsets(status) {
+  return status && Array.isArray(status.headsets) ? status.headsets : [];
+}
+
+// The entry of `headsets` with this id, or null.
+function findHeadset(status, id) {
+  var list = _headsets(status);
+  if (id === null || id === undefined) return null;
+  for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i];
+  return null;
+}
+
+function headsetIndex(status, id) {
+  var list = _headsets(status);
+  for (var i = 0; i < list.length; i++) if (list[i].id === id) return i;
+  return -1;
+}
+
+function headsetCount(status) {
+  return status && status.ok === true ? _headsets(status).length : 0;
+}
+
+// The view of headset `id`: the file-level keys plus that entry's fields.
+// An id that is not in `headsets` gives the primary headset; with no
+// headset at all the view is "not connected".
+function headsetView(status, id) {
+  if (!status || status.ok !== true) return status;
+  var h = findHeadset(status, id);
+  if (h === null) h = findHeadset(status, status.primary);
+  var out = {};
+  for (var i = 0; i < FILE_KEYS.length; i++) out[FILE_KEYS[i]] = status[FILE_KEYS[i]];
+  var src = h !== null ? h : defaultHeadset();
+  for (var k in src) out[k] = src[k];
+  out.connected = h !== null;
+  return out;
+}
+
+// Id of the headset the popup shows: `selectedId` while it is connected,
+// else the primary headset (ui-spec 8).
+function shownHeadsetId(status, selectedId) {
+  if (findHeadset(status, selectedId) !== null) return selectedId;
+  return status && status.ok === true ? status.primary : null;
+}
+
+function shownHeadset(status, selectedId) {
+  return headsetView(status, shownHeadsetId(status, selectedId));
+}
+
+// `selectedId` after the popup opens: kept while that headset is connected,
+// else the primary headset.
+function selectionOnOpen(status, selectedId) {
+  if (findHeadset(status, selectedId) !== null) return selectedId;
+  return status && status.ok === true ? status.primary : null;
+}
+
+// The headset `delta` tabs away from `shownId` (`[` / `]`), no wrap. Null
+// at the ends and with fewer than two headsets.
+function stepHeadset(status, shownId, delta) {
+  if (!switcherVisible(status)) return null;
+  var list = _headsets(status);
+  var i = headsetIndex(status, shownId);
+  if (i < 0) return null;
+  var j = i + (delta > 0 ? 1 : -1);
+  return j >= 0 && j < list.length ? list[j].id : null;
+}
+
+// The switcher row exists only with two or more headsets.
+function switcherVisible(status) {
+  return headsetCount(status) >= 2;
+}
+
+function isEarbuds(status) {
+  return !!status && status.kind === KIND_EARBUDS;
+}
+
+function headsetGlyph(kind) {
+  return kind === KIND_EARBUDS ? GLYPH_EARBUDS : GLYPH_HEADPHONES;
+}
+
+// Name of a headset entry or view.
+function headsetLabel(h) {
+  if (h && h.deviceName) return h.deviceName;
+  if (h && h.modelName) return h.modelName;
+  if (h && h.model === "wf-1000xm5") return "WF-1000XM5";
+  if (h && h.model === "wh-1000xm5") return "WH-1000XM5";
+  return "Sony headset";
+}
+
+// Tabs of the switcher: [{ id, kind, label, battery, charging, selected }].
+function switcherTabs(status, shownId) {
+  var out = [];
+  if (!switcherVisible(status)) return out;
+  var list = _headsets(status);
+  for (var i = 0; i < list.length; i++) {
+    var h = list[i];
+    var reading = h.supported === null;
+    out.push({
+      id: h.id,
+      kind: h.kind,
+      label: headsetLabel(h),
+      battery: reading ? "…" : formatBattery(barBattery(h)),
+      charging: !reading && barCharging(h),
+      selected: h.id === shownId
+    });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -458,6 +704,14 @@ function quickAccessOptions(status, press) {
   return list && list.length > 0 ? list.slice() : QUICK_ACCESS_VALUES.slice();
 }
 
+// Presets one earbud ("left" or "right") accepts; without a list, the
+// WF-1000XM5 list (ui-spec 7.9; the daemon skips its check while null).
+function touchFunctionOptions(status, side) {
+  var field = side === "right" ? "touchFunctionRightOptions" : "touchFunctionLeftOptions";
+  var list = status && Array.isArray(status[field]) ? status[field] : null;
+  return list && list.length > 0 ? list.slice() : TOUCH_FUNCTION_DEFAULTS.slice();
+}
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
@@ -475,8 +729,11 @@ function _fail(message) {
   return { error: message };
 }
 
-// Action table: feature key, value check and command shape.
-// Returns { args, pending, feature } or { error }.
+// Action table: feature key, value check and command shape. `status` is the
+// view of the headset the command is for.
+// Returns { args, pending, feature, headset } or { error }. For schema 3
+// `args` starts with `--headset <id>`, also with one headset (ui-spec 5); an
+// old daemon's CLI does not know the option (contract 6, rule 2).
 function buildCommand(action, value, status) {
   if (!status || status.ok !== true) return _fail("No headset status");
   if (status.connected !== true) return _fail("Headset not connected");
@@ -492,7 +749,18 @@ function buildCommand(action, value, status) {
     if (msg) return _fail(msg);
   }
   if (status.schemaVersion < 2 && !isV1Command(spec.args)) return _fail("Needs a newer sony-headphones daemon");
-  return { args: spec.args, pending: spec.pending, feature: spec.feature };
+  var args = status.schemaVersion >= 3 ? ["--headset", status.id].concat(spec.args) : spec.args;
+  return { args: args, pending: spec.pending, feature: spec.feature, headset: status.id };
+}
+
+// The sony-ctl arguments without the `--headset <id>` selector.
+function commandVerbArgs(args) {
+  return Array.isArray(args) && args[0] === "--headset" ? args.slice(2) : args;
+}
+
+// The headset a command names with `--headset`, or null.
+function commandHeadset(args) {
+  return Array.isArray(args) && args[0] === "--headset" ? args[1] : null;
 }
 
 // Verbs and arguments the schema 1 CLI accepts (cli/src/main.cpp before
@@ -627,6 +895,16 @@ function _commandSpec(action, value, status) {
     return _boolSpec("multipoint", "multipoint", "multipoint", value);
   case "touchPanel":
     return _boolSpec("touch_panel", "touch-panel", "touchPanel", value);
+  case "sidetone":
+    return _boolSpec("sidetone", "sidetone", "sidetone", value);
+  case "touchFunctionLeft":
+  case "touchFunctionRight": {
+    var side = action === "touchFunctionRight" ? "right" : "left";
+    var tfField = side === "right" ? "touchFunctionRight" : "touchFunctionLeft";
+    var tf = _enumSpec("touch_function", "touch-function", tfField, value, touchFunctionOptions(status, side));
+    if (tf.args) tf.args = ["touch-function", side, value];
+    return tf;
+  }
   case "quickAccessDouble":
   case "quickAccessTriple": {
     var press = action === "quickAccessTriple" ? "triple" : "double";
@@ -671,18 +949,20 @@ function commandErrorText(exitCode, stderr, stdout) {
 }
 
 // ---------------------------------------------------------------------------
-// Optimistic values. `pending` maps a parsed field to { value, id }; `id` is
-// the command that set it.
+// Optimistic values. `pending` maps "<headset id>|<field>" to
+// { value, id, headset, field }; `id` is the command that set it and
+// `headset` the headset it belongs to (null: the primary headset).
 // ---------------------------------------------------------------------------
 
 function _same(a, b) {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
-function addPending(pending, fields, id) {
+function addPending(pending, fields, id, headset) {
+  var hid = headset === undefined ? null : headset;
   var out = {};
   for (var k in pending) out[k] = pending[k];
-  for (var f in fields) out[f] = { value: fields[f], id: id };
+  for (var f in fields) out[(hid === null ? "" : hid) + "|" + f] = { value: fields[f], id: id, headset: hid, field: f };
   return out;
 }
 
@@ -692,14 +972,32 @@ function dropPending(pending, id) {
   return out;
 }
 
-// Removes every entry that the daemon now reports.
+// The fields a pending entry compares against: the view itself when the
+// entry is for its headset (a headset-less entry is for the primary one,
+// which parseStatus returns), else that headset's entry.
+function _pendingTarget(status, entry) {
+  if (entry.headset === null) return isLive(status) && status.id === status.primary ? status : null;
+  if (isLive(status) && entry.headset === status.id) return status;
+  return findHeadset(status, entry.headset);
+}
+
+// Removes every entry that the daemon now reports, and every entry of a
+// headset that left `headsets` (ui-spec 5). An unreadable file keeps them.
 function reconcilePending(pending, status) {
-  if (!isLive(status)) return pending;
+  if (!status || status.ok !== true) return pending;
   var out = {};
   var changed = false;
   for (var k in pending) {
-    if (_same(status[k], pending[k].value)) changed = true;
-    else out[k] = pending[k];
+    var e = pending[k];
+    var target = _pendingTarget(status, e);
+    if (target === null) {
+      if (e.headset === null) out[k] = e;
+      else changed = true;
+    } else if (_same(target[e.field], e.value)) {
+      changed = true;
+    } else {
+      out[k] = e;
+    }
   }
   return changed ? out : pending;
 }
@@ -709,26 +1007,69 @@ function hasPending(pending) {
   return false;
 }
 
+// The status with the optimistic values on their headsets; the result is a
+// view of the same headset as `status`.
 function applyPending(status, pending) {
   if (!isLive(status) || !hasPending(pending)) return status;
-  var out = {};
-  for (var k in status) out[k] = status[k];
-  for (var f in pending) out[f] = pending[f].value;
-  return out;
+  var byHeadset = {};
+  var any = false;
+  for (var k in pending) {
+    var e = pending[k];
+    var hid = e.headset === null ? status.primary : e.headset;
+    if (findHeadset(status, hid) === null) continue;
+    if (!byHeadset[hid]) byHeadset[hid] = {};
+    byHeadset[hid][e.field] = e.value;
+    any = true;
+  }
+  if (!any) return status;
+  var list = _headsets(status);
+  var headsets = [];
+  for (var i = 0; i < list.length; i++) {
+    var fields = byHeadset[list[i].id];
+    if (!fields) {
+      headsets.push(list[i]);
+      continue;
+    }
+    var h = {};
+    for (var f in list[i]) h[f] = list[i][f];
+    for (var g in fields) h[g] = fields[g];
+    headsets.push(h);
+  }
+  var next = {};
+  for (var j = 0; j < FILE_KEYS.length; j++) next[FILE_KEYS[j]] = status[FILE_KEYS[j]];
+  next.headsets = headsets;
+  return headsetView(next, status.id);
 }
 
 // ---------------------------------------------------------------------------
-// Command queue. Items are { args, id }. A queued command with the same key
-// (the verb; verb and press for quick-access) is dropped and the new one goes
-// to the end, so the last intent wins.
-// Returns { queue, dropped } where `dropped` lists the removed ids.
+// Command queue. Items are { args, id, headset }. A queued command with the
+// same key is dropped and the new one goes to the end, so the last intent
+// wins. Returns { queue, dropped } where `dropped` lists the removed ids.
 // ---------------------------------------------------------------------------
 
-// `quick-access` sets one press per command, so the press is part of the key:
-// a triple-tap change must not drop a queued double-tap change.
+// The headset id plus the verb. `quick-access` and `touch-function` set one
+// press or one side per command, so that is part of the key: a triple-tap
+// change must not drop a queued double-tap change, and a WH-1000XM5 volume
+// change must not drop a queued WF-1000XM5 one.
 function commandKey(args) {
-  if (args[0] === "quick-access") return args[0] + " " + args[1];
-  return args[0];
+  var a = commandVerbArgs(args);
+  var key = (a[0] === "quick-access" || a[0] === "touch-function") ? a[0] + " " + a[1] : a[0];
+  var hid = commandHeadset(args);
+  return hid === null ? key : hid + " " + key;
+}
+
+// Drops queued commands of headsets that left `headsets` (ui-spec 5). An
+// unreadable file keeps them. Returns { queue, dropped }.
+function pruneQueue(queue, status) {
+  if (!status || status.ok !== true) return { queue: queue, dropped: [] };
+  var out = [];
+  var dropped = [];
+  for (var i = 0; i < queue.length; i++) {
+    var hid = queue[i].headset;
+    if (hid === undefined || hid === null || findHeadset(status, hid) !== null) out.push(queue[i]);
+    else dropped.push(queue[i].id);
+  }
+  return dropped.length > 0 ? { queue: out, dropped: dropped } : { queue: queue, dropped: [] };
 }
 
 function enqueueCommand(queue, item) {
@@ -910,6 +1251,41 @@ function quickAccessOtherText(status) {
   return presses.join(" and ") + (presses.length > 1 ? " use functions" : " uses a function") + " this panel does not name.";
 }
 
+function touchFunctionLabel(v) {
+  switch (v) {
+    case "ambient_sound_control": return "Noise control";
+    case "playback_control": return "Playback";
+    case "volume_control": return "Volume";
+    case "voice_recognition": return "Voice assistant";
+    case "google_assistant": return "Google Assistant";
+    case "amazon_alexa": return "Alexa";
+    case "quick_access": return "Quick Access";
+    case "none": return "Off";
+    case "other": return "Other";
+    default: return "Unknown";
+  }
+}
+
+function touchFunctionTooltip(v) {
+  switch (v) {
+    case "ambient_sound_control": return "Tap: noise mode. Double or triple tap: Quick Access. Hold: Quick Attention";
+    case "playback_control": return "Tap: play or pause. Double tap: next. Triple tap: previous";
+    case "volume_control": return "Tap: volume up or down";
+    case "none": return "Taps do nothing";
+    default: return "";
+  }
+}
+
+// Read-only line for an earbud whose preset the contract does not name.
+function touchFunctionOtherText(status) {
+  if (!status) return "";
+  var sides = [];
+  if (status.touchFunctionLeft === "other") sides.push("Left earbud");
+  if (status.touchFunctionRight === "other") sides.push("Right earbud");
+  if (sides.length === 0) return "";
+  return sides.join(" and ") + (sides.length > 1 ? " use functions" : " uses a function") + " this panel does not name.";
+}
+
 function formatSigned(n) {
   if (n === null || n === undefined || isNaN(Number(n))) return "—";
   var v = Math.round(Number(n));
@@ -977,24 +1353,141 @@ function batteryIcon(level, charging) {
 }
 
 function deviceTitle(status) {
-  if (status && status.deviceName) return status.deviceName;
-  if (status && status.modelName) return status.modelName;
-  return "WH-1000XM5";
+  return isLive(status) ? headsetLabel(status) : "Sony headset";
 }
 
+// Contract 3.3, "Bar battery": the level the bar shows for a headset entry
+// or view. Headphones: battery_level. Earbuds: the lower earbud, ignoring
+// an unknown one; the case does not count. Null when unknown.
+function barBattery(h) {
+  if (!h) return null;
+  if (h.kind === KIND_EARBUDS) {
+    var l = typeof h.batteryLeft === "number" ? h.batteryLeft : null;
+    var r = typeof h.batteryRight === "number" ? h.batteryRight : null;
+    if (l === null) return r;
+    if (r === null) return l;
+    return Math.min(l, r);
+  }
+  return typeof h.batteryLevel === "number" && h.batteryLevel >= 0 ? h.batteryLevel : null;
+}
+
+// Earbuds charge when every known earbud flag is true (at least one known).
+function barCharging(h) {
+  if (!h) return false;
+  if (h.kind === KIND_EARBUDS) {
+    var known = 0;
+    var flags = [h.batteryLeftCharging, h.batteryRightCharging];
+    for (var i = 0; i < flags.length; i++) {
+      if (flags[i] === null || flags[i] === undefined) continue;
+      if (flags[i] !== true) return false;
+      known++;
+    }
+    return known > 0;
+  }
+  return h.batteryCharging === true;
+}
+
+// The bar shows a battery when the headset has one it reports.
 function showBattery(status) {
-  return isLive(status) && (status.supported === null || status.supported.battery === true);
+  return isLive(status) && (status.supported === null || status.supported.battery === true || status.supported.battery_lr === true);
 }
 
 // Bar text: "80%", "—" when unknown or disconnected, "" when unsupported.
 function barBatteryText(status) {
   if (!isLive(status)) return "—";
   if (!showBattery(status)) return "";
-  return formatBattery(status.batteryLevel);
+  return formatBattery(barBattery(status));
 }
 
 function isCharging(status) {
-  return showBattery(status) && status.batteryCharging === true;
+  return showBattery(status) && barCharging(status);
+}
+
+// Bar battery as the icon tint input: the level, or -1 when unknown.
+function barBatteryLevel(status) {
+  if (!showBattery(status)) return LEVEL_UNKNOWN;
+  var level = barBattery(status);
+  return level === null ? LEVEL_UNKNOWN : level;
+}
+
+// Earbuds hero, first battery line: [{ side, text, low, charging }] for the
+// left and the right earbud. A side value below 20 % is low; the case never.
+function earbudBatteryParts(status) {
+  var out = [];
+  var sides = [
+    { side: "L", level: status ? status.batteryLeft : null, charging: status ? status.batteryLeftCharging : null },
+    { side: "R", level: status ? status.batteryRight : null, charging: status ? status.batteryRightCharging : null }
+  ];
+  for (var i = 0; i < sides.length; i++) {
+    var s = sides[i];
+    var known = typeof s.level === "number";
+    out.push({ side: s.side, text: s.side + " " + formatBattery(known ? s.level : null), low: known && s.level < 20, charging: s.charging === true });
+  }
+  return out;
+}
+
+function caseBatteryText(status) {
+  return "Case " + formatBattery(status && typeof status.batteryCase === "number" ? status.batteryCase : null);
+}
+
+function caseCharging(status) {
+  return !!status && status.batteryCaseCharging === true;
+}
+
+// Earbuds: where the earbuds are, from worn_left and worn_right. Empty
+// when a side is unknown.
+function earbudsWornText(status) {
+  if (!status) return "";
+  var l = status.wornLeft;
+  var r = status.wornRight;
+  if (l === null || l === undefined || r === null || r === undefined) return "";
+  if (l && r) return "In ears";
+  if (l) return "Left in ear";
+  if (r) return "Right in ear";
+  return "Not in ears";
+}
+
+// Worn part of the hero meta line: "On head" / "Off head" for headphones,
+// the per-side text for earbuds.
+function wornText(status) {
+  if (!isSupported(status, "worn")) return "";
+  if (isEarbuds(status)) return earbudsWornText(status);
+  if (status.worn === null) return "";
+  return status.worn ? "On head" : "Off head";
+}
+
+// Battery for the tooltip: headphones "80%", earbuds "L 70% R 65% case 53%"
+// (`sep` between the parts). `long` adds "(charging)" after a charging part.
+// Empty when the headset reports no battery.
+function _tooltipBattery(h, sep, long) {
+  var supported = h.supported || {};
+  function part(text, charging) { return text + (long && charging === true ? " (charging)" : ""); }
+  if (h.kind === KIND_EARBUDS) {
+    var parts = [];
+    if (supported.battery_lr === true) {
+      parts.push(part("L " + formatBattery(h.batteryLeft), h.batteryLeftCharging));
+      parts.push(part("R " + formatBattery(h.batteryRight), h.batteryRightCharging));
+    }
+    if (supported.battery_case === true) parts.push(part("case " + formatBattery(h.batteryCase), h.batteryCaseCharging));
+    return parts.join(sep);
+  }
+  if (supported.battery !== true || !(h.batteryLevel >= 0)) return "";
+  return part(formatBattery(h.batteryLevel), h.batteryCharging);
+}
+
+// "<name>: <noise mode> · <battery>" for the tooltip with two or more headsets.
+function _tooltipHeadsetLine(h, isPrimary) {
+  var line;
+  if (h.supported === null) {
+    line = headsetLabel(h) + ": reading headset settings…";
+  } else {
+    var parts = [];
+    if (h.supported.noise_control === true && h.noiseMode) parts.push(noiseModeName(h.noiseMode));
+    var battery = _tooltipBattery(h, " ", false);
+    if (battery !== "") parts.push(battery);
+    line = headsetLabel(h) + (parts.length > 0 ? ": " + parts.join(" · ") : "");
+  }
+  return line + (isPrimary ? " (bar)" : "");
 }
 
 // Text beside the bar icon. Empty in icon-only mode and on a vertical bar,
@@ -1015,18 +1508,20 @@ function barTooltip(status) {
     return "Sony headphones: " + (status && status.lastError ? status.lastError : "no status");
   }
   if (!status.connected) return "Sony headphones: disconnected";
+  var list = _headsets(status);
+  if (list.length >= 2) {
+    var multi = [];
+    for (var i = 0; i < list.length; i++) multi.push(_tooltipHeadsetLine(list[i], list[i].id === status.primary));
+    return multi.join("\n");
+  }
+  if (isReading(status)) return deviceTitle(status) + ": reading headset settings…";
   var lines = [deviceTitle(status)];
-  if (isReading(status)) {
-    lines.push("Reading headset settings…");
-  } else {
-    var parts = [];
-    if (isSupported(status, "noise_control") && status.noiseMode) parts.push(noiseModeName(status.noiseMode));
-    if (isSupported(status, "codec") && status.codec && status.codec !== "NONE") parts.push(codecLabel(status.codec));
-    if (parts.length > 0) lines.push(parts.join(" · "));
-  }
-  if (showBattery(status) && status.batteryLevel >= 0) {
-    lines.push("Battery " + formatBattery(status.batteryLevel) + (status.batteryCharging === true ? " (charging)" : ""));
-  }
+  var parts = [];
+  if (isSupported(status, "noise_control") && status.noiseMode) parts.push(noiseModeName(status.noiseMode));
+  if (isSupported(status, "codec") && status.codec && status.codec !== "NONE") parts.push(codecLabel(status.codec));
+  if (parts.length > 0) lines.push(parts.join(" · "));
+  var battery = _tooltipBattery(status, " · ", true);
+  if (battery !== "") lines.push("Battery " + battery);
   return lines.join("\n");
 }
 
@@ -1036,7 +1531,8 @@ function heroMeta(status) {
   if (isReading(status)) return "Reading settings";
   var parts = ["Connected"];
   if (isSupported(status, "codec") && status.codec && status.codec !== "NONE") parts.push(codecLabel(status.codec));
-  if (isSupported(status, "worn") && status.worn !== null) parts.push(status.worn ? "On head" : "Off head");
+  var worn = wornText(status);
+  if (worn !== "") parts.push(worn);
   return parts.join(" · ");
 }
 
@@ -1062,7 +1558,7 @@ function footerLines(status) {
   if (status.address) id.push(status.address);
   if (id.length > 0) lines.push(id.join(" · "));
   if (status.supportedSource === "fallback") lines.push("Limited: headset did not report its features");
-  if (status.schemaVersion === 1) lines.push("Old daemon (status schema 1)");
+  if (status.schemaVersion < SUPPORTED_SCHEMA) lines.push("Old daemon (status schema " + status.schemaVersion + ")");
   return lines;
 }
 
@@ -1167,7 +1663,8 @@ function cursorMove(cursor, dx, dy, sections) {
 // ---------------------------------------------------------------------------
 // Panel targets: one table for gating, chips, toggles, adjusters and cursor
 // order (ui-spec 3 and 6). Fields:
-//   kind      cursor kind (see cursorMove)
+//   kind      cursor kind (see cursorMove); "display" = read-only hero item
+//             without a cursor target
 //   section   collapsible section that holds the target ("" = always open);
 //             for a "collapse" target, the section it opens
 //   feature   supported key; field / extra: status fields it needs
@@ -1176,6 +1673,10 @@ function cursorMove(cursor, dx, dy, sections) {
 // ---------------------------------------------------------------------------
 
 var TARGETS = {
+  battery: { kind: "display", section: "", feature: "battery", field: "batteryLevel" },
+  batteryLr: { kind: "display", section: "", feature: "battery_lr", field: "batteryLeft", extra: "batteryRight" },
+  batteryCase: { kind: "display", section: "", feature: "battery_case", field: "batteryCase" },
+  wornSides: { kind: "display", section: "", feature: "worn", field: "wornLeft", extra: "wornRight" },
   noise: { kind: "walk", section: "", feature: "noise_control", field: "noiseMode", action: "noise" },
   ambient: { kind: "adjust", section: "", feature: "noise_control", field: "ambientSoundLevel", action: "ambientLevel" },
   focusVoice: { kind: "single", section: "", feature: "noise_control", field: "focusOnVoice", action: "focusVoice", toggle: true, v2: true },
@@ -1200,18 +1701,23 @@ var TARGETS = {
   quickAccessTriple: { kind: "walk", section: "headset", feature: "quick_access", field: "quickAccessTripleTap", action: "quickAccessTriple" },
   earDetection: { kind: "single", section: "headset", feature: "ear_detection", field: "earDetection", action: "earDetection", toggle: true },
   touchPanel: { kind: "single", section: "headset", feature: "touch_panel", field: "touchPanel", action: "touchPanel", toggle: true },
+  touchFunctionLeft: { kind: "walk", section: "headset", feature: "touch_function", field: "touchFunctionLeft", action: "touchFunctionLeft" },
+  touchFunctionRight: { kind: "walk", section: "headset", feature: "touch_function", field: "touchFunctionRight", action: "touchFunctionRight" },
+  sidetone: { kind: "single", section: "headset", feature: "sidetone", field: "sidetone", action: "sidetone", toggle: true },
   multipointHeader: { kind: "collapse", section: "multipoint" },
   multipoint: { kind: "single", section: "multipoint", feature: "multipoint", field: "multipoint", action: "multipoint", toggle: true },
   devices: { kind: "rows", section: "multipoint", feature: "devices", field: "devices", action: "source" }
 };
 
 var TARGET_ORDER = [
+  "battery", "batteryLr", "batteryCase", "wornSides",
   "noise", "ambient", "focusVoice",
   "sound", "eqPreset", "dsee", "connectionQuality",
   "customEq", "eqBands",
   "speakToChatHeader", "speakToChat", "stcSensitivity", "stcTimeout",
   "headset", "volume", "voiceGuidance", "voiceGuidanceVolume", "autoPowerOff", "ncAmbButton", "buttonFunction",
   "quickAccessDouble", "quickAccessTriple", "earDetection", "touchPanel",
+  "touchFunctionLeft", "touchFunctionRight", "sidetone",
   "multipointHeader", "multipoint", "devices"
 ];
 
@@ -1247,6 +1753,8 @@ function targetOptions(status, id) {
   case "buttonFunction": return buttonFunctionOptions(status);
   case "quickAccessDouble": return quickAccessOptions(status, "double");
   case "quickAccessTriple": return quickAccessOptions(status, "triple");
+  case "touchFunctionLeft": return touchFunctionOptions(status, "left");
+  case "touchFunctionRight": return touchFunctionOptions(status, "right");
   default: return [];
   }
 }
@@ -1257,9 +1765,14 @@ function targetChoices(status, id) {
     noise: noiseModeLabel, eqPreset: eqPresetButtonLabel, connectionQuality: connectionQualityLabel,
     stcSensitivity: stcSensitivityLabel, stcTimeout: stcTimeoutLabel, autoPowerOff: autoPowerOffLabel,
     ncAmbButton: ncAmbButtonLabel, buttonFunction: buttonFunctionLabel,
-    quickAccessDouble: quickAccessLabel, quickAccessTriple: quickAccessLabel
+    quickAccessDouble: quickAccessLabel, quickAccessTriple: quickAccessLabel,
+    touchFunctionLeft: touchFunctionLabel, touchFunctionRight: touchFunctionLabel
   }[id];
-  var tip = { autoPowerOff: autoPowerOffTooltip, ncAmbButton: ncAmbButtonTooltip }[id];
+  if (!label) return [];
+  var tip = {
+    autoPowerOff: autoPowerOffTooltip, ncAmbButton: ncAmbButtonTooltip,
+    touchFunctionLeft: touchFunctionTooltip, touchFunctionRight: touchFunctionTooltip
+  }[id];
   var values = targetOptions(status, id);
   var out = [];
   for (var i = 0; i < values.length; i++) {
@@ -1285,6 +1798,7 @@ function cursorSections(status, expanded) {
   for (var i = 0; i < TARGET_ORDER.length; i++) {
     var id = TARGET_ORDER[i];
     var t = TARGETS[id];
+    if (t.kind === "display") continue;
     if (t.kind !== "collapse" && t.section !== "" && ex[t.section] !== true) continue;
     if (!targetVisible(status, id)) continue;
     var count = _targetCount(status, id);
@@ -1398,9 +1912,25 @@ function isSettingTarget(id) {
   return SETTING_TARGETS.hasOwnProperty(id);
 }
 
-// Status targets, then setting targets: the cursor list of the popup.
+// The switcher row: the first cursor row with two or more headsets. `h`/`l`
+// walk the tabs; entering it lands on the shown headset's tab.
+var SWITCHER_TARGET = "switcher";
+
+// The headset id of switcher tab `index`, or null.
+function switcherActivation(status, index) {
+  if (!switcherVisible(status)) return null;
+  var list = _headsets(status);
+  return index >= 0 && index < list.length ? list[index].id : null;
+}
+
+// Switcher, status targets, then setting targets: the cursor list of the
+// popup. `status` is the view of the shown headset.
 function panelCursorSections(status, expanded) {
-  var list = cursorSections(status, expanded);
+  var list = [];
+  if (switcherVisible(status)) {
+    list.push({ id: SWITCHER_TARGET, kind: "walk", count: headsetCount(status), preferred: headsetIndex(status, status.id) });
+  }
+  list = list.concat(cursorSections(status, expanded));
   for (var i = 0; i < SETTING_TARGET_ORDER.length; i++) {
     var id = SETTING_TARGET_ORDER[i];
     list.push({ id: id, kind: SETTING_TARGETS[id].kind, count: 1 });
