@@ -117,9 +117,9 @@ no reported value maps to a contract value, the daemon writes `null`.
 |---|---|---|---|---|
 | `eq_preset` | string \| null | `off`, `bright`, `excited`, `mellow`, `relaxed`, `vocal`, `treble`, `bass`, `speech`, `custom`, `user1`..`user5`, `unknown` | yes | `unknown` = the headset reports a preset ID this contract does not name. `user1`..`user5` are new |
 | `eq_presets` | array of string \| null | values of `eq_preset` except `unknown` | new | Presets the headset accepts, in the headset's order. `null` = list not read; then use the v1 list `off, bright, excited, mellow, relaxed, vocal, treble, bass, speech, custom` |
-| `eq_custom_bands` | array of 5 int \| null | each -10..10 | yes | Custom EQ: 400 Hz, 1 kHz, 2.5 kHz, 6.3 kHz, 16 kHz. Last values the headset reported for the custom preset; the daemon keeps them while another preset is active. `null` until reported once |
+| `eq_custom_bands` | array of 5 int \| null | each -10..10 | yes | Band levels at 400 Hz, 1 kHz, 2.5 kHz, 6.3 kHz, 16 kHz of the **active** preset, as the headset last reported them. For `custom` these are the custom values; for any other preset they are that preset's curve (all `0` for `off`). The headset cannot report the stored custom values while another preset is active. `null` until reported once |
 | `eq_bands` | array of 5 int \| null | each -10..10 | yes | Alias of `eq_custom_bands`. Deprecated |
-| `clear_bass` | int \| null | -10..10 | yes | Clear Bass of the custom preset; same rule as `eq_custom_bands` |
+| `clear_bass` | int \| null | -10..10 | yes | Clear Bass of the active preset; same rule as `eq_custom_bands` |
 
 **Sound and DSEE**
 
@@ -184,6 +184,25 @@ Device object:
 | `connected` | bool | `true` when the device is connected to the headset now |
 | `active` | bool | `true` for the device that plays audio now. At most one device has `active: true`; `active` implies `connected` |
 
+**Touch panel** (added within schema 2; a widget built before may not know it)
+
+| Key | Type | Allowed values | v1 | Feature key | Notes |
+|---|---|---|---|---|---|
+| `touch_panel` | bool \| null | | new | `touch_panel` | Touch sensor control panel on the ear cup. `false` = touch gestures (play, skip, volume) are off |
+
+**Quick Access** (added within schema 2; a widget built before may not know it)
+
+Quick Access starts an app on the paired phone when the NC/AMB button is
+pressed twice or three times. The headset only stores the assignment; the
+app runs on the phone.
+
+| Key | Type | Allowed values | v1 | Feature key | Notes |
+|---|---|---|---|---|---|
+| `quick_access_double_tap` | string \| null | `off`, `spotify`, `other` | new | `quick_access` | Function on a double press. `other` = a function this contract does not name |
+| `quick_access_triple_tap` | string \| null | `off`, `spotify`, `other` | new | `quick_access` | Function on a triple press |
+| `quick_access_double_tap_options` | array of string \| null | values of `quick_access_double_tap` except `other` | new | `quick_access` | Values the headset accepts for a double press, in the headset's order. `null` = list not read |
+| `quick_access_triple_tap_options` | array of string \| null | values of `quick_access_triple_tap` except `other` | new | `quick_access` | Same for a triple press |
+
 ### 2.4 `supported`
 
 When not `null`, `supported` is an object with **every** key below, each
@@ -204,20 +223,25 @@ fields are `null`.
 | `nc_amb_button` | `nc_amb_button` | `nc-amb-button` | T1 `69` |
 | `button_function` | `button_function`, `button_functions` | `button-function` | T1 `F3` or `FE`, and the capability lists an NC/AMB key |
 | `ear_detection` | `ear_detection` | `ear-detect` | T1 `F1` |
-| `worn` | `worn` | none | table 2 present and (T2 `F0`, T1 `F6` or T1 `F1`) |
+| `worn` | `worn` | none | table 2 present and (T2 `F0` or T1 `F6`). T1 `F1` alone does not count: the WH-1000XM5 advertises it but does not answer the worn request |
 | `volume` | `volume` | `volume` | T1 `A1`, `A2`, `A3` or `A4` |
 | `connection_quality` | `connection_quality` | `connection-quality` | T1 `E1` or `E3` |
 | `codec` | `codec` | none | T1 `12` |
 | `multipoint` | `multipoint` | `multipoint` | a general setting slot (T1 `D1`..`D4`) whose capability subject is `MULTIPOINT_SETTING` |
 | `devices` | `devices` | none | T2 `30`, `32` or `33` |
 | `source_switch` | none (`devices[].active` is gated by `devices`) | `source` | T2 `31`, and `devices` is `true` |
+| `touch_panel` | `touch_panel` | `touch-panel` | a general setting slot (T1 `D1`..`D4`) whose capability subject is `TOUCH_PANEL_SETTING` |
+| `quick_access` | `quick_access_double_tap`, `quick_access_triple_tap`, `quick_access_double_tap_options`, `quick_access_triple_tap_options` | `quick-access` | T1 `FD` |
+
+`touch_panel` and `quick_access` were added within schema 2. A widget must
+treat a missing `supported` key as `false` (section 5, rule 4).
 
 Lifecycle:
 
 1. On connect, the daemon writes `connected: true` with `supported: null`
    and all feature fields `null`.
 2. When the support function list arrives (and, for `eq_custom`,
-   `button_function` and `multipoint`, the capability replies), the daemon
+   `button_function`, `multipoint` and `touch_panel`, the capability replies), the daemon
    writes `supported` with `supported_source: "device"`. Feature fields stay
    `null` until their values arrive.
 3. If the headset does not answer the support function request within the
@@ -229,8 +253,8 @@ Lifecycle:
    all others. These are the features confirmed on a real XM5 (protocol.md
    section 5).
 4. `supported` does not change while the connection stays up, with one
-   exception: `eq_custom`, `button_function` and `multipoint` may change from
-   `false` to `true` when a late capability reply arrives.
+   exception: `eq_custom`, `button_function`, `multipoint` and `touch_panel`
+   may change from `false` to `true` when a late capability reply arrives.
 
 ### 2.5 What the widget must do
 
@@ -271,7 +295,7 @@ Connected, read from the device. Every key is present.
     "voice_guidance_volume": false, "auto_power_off": true, "nc_amb_button": true,
     "button_function": true, "ear_detection": true, "worn": true, "volume": true,
     "connection_quality": true, "codec": true, "multipoint": true, "devices": true,
-    "source_switch": true
+    "source_switch": true, "touch_panel": true, "quick_access": true
   },
   "battery_level": 80,
   "battery_charging": false,
@@ -305,7 +329,12 @@ Connected, read from the device. Every key is present.
   "multipoint": false,
   "devices": [
     {"address": "F0:1D:BC:AA:00:01", "name": "laptop", "connected": true, "active": true}
-  ]
+  ],
+  "touch_panel": true,
+  "quick_access_double_tap": "off",
+  "quick_access_triple_tap": "spotify",
+  "quick_access_double_tap_options": ["off", "spotify"],
+  "quick_access_triple_tap_options": ["off", "spotify"]
 }
 ```
 
@@ -375,6 +404,8 @@ applies, against the named field.
 | `connection-quality sound\|connection` | | `connection_quality` | | the headset may reconnect after this change | new |
 | `multipoint on\|off` | | `multipoint` | | the daemon confirms the headset's alert; the headset then drops the link and reconnects. Expect `connected: false` for a few seconds | yes |
 | `source <address>` | Bluetooth address | `source_switch` | must be a `devices[]` entry with `connected: true`, else `ERR unsupported source_switch <address>` | make this device the active audio source | new |
+| `touch-panel on\|off` | | `touch_panel` | | turn the touch sensor control panel on or off | new |
+| `quick-access double\|triple <value>` | press, then `off` or `spotify` | `quick_access` | `quick_access_double_tap_options` or `quick_access_triple_tap_options` for the named press (skipped while `null`); the error is `ERR unsupported quick_access <press> <value>` | assign the function to a double or triple press; the other press keeps its function | new |
 
 The `ERR usage` text for each verb is `ERR usage: ` followed by the
 "Verb and syntax" cell with `\|` written as `|`. Example:
@@ -478,7 +509,10 @@ Rules for schema version 2:
    once it implements 2.
 4. Within version 2, the daemon may add new keys and new `supported` keys.
    The widget ignores unknown keys; an unknown `supported` key has no
-   control, so nothing changes for the user.
+   control, so nothing changes for the user. A `supported` key that is
+   missing (a daemon older than the key) reads as `false`, and its fields
+   read as `null`. Keys added this way: `touch_panel`, `quick_access` and
+   their fields.
 5. Removing a key, renaming it, changing its type, adding a value to an
    existing enum, or changing a meaning is a breaking change and needs
    `schema_version: 3`. Exception: `unknown`, `other` and `OTHER` values exist
