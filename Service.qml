@@ -1,7 +1,8 @@
 // Service.qml
-// Headset state for the bar widget: watches status.json (schema 2), keeps
-// optimistic values and runs sony-ctl one command at a time.
-// All decisions live in Model.js; this file only wires timers and processes.
+// Headset state for the bar widget: watches status.json (schema 3, also 1
+// and 2), keeps optimistic values per headset and runs sony-ctl one command
+// at a time. All decisions live in Model.js; this file only wires timers and
+// processes.
 import QtQuick
 import Quickshell
 import Quickshell.Io
@@ -25,14 +26,16 @@ Item {
     return base + "/sony-headphones/status.json"
   }
 
-  // Parsed status.json as the daemon wrote it.
+  // Parsed status.json as the daemon wrote it: the view of the primary
+  // headset, with every headset in `headsets`.
   property var realStatus: Model.parseStatus("")
-  // Optimistic values: field -> { value, id }.
+  // Optimistic values: "<headset>|<field>" -> { value, id, headset, field }.
   property var pending: ({})
   // What the UI shows: the real status with the optimistic values applied.
   readonly property var status: Model.applyPending(realStatus, pending)
 
-  // Queued commands: [{ args, id }]. One process runs at a time.
+  // Queued commands: [{ args, id, action, headset }]. One process runs at a
+  // time.
   property var queue: []
   property var runningCommand: null
   property int _nextId: 1
@@ -40,6 +43,21 @@ Item {
   // True once a command has been in flight for 300 ms ("Applying…").
   property bool busyVisible: false
   property string commandError: ""
+  // The headset the error belongs to; the popup shows it only for that one.
+  property var commandErrorHeadset: null
+
+  // True while a command for headset `id` waits or runs.
+  function busyFor(id) {
+    if (runningCommand !== null && runningCommand.headset === id) return true
+    if (_debounced !== null && _debounced.headset === id) return true
+    for (var i = 0; i < queue.length; i++) if (queue[i].headset === id) return true
+    return false
+  }
+
+  // The error text for headset `id`, or "".
+  function errorFor(id) {
+    return commandError !== "" && (commandErrorHeadset === null || commandErrorHeadset === id) ? commandError : ""
+  }
 
   // A keyboard step waits here for 400 ms so a held key sends one command.
   property var _debounced: null
@@ -71,7 +89,10 @@ Item {
   Timer {
     id: errorTimer
     interval: 6000
-    onTriggered: root.commandError = ""
+    onTriggered: {
+      root.commandError = ""
+      root.commandErrorHeadset = null
+    }
   }
 
   Timer {
@@ -80,34 +101,37 @@ Item {
     onTriggered: root.flushDebounced()
   }
 
-  // Builds a command and shows its optimistic values. Returns the queue
-  // item, or null after showing the error.
-  function prepare(action, value) {
-    var built = Model.buildCommand(action, value, status)
+  // Builds a command for the headset of `view` (default: the primary one)
+  // and shows its optimistic values. Returns the queue item, or null after
+  // showing the error.
+  function prepare(action, value, view) {
+    var target = view ? view : status
+    var built = Model.buildCommand(action, value, target)
     if (built.error) {
-      showError(built.error)
+      showError(built.error, target ? target.id : null)
       return null
     }
     var id = _nextId++
-    pending = Model.addPending(pending, built.pending, id)
-    return { args: built.args, id: id, action: action }
+    pending = Model.addPending(pending, built.pending, id, built.headset)
+    return { args: built.args, id: id, action: action, headset: built.headset }
   }
 
   // Validates and sends one change. Returns true when the command was queued.
-  function send(action, value) {
+  function send(action, value, view) {
     flushDebounced()
-    var item = prepare(action, value)
+    var item = prepare(action, value, view)
     if (item === null) return false
     enqueue(item)
     return true
   }
 
   // Shows the value now and sends it after a 400 ms pause. A step for
-  // another action sends the waiting one first.
-  function sendDebounced(action, value) {
-    if (_debounced !== null && _debounced.action !== action) flushDebounced()
+  // another action or another headset sends the waiting one first.
+  function sendDebounced(action, value, view) {
+    var target = view ? view : status
+    if (_debounced !== null && (_debounced.action !== action || _debounced.headset !== target.id)) flushDebounced()
     var previous = _debounced
-    var item = prepare(action, value)
+    var item = prepare(action, value, target)
     if (item === null) return false
     // Fields the new step overwrote already carry its id.
     if (previous !== null) pending = Model.dropPending(pending, previous.id)
@@ -147,8 +171,9 @@ Item {
     ctlProcess.running = true
   }
 
-  function showError(message) {
+  function showError(message, headset) {
     commandError = Model.elideError(message)
+    commandErrorHeadset = headset === undefined ? null : headset
     errorTimer.restart()
   }
 
@@ -159,11 +184,16 @@ Item {
     if (item === null) return
     runningCommand = null
     watchdog.stop()
+    // A command whose headset left `headsets` finishes; its result is
+    // ignored (ui-spec 5).
+    var stillThere = !realStatus.ok || Model.findHeadset(realStatus, item.headset) !== null
     if (exitCode !== 0) {
       pending = Model.dropPending(pending, item.id)
-      showError(didNotStart
-        ? Model.commandErrorText(127, "", "")
-        : Model.commandErrorText(exitCode, ctlStderr.text, ctlStdout.text))
+      if (stillThere) {
+        showError(didNotStart
+          ? Model.commandErrorText(127, "", "")
+          : Model.commandErrorText(exitCode, ctlStderr.text, ctlStdout.text), item.headset)
+      }
     }
     settleTimer.restart()
     // Start the next process outside the exited handler of this one.
@@ -217,16 +247,29 @@ Item {
     onFileChanged: reload()
   }
 
+  // A new file: drop the optimistic values the daemon now reports, and the
+  // queued commands and values of headsets that left `headsets`.
   function applyStatus(raw) {
     var parsed = Model.parseStatus(raw)
-    pending = Model.reconcilePending(pending, parsed)
+    var next = Model.reconcilePending(pending, parsed)
+    var pruned = Model.pruneQueue(queue, parsed)
+    for (var i = 0; i < pruned.dropped.length; i++) next = Model.dropPending(next, pruned.dropped[i])
+    if (_debounced !== null && parsed.ok && Model.findHeadset(parsed, _debounced.headset) === null) {
+      debounceTimer.stop()
+      next = Model.dropPending(next, _debounced.id)
+      _debounced = null
+    }
+    queue = pruned.queue
+    pending = next
     realStatus = parsed
   }
 
+  // Right click on the bar button: the next noise mode of the primary
+  // headset.
   function cycleNoiseMode() {
     var s = status
     if (!Model.isEnabled(s, "noise_control", s.noiseMode)) return
-    send("noise", Model.cycleNoiseMode(s.noiseMode))
+    send("noise", Model.cycleNoiseMode(s.noiseMode), s)
   }
 
   function refresh() {

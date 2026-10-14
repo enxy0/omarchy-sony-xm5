@@ -2,11 +2,12 @@
 """
 tests/mock_sony_ctl.py: reference implementation of the sony-ctl CLI.
 
-Follows docs/backend-contract.md (schema version 2), section 1 (exit codes)
-and section 3 (verbs). The CLI checks argument syntax before it connects,
+Follows docs/backend-contract.md (schema version 3), section 1 (exit codes)
+and section 4 (verbs). The CLI checks argument syntax before it connects,
 with the same rules as the daemon, then sends one line and prints one reply.
+`--headset <selector>` sends `@<selector> ` before the verb (contract 2.5).
 
-Usage: sony-ctl [-s <socket>] <verb> [args...]
+Usage: sony-ctl [-s <socket>] [-H|--headset <selector>] <verb> [args...]
 
 Exit codes:
     0: the daemon replied OK or a JSON object (printed to stdout)
@@ -35,9 +36,14 @@ BUTTON_FUNCTION = [
 ]
 QUICK_ACCESS_PRESSES = ["double", "triple"]
 QUICK_ACCESS = ["off", "spotify"]
+TOUCH_SIDES = ["left", "right"]
+TOUCH_FUNCTION = [
+    "ambient_sound_control", "playback_control", "volume_control",
+    "voice_recognition", "google_assistant", "amazon_alexa", "quick_access", "none",
+]
 ON_OFF = ["on", "off"]
 
-# verb -> usage text (contract 3.3 "Verb and syntax" cell).
+# verb -> usage text (contract 4.3 "Verb and syntax" cell).
 USAGE = {
     "status": "status",
     "probe": "probe",
@@ -59,6 +65,8 @@ USAGE = {
     "multipoint": "multipoint on|off",
     "source": "source <address>",
     "touch-panel": "touch-panel on|off",
+    "touch-function": "touch-function left|right <value>",
+    "sidetone": "sidetone on|off",
     "quick-access": "quick-access double|triple <value>",
 }
 ALIASES = {"ear-detection": "ear-detect"}
@@ -126,6 +134,12 @@ def build_request(verb, args):
         value = choice(verb, args[1], QUICK_ACCESS)
         return f"{verb} {press} {value}"
 
+    if verb == "touch-function":
+        need_args(verb, args, 2)
+        side = choice(verb, args[0], TOUCH_SIDES)
+        value = choice(verb, args[1], TOUCH_FUNCTION)
+        return f"{verb} {side} {value}"
+
     need_args(verb, args, 1)
     arg = args[0]
     if verb == "noise":
@@ -136,7 +150,7 @@ def build_request(verb, args):
         return f"{verb} {parse_int(arg, -2, 2, verb)}"
     if verb == "volume":
         return f"volume {parse_int(arg, 0, 30, verb)}"
-    if verb in ("focus-voice", "dsee", "speak-to-chat", "voice-guidance", "ear-detect", "multipoint", "touch-panel"):
+    if verb in ("focus-voice", "dsee", "speak-to-chat", "voice-guidance", "ear-detect", "multipoint", "touch-panel", "sidetone"):
         return f"{verb} {choice(verb, arg, ON_OFF)}"
     if verb == "auto-power-off":
         return f"{verb} {choice(verb, arg, AUTO_POWER_OFF)}"
@@ -181,7 +195,7 @@ def send_request(socket_path, line):
 
 
 def print_usage(stream):
-    stream.write("Usage: sony-ctl [-s <socket>] <verb> [args...]\n")
+    stream.write("Usage: sony-ctl [-s <socket>] [-H|--headset <address|model>] <verb> [args...]\n")
     stream.write("Verbs:\n")
     for usage in USAGE.values():
         stream.write(f"  {usage}\n")
@@ -189,6 +203,7 @@ def print_usage(stream):
 
 def main(argv):
     socket_path = None
+    headset = None
     args = list(argv)
     while args and args[0].startswith("-"):
         flag = args.pop(0)
@@ -197,6 +212,13 @@ def main(argv):
             return 0
         if flag in ("-s", "--socket") and args:
             socket_path = args.pop(0)
+            continue
+        if flag in ("-H", "--headset") and args:
+            headset = args.pop(0)
+            # A selector is one token: an address or a model (contract 2.5).
+            if not headset or any(c.isspace() for c in headset):
+                sys.stderr.write("Error: --headset needs an address or a model\n")
+                return 1
             continue
         sys.stderr.write(f"Error: Unknown option '{flag}'\n")
         return 1
@@ -211,11 +233,17 @@ def main(argv):
         sys.stderr.write(f"Error: Unknown subcommand '{args[0]}'\n")
         return 1
 
+    if headset is not None and verb == "status":
+        sys.stderr.write("Error: 'status' does not take --headset\n")
+        return 1
+
     try:
         line = build_request(verb, args[1:])
     except UsageError as e:
         sys.stderr.write(f"Error: {e}\n")
         return 1
+    if headset is not None:
+        line = f"@{headset} {line}"
 
     code, reply = send_request(socket_path or default_socket_path(), line)
     if code != 0:

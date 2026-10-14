@@ -15,7 +15,9 @@ Files: `Panel.qml` (bar button, popup, cursor model, reusable inline
 components), `Service.qml` (status file watcher, optimistic values, command
 queue), `Model.js` (all logic: parsing, gating, labels, command building,
 pending values, queue, cursor movement, headset selection), `SonyIcon.qml`
-(headphones and earbuds glyphs).
+(headphones and earbuds glyphs: Material Design Icons from the Nerd Font,
+`headphones` U+F02CB and `earbuds` U+F184F, the set the first-party widgets
+use; Audio shows the same headphones glyph for a headphone sink).
 `setup` deploys `manifest.json` and every `*.qml` and `*.js` file in the
 repository root, so a new QML file there needs no change in `setup`.
 
@@ -25,13 +27,13 @@ repository root, so a new QML file there needs no change in `setup`.
 |---|---|
 | Size | `BarIconButton`, as the first-party icon widgets (Audio, Bluetooth, Agents): `Style.bar.iconSlot` along the bar, the bar thickness across it. With the percentage: two icon slots, as Power, wider only when the text needs it |
 | Headset | The `primary` headset (contract 2.4). The popup's selected tab does not change the bar button |
-| Icon | `SonyIcon`, `Style.space(14)`, with `kind` from the primary headset: the headphones glyph for `headphones`, the earbuds glyph for `earbuds`; the headphones glyph when disconnected. Dim when disconnected or in an error state, green while the bar charging value is `true`, urgent when the bar battery is below 20 %. The tints work in both display modes |
-| Vertical position | The glyph must sit on the same vertical center as the first-party glyph icons (Audio, Bluetooth) next to it. Today the headphones glyph is drawn slightly lower than its neighbours (user screenshot): `SonyIcon` paints from about 0.12 to 0.92 of its box, so its visual center is below the box center. Fix: both glyphs paint with equal top and bottom inset inside the `iconSize` box, and the bar row centers the box like `BarIconButton` centers a font glyph. Check: a screenshot of the bar at scale 1 and 2 shows the painted center within 0.5 px of the Audio glyph's center |
+| Icon | `SonyIcon` with `kind` from the primary headset: the headphones glyph (U+F02CB) for `headphones`, the earbuds glyph (U+F184F) for `earbuds`; the headphones glyph when disconnected. Box `Style.bar.iconCanvas`, glyph at `Style.bar.iconFont`, as `BarIconButton` draws a glyph. Dim (alpha 0.45, the value of first-party `WidgetButton.dimmed`) when disconnected or in an error state, green while the bar charging value is `true`, urgent when the bar battery is below 20 %. The tints work in both display modes |
+| Vertical position | The glyph sits on the same vertical center as the first-party glyph icons (Audio, Bluetooth) next to it. The old vector outline painted from about 0.12 to 0.92 of its box and sat about 1 px (at scale 1.25) below its neighbours. `SonyIcon` now paints the font glyph through `OpticalGlyph`, the component `BarIconButton` uses, in a box of `Style.bar.iconCanvas`; the bar row is exactly that box high and centered in the button, as `BarIconButton` centers its canvas. Both Material Design glyphs have their ink centered on the same line as the neighbours' glyphs. Measured at scale 1.25: painted center within 0.1 px of the Audio and Bluetooth glyph centers |
 | Text | Only when the `showPercentage` setting is on and the bar is horizontal (Power does the same). The **bar battery** of the primary headset (contract 3.3: `battery_level` for headphones, the lower earbud for earbuds) as `80%` at `Style.bar.iconFont`; `—` when unknown or disconnected; hidden when the primary headset has neither `supported.battery` nor `supported.battery_lr` |
 | Charging hint | a bolt glyph after the percentage while the bar charging value is `true`; only with the text |
 | Tooltip, one headset | line 1 `device_name`; line 2 noise mode name and codec (`Noise Cancelling · LDAC`); line 3 battery: headphones `Battery 80% (charging)`, earbuds `Battery L 70% · R 65% · case 53%` (each `—` when `null`; `case` part omitted when `battery_case` is unsupported; `(charging)` after a part whose charging flag is `true`) |
 | Tooltip, two or more headsets | one line per headset in `headsets` order: `device_name: noise mode · battery`, for example `WH-1000XM5: Noise Cancelling · 80%` and `WF-1000XM5: Ambient Sound · L 70% R 65% case 53%`. The primary headset's line ends with ` (bar)` |
-| Tooltip, other states | Disconnected: `Sony headphones: disconnected`. Initializing (primary has `supported: null`): `<device_name>: reading headset settings…`. Error states: the error text |
+| Tooltip, other states | Disconnected: `Sony headphones: disconnected`. Initializing (one headset, `supported: null`): `<device_name>: reading headset settings…`; with two or more headsets an initializing entry has that line. Error states: the error text |
 | Left click | open or close the popup |
 | Right click | cycle the noise mode ANC → Ambient → Off (`noise`) on the **primary** headset, with `--headset <primary id>`. Ignored unless that headset's noise control is enabled (section 4) |
 
@@ -125,8 +127,9 @@ layout is the same.
 | Item | Headphones (unchanged) | Earbuds |
 |---|---|---|
 | Icon | headphones glyph, `Style.space(28)` | earbuds glyph, `Style.space(28)` |
-| Battery (right side, first line) | `80 %` | `L 70 %  R 65 %`; `—` for a `null` side; a bolt after a side whose charging flag is `true`. Hidden when `supported.battery_lr` is `false` |
-| Battery (right side, second line) | `Charging` while charging | `Case 53 %` with a bolt while `battery_case_charging`; `Case —` when `null`; hidden when `supported.battery_case` is `false` |
+| Title | `device_name`; `Sony headset` when no headset is connected | same |
+| Battery (right side, first line) | `80%` | `L 70%  R 65%`; `—` for a `null` side; a bolt after a side whose charging flag is `true`. Hidden when `supported.battery_lr` is `false` |
+| Battery (right side, second line) | `Charging` while charging | `Case 53%` with a bolt (green) while `battery_case_charging`; `Case —` when `null`; hidden when `supported.battery_case` is `false` |
 | Worn in the meta line | `ON HEAD` / `OFF HEAD` from `worn` | `IN EARS` (`worn_left` and `worn_right` `true`), `LEFT IN EAR`, `RIGHT IN EAR`, `NOT IN EARS` (both `false`); nothing when both are `null` |
 | Low battery tint | `battery_level` below 20 % | each side value below 20 % is drawn in the urgent color; the case value is never urgent |
 
@@ -158,8 +161,8 @@ after a 400 ms pause.
 | Headset | Quick Access: a "Double tap" and a "Triple tap" chip row (Off / Spotify); lists from `quick_access_double_tap_options` and `quick_access_triple_tap_options`. `other` selects no chip and shows the caption "Double tap uses a function this panel does not name." (read-only) | `quick_access_double_tap`, `quick_access_triple_tap` | `quick-access double\|triple <v>` | `quick_access` |
 | Headset | Pause when taken off toggle | `ear_detection` | `ear-detect on\|off` | `ear_detection` |
 | Headset | Touch controls toggle ("Tap and swipe the ear cup to play, skip and change the volume") | `touch_panel` | `touch-panel on\|off` | `touch_panel` |
-| Headset | Earbud touch functions: a "Left earbud" and a "Right earbud" chip row; lists from `touch_function_left_options` and `touch_function_right_options`. Labels: `ambient_sound_control` "Noise control", `playback_control` "Playback", `volume_control` "Volume", `voice_recognition` "Voice assistant", `google_assistant` "Google Assistant", `amazon_alexa` "Alexa", `quick_access` "Quick Access", `none` "Off". Caption "What a tap, double tap and hold on each earbud do." `other` selects no chip and shows "Left earbud uses a function this panel does not name." (read-only) | `touch_function_left`, `touch_function_right` | `touch-function left\|right <v>` | `touch_function` |
-| Headset | Hear your voice in calls toggle (sidetone) | `sidetone` | `sidetone on\|off` | `sidetone` |
+| Headset | Earbud touch functions, under the title "TOUCH FUNCTIONS": a "Left earbud" and a "Right earbud" chip row; lists from `touch_function_left_options` and `touch_function_right_options`. Labels: `ambient_sound_control` "Noise control", `playback_control` "Playback", `volume_control` "Volume", `voice_recognition` "Voice assistant", `google_assistant` "Google Assistant", `amazon_alexa` "Alexa", `quick_access` "Quick Access", `none` "Off"; the first three and `none` have a chip tooltip that says what the taps do. Caption "What a tap, double tap and hold on each earbud do." `other` selects no chip and shows "Left earbud uses a function this panel does not name." (read-only) | `touch_function_left`, `touch_function_right` | `touch-function left\|right <v>` | `touch_function` |
+| Headset | Hear your voice in calls toggle (sidetone), description "Plays your own voice in the earbuds during a call" | `sidetone` | `sidetone on\|off` | `sidetone` |
 | Multipoint | Multipoint toggle; caption "The headset reconnects after this change." | `multipoint` | `multipoint on\|off` | `multipoint` |
 | Multipoint | Device rows: name (or address), `Playing` / `Connected` / `Not connected` marker | `devices` | none | `devices` |
 | Multipoint | Activate a connected, not active row: switch the audio source | `devices[].address` | `source <address>` | `source_switch` |
@@ -230,10 +233,11 @@ same holds within schema 3 for any `supported` key a daemon does not write
 - Every command for a schema 3 status carries `--headset <id>` with the
   address of the headset it was built for, also with one headset. The
   widget never relies on the daemon's `primary` for a command.
-- Optimistic values are stored per headset `id`. When a headset leaves
+- Optimistic values are stored per headset `id` (key `<id>|<field>`; an
+  entry without an id is for the primary headset). When a headset leaves
   `headsets`, its queued (not yet running) commands are dropped and its
   optimistic values are cleared. A running command finishes; its result is
-  ignored.
+  ignored. An unreadable status file keeps both.
 
 ## 6. Keyboard
 
@@ -297,13 +301,24 @@ panel scrolls to keep the cursor visible.
 10. Earbuds bar battery: the contract rule (3.3, "Bar battery") is the only
     rule. The widget does not guess whether an earbud level of 0 means "in
     the case"; see protocol.md 9.10, question 1.
+11. A schema 3 entry whose `id` is not a Bluetooth address, or repeats an
+    earlier `id`, is skipped: it cannot be a tab key or a `--headset`
+    selector. `connected: true` with an empty `headsets` reads as
+    disconnected.
+12. Earbuds worn text with one side `null`: nothing is shown, as for both
+    `null`; the panel does not say "Left in ear" while the right side is
+    unknown.
+13. Earbuds tooltip battery line: shown when `battery_lr` or `battery_case`
+    is supported, with `—` for an unknown part.
 
 All per-control data (feature key, fields, action, cursor kind, section,
 v2-only flag) is one table, `Model.TARGETS`, in layout order
-`Model.TARGET_ORDER`. Widget-setting targets are a second table,
-`Model.SETTING_TARGETS`; `Model.panelCursorSections` puts them after the
-status targets. The switcher is not in `Model.TARGETS`; it is a UI row in
-front of them.
+`Model.TARGET_ORDER`. The hero's read-only items (`battery`, `batteryLr`,
+`batteryCase`, `wornSides`) are `kind: "display"` rows of the same table:
+they gate visibility and have no cursor target. Widget-setting targets are
+a second table, `Model.SETTING_TARGETS`; `Model.panelCursorSections` puts
+them after the status targets. The switcher is not in `Model.TARGETS`; it
+is the cursor row `switcher` in front of them.
 
 ## 8. Shown headset
 
@@ -324,7 +339,12 @@ The shown headset drives every section, the hero, the info footer, the
 status line and every command (`--headset <shown id>`). The bar button
 always uses `primary`.
 
-Model functions the UI agent adds (names are a suggestion):
-`Model.shownHeadset(status, selectedId)`, `Model.barBattery(headset)`,
-`Model.barCharging(headset)`, `Model.headsetLabel(headset)`. `parseStatus`
-returns the v3 shape for v1, v2 and v3 files (contract section 6).
+`Model.parseStatus` returns a view: the file keys (`primary`, `headsets`,
+schema, error state) plus the fields of the primary headset, for v1, v2 and
+v3 files alike (contract section 6). `Model.headsetView(status, id)` and
+`Model.shownHeadset(status, selectedId)` give the view of another headset;
+every gating, label and command function takes a view. Selection helpers:
+`shownHeadsetId`, `selectionOnOpen`, `stepHeadset`, `switcherVisible`,
+`switcherTabs`, `switcherActivation`. Battery helpers: `barBattery`,
+`barCharging`, `barBatteryLevel`, `earbudBatteryParts`, `caseBatteryText`.
+Names: `headsetLabel`, `headsetGlyph`.

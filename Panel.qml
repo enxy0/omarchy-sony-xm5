@@ -1,7 +1,10 @@
 // Panel.qml
-// Bar button and popup panel for the Sony WH-1000XM5 (docs/ui-spec.md).
-// Logic lives in Model.js; state and commands in Service.qml. Helper
-// components are inline so the plugin stays a fixed set of files.
+// Bar button and popup panel for the Sony WH-1000XM5 headphones and
+// WF-1000XM5 earbuds (docs/ui-spec.md). The bar button follows the primary
+// headset; the popup shows one headset at a time, with a switcher row when
+// two or more are connected. Logic lives in Model.js; state and commands in
+// Service.qml. Helper components are inline so the plugin stays a fixed set
+// of files.
 pragma ComponentBehavior: Bound
 
 import QtQuick
@@ -129,6 +132,7 @@ Panel {
     id: pressRow
 
     property string label: ""
+    property real labelWidth: Style.space(80)
     property var options: []
     property var value: null
     property int cursorIndex: -1
@@ -145,7 +149,7 @@ Panel {
       anchors.left: parent.left
       anchors.leftMargin: Style.space(6)
       anchors.verticalCenter: parent.verticalCenter
-      width: Style.space(80)
+      width: pressRow.labelWidth
       textFormat: Text.PlainText
       text: pressRow.label
       color: Qt.darker(pressRow.foreground, 1.2)
@@ -383,6 +387,90 @@ Panel {
     }
   }
 
+  // One tab of the headset switcher: kind glyph, name, bar battery. Drawn as
+  // a bordered chip; the shown headset's tab is the selected chip.
+  component HeadsetTab: Button {
+    id: tab
+
+    property var tabData: null
+
+    bordered: true
+    selected: !!tabData && tabData.selected
+    horizontalPadding: Style.space(8)
+    verticalPadding: Style.space(6)
+
+    // Button reserves the widest border any of its states paints (normal,
+    // hover-cursor, selected for a bordered, non-focusable chip), so the
+    // content does not move when the state changes. Same reservation here,
+    // from the public Border API.
+    readonly property var _borderSpecs: [
+      Border.controlSpec("normal", foreground, accent),
+      Border.controlSpec("hover-cursor", foreground, accent),
+      Border.controlSpec("selected", foreground, accent)
+    ]
+    function _reserved(side) {
+      var w = 0
+      for (var i = 0; i < _borderSpecs.length; i++) w = Math.max(w, Border[side](_borderSpecs[i]))
+      return w
+    }
+    readonly property real insetLeft: horizontalPadding + _reserved("left")
+    readonly property real insetRight: horizontalPadding + _reserved("right")
+    readonly property real insetTop: verticalPadding + _reserved("top")
+    readonly property real insetBottom: verticalPadding + _reserved("bottom")
+
+    implicitHeight: tabContent.implicitHeight + insetTop + insetBottom
+
+    // Same text color as Button's own label: the selected-state color.
+    readonly property color contentColor: selected ? Style.selectedStateColor(foreground, accent) : foreground
+
+    Item {
+      id: tabContent
+      anchors.fill: parent
+      anchors.leftMargin: tab.insetLeft
+      anchors.rightMargin: tab.insetRight
+      anchors.topMargin: tab.insetTop
+      anchors.bottomMargin: tab.insetBottom
+      implicitHeight: Math.max(tabIcon.height, tabName.implicitHeight)
+
+      SonyIcon {
+        id: tabIcon
+        anchors.left: parent.left
+        anchors.verticalCenter: parent.verticalCenter
+        kind: tab.tabData ? tab.tabData.kind : Model.KIND_HEADPHONES
+        iconSize: Style.space(16)
+        fontFamily: tab.fontFamily
+        normalColor: tab.contentColor
+      }
+
+      Text {
+        id: tabName
+        anchors.left: tabIcon.right
+        anchors.leftMargin: Style.space(6)
+        anchors.right: tabBattery.left
+        anchors.rightMargin: Style.space(6)
+        anchors.verticalCenter: parent.verticalCenter
+        elide: Text.ElideRight
+        textFormat: Text.PlainText
+        text: tab.tabData ? tab.tabData.label : ""
+        color: tab.contentColor
+        font.family: tab.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        font.bold: tab.selected
+      }
+
+      Text {
+        id: tabBattery
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        textFormat: Text.PlainText
+        text: tab.tabData ? tab.tabData.battery + (tab.tabData.charging ? " " + Model.GLYPH_BOLT : "") : ""
+        color: tab.contentColor
+        font.family: tab.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+    }
+  }
+
   // Dim one-line hint under a control.
   component Caption: Text {
     property color foreground: Color.foreground
@@ -411,18 +499,48 @@ Panel {
     settings: root.settings
   }
 
-  readonly property var st: sony.status
+  // The headset the popup shows (ui-spec 8): kept for the shell session.
+  property var selectedId: null
+  // The bar button follows the primary headset.
+  readonly property var barSt: sony.status
+  // The popup follows the shown headset; every section reads `st`.
+  readonly property var st: Model.shownHeadset(sony.status, selectedId)
+  readonly property string shownId: st && st.id ? st.id : ""
   readonly property bool live: Model.isLive(st)
   readonly property bool reading: Model.isReading(st)
+  readonly property bool earbuds: Model.isEarbuds(st)
+  readonly property bool hasSwitcher: Model.switcherVisible(sony.status)
 
   // For read-only fields that have no cursor target (codec, device list).
   function shown(key, value) { return Model.isVisible(root.st, key, value) }
 
+  // "Applying…" and the error line belong to the shown headset only.
+  readonly property string commandErrorText: sony.errorFor(root.st.id)
   readonly property string statusLine: {
-    if (sony.commandError !== "") return sony.commandError
+    if (commandErrorText !== "") return commandErrorText
     if (reading) return "Reading headset settings…"
-    if (sony.busyVisible) return "Applying…"
+    if (sony.busyVisible && sony.busyFor(root.st.id)) return "Applying…"
     return ""
+  }
+
+  // Shows headset `id` (tab click, Enter on a tab, `[` / `]`).
+  function selectHeadset(id) {
+    if (id === null || id === undefined) return
+    selectedId = id
+  }
+
+  function stepHeadset(delta) {
+    selectHeadset(Model.stepHeadset(sony.status, root.shownId, delta))
+  }
+
+  // After the shown headset changes, the cursor goes to the switcher row.
+  onShownIdChanged: {
+    if (!cursorActive) return
+    var i = Model.headsetIndex(sony.status, shownId)
+    if (hasSwitcher && i >= 0) {
+      focusSection = Model.SWITCHER_TARGET
+      selectedIndex = i
+    }
   }
 
   // Collapsible sections; kept for the shell session.
@@ -452,15 +570,19 @@ Panel {
       persistSettings(Model.settingActivation(root.settings, id))
       return
     }
+    if (id === Model.SWITCHER_TARGET) {
+      selectHeadset(Model.switcherActivation(sony.status, i))
+      return
+    }
     var a = Model.targetActivation(st, id, i)
     if (!a) return
     if (a.expand) toggleExpanded(a.expand)
-    else sony.send(a.action, a.value)
+    else sony.send(a.action, a.value, root.st)
   }
 
   // Slider release on target `id`.
   function commit(id, value) {
-    if (enabledFor(id)) sony.send(Model.TARGETS[id].action, value)
+    if (enabledFor(id)) sony.send(Model.TARGETS[id].action, value, root.st)
   }
 
   // ---- cursor model (first-party recipe, logic in Model.js) ----------------
@@ -512,11 +634,12 @@ Panel {
 
   function adjustCursor(delta) {
     var a = Model.targetAdjustment(st, focusSection, selectedIndex, delta)
-    if (a) sony.sendDebounced(a.action, a.value)
+    if (a) sony.sendDebounced(a.action, a.value, root.st)
   }
 
   function cursorItem(id, index) {
     switch (id) {
+    case "switcher": return switcherRow
     case "noise": return noiseRow
     case "ambient": return ambientRow
     case "focusVoice": return focusVoiceToggle
@@ -541,6 +664,9 @@ Panel {
     case "quickAccessTriple": return quickAccessTripleRow
     case "earDetection": return earDetectionToggle
     case "touchPanel": return touchPanelToggle
+    case "touchFunctionLeft": return touchLeftRow
+    case "touchFunctionRight": return touchRightRow
+    case "sidetone": return sidetoneToggle
     case "multipointHeader": return multipointHeader
     case "multipoint": return multipointToggle
     case "devices": return deviceRepeater.itemAt(index)
@@ -563,6 +689,7 @@ Panel {
 
   onOpenedChanged: {
     if (opened) {
+      selectedId = Model.selectionOnOpen(sony.status, selectedId)
       cursorActive = false
       focusSection = ""
       selectedIndex = 0
@@ -603,7 +730,7 @@ Panel {
 
   // ---- bar button ----------------------------------------------------------
 
-  readonly property string barText: Model.barText(root.st, root.showPercentage, button.vertical)
+  readonly property string barText: Model.barText(root.barSt, root.showPercentage, button.vertical)
   // As Power does with its percentage: the open-panel dot spans what the
   // button paints, not a fraction of the wider slot.
   readonly property real openPanelIndicatorWidth: barText !== "" ? barContent.implicitWidth : 0
@@ -622,24 +749,29 @@ Panel {
       ? Style.bar.iconSlot
       : Math.max(Style.bar.iconSlot * 2,
                  Math.ceil(barContent.implicitWidth) + Style.bar.iconSlot - Style.bar.iconCanvas)
-    tooltipText: Model.barTooltip(root.st)
+    tooltipText: Model.barTooltip(root.barSt)
 
     readonly property color contentColor: button.active ? button.activeColor : button.foreground
 
+    // The row is exactly one optical canvas high and centered in the button,
+    // as BarIconButton places its canvas, so the glyph box sits where the
+    // Audio and Bluetooth glyph boxes sit. With the icon alone the row is
+    // that canvas.
     Row {
       id: barContent
       anchors.centerIn: parent
+      height: Style.bar.iconCanvas
       spacing: Style.space(4)
 
       SonyIcon {
         anchors.verticalCenter: parent.verticalCenter
-        // Vector icons in first-party bar buttons size themselves with
-        // Style.space (Tailscale 11, Dropbox 12); 14 gives this outline the
-        // painted height of the neighbouring glyphs.
-        iconSize: Style.space(14)
-        connected: root.live
-        batteryLevel: root.st.batteryLevel
-        charging: Model.isCharging(root.st)
+        kind: root.barSt.kind
+        boxSize: Style.bar.iconCanvas
+        iconSize: Style.bar.iconFont
+        fontFamily: button.fontFamily
+        connected: Model.isLive(root.barSt)
+        batteryLevel: Model.barBatteryLevel(root.barSt)
+        charging: Model.isCharging(root.barSt)
         // effectiveColor picks charging, low battery and disconnected tints.
         normalColor: button.contentColor
       }
@@ -657,9 +789,9 @@ Panel {
 
       Text {
         anchors.verticalCenter: parent.verticalCenter
-        visible: Model.barChargingHint(root.st, root.showPercentage, button.vertical)
+        visible: Model.barChargingHint(root.barSt, root.showPercentage, button.vertical)
         textFormat: Text.PlainText
-        text: "\u{F0241}"
+        text: Model.GLYPH_BOLT
         color: button.contentColor
         font.family: button.fontFamily
         font.pixelSize: Style.bar.iconFont
@@ -692,6 +824,11 @@ Panel {
       onMoveRequested: function(dx, dy) { root.moveCursor(dx, dy) }
       onActivateRequested: root.activateCursor()
       onTabRequested: function(direction) { root.switchPanel(direction) }
+      // `[` / `]`: previous or next headset, from any target.
+      onTextKey: function(text) {
+        if (text === "[") root.stepHeadset(-1)
+        else if (text === "]") root.stepHeadset(1)
+      }
 
       Flickable {
         id: panelFlick
@@ -709,18 +846,49 @@ Panel {
           width: panelFlick.width
           spacing: Style.space(12)
 
+          // -- headset switcher (two or more headsets) ------------------------
+          Row {
+            id: switcherRow
+            width: parent.width
+            visible: root.hasSwitcher
+            spacing: Style.space(6)
+
+            readonly property var tabs: Model.switcherTabs(sony.status, root.shownId)
+            readonly property real cellWidth: tabs.length > 0 ? (width - spacing * (tabs.length - 1)) / tabs.length : width
+
+            // An int model, as bandRepeater uses: a status write builds a new
+            // tabs array, and an array model would recreate every tab.
+            Repeater {
+              model: root.hasSwitcher ? Model.headsetCount(sony.status) : 0
+
+              HeadsetTab {
+                required property int index
+                width: switcherRow.cellWidth
+                tabData: switcherRow.tabs[index] || null
+                tooltipText: tabData ? tabData.id : ""
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                hasCursor: root.hasCursor(Model.SWITCHER_TARGET, index)
+                onClicked: root.activate(Model.SWITCHER_TARGET, index)
+                onHovered: function(h) { if (h) root.setCursor(Model.SWITCHER_TARGET, index) }
+              }
+            }
+          }
+
           // -- hero -----------------------------------------------------------
           Item {
             width: parent.width
-            implicitHeight: Math.max(heroIcon.height, heroLabels.implicitHeight, heroBattery.implicitHeight)
+            implicitHeight: Math.max(heroIcon.height, heroLabels.implicitHeight, heroBattery.implicitHeight, heroEarbuds.implicitHeight)
 
             SonyIcon {
               id: heroIcon
               anchors.left: parent.left
               anchors.verticalCenter: parent.verticalCenter
+              kind: root.st.kind
               iconSize: Style.space(28)
+              fontFamily: root.fontFamily
               connected: root.live
-              batteryLevel: root.st.batteryLevel
+              batteryLevel: Model.barBatteryLevel(root.st)
               charging: Model.isCharging(root.st)
             }
 
@@ -728,7 +896,7 @@ Panel {
               id: heroLabels
               anchors.left: heroIcon.right
               anchors.leftMargin: Style.space(12)
-              anchors.right: heroBattery.left
+              anchors.right: root.earbuds ? heroEarbuds.left : heroBattery.left
               anchors.rightMargin: Style.space(8)
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.space(2)
@@ -757,12 +925,13 @@ Panel {
               }
             }
 
+            // Headphones: one level and "Charging".
             Column {
               id: heroBattery
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.space(2)
-              visible: Model.showBattery(root.st)
+              visible: !root.earbuds && root.shownFor("battery")
 
               Row {
                 anchors.right: parent.right
@@ -771,7 +940,7 @@ Panel {
                 Text {
                   anchors.verticalCenter: parent.verticalCenter
                   textFormat: Text.PlainText
-                  text: Model.batteryIcon(root.st.batteryLevel, Model.isCharging(root.st))
+                  text: Model.batteryIcon(root.st.batteryLevel, root.st.batteryCharging === true)
                   color: root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.subtitle
@@ -798,6 +967,46 @@ Panel {
                 font.pixelSize: Style.font.caption
               }
             }
+
+            // Earbuds: "L 70%  R 65%" (a low side in the urgent color, a bolt
+            // after a charging side), then "Case 53%".
+            Column {
+              id: heroEarbuds
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(2)
+              visible: root.earbuds && (root.shownFor("batteryLr") || root.shownFor("batteryCase"))
+
+              Row {
+                anchors.right: parent.right
+                spacing: Style.space(10)
+                visible: root.shownFor("batteryLr")
+
+                Repeater {
+                  model: Model.earbudBatteryParts(root.st)
+
+                  Text {
+                    required property var modelData
+                    textFormat: Text.PlainText
+                    text: modelData.text + (modelData.charging ? " " + Model.GLYPH_BOLT : "")
+                    color: modelData.low ? root.urgent : root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.subtitle
+                    font.bold: true
+                  }
+                }
+              }
+
+              Text {
+                anchors.right: parent.right
+                visible: root.shownFor("batteryCase")
+                textFormat: Text.PlainText
+                text: Model.caseBatteryText(root.st) + (Model.caseCharging(root.st) ? " " + Model.GLYPH_BOLT : "")
+                color: Model.caseCharging(root.st) ? "#2ecc71" : Qt.darker(root.foreground, 1.4)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
           }
 
           // -- status line ----------------------------------------------------
@@ -807,7 +1016,7 @@ Panel {
             textFormat: Text.PlainText
             wrapMode: Text.WordWrap
             text: root.statusLine
-            color: sony.commandError !== "" ? root.urgent : Qt.darker(root.foreground, 1.5)
+            color: root.commandErrorText !== "" ? root.urgent : Qt.darker(root.foreground, 1.5)
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
           }
@@ -1389,7 +1598,7 @@ Panel {
               Column {
                 width: parent.width
                 spacing: Style.space(6)
-                visible: quickAccessDoubleRow.visible || quickAccessTripleRow.visible
+                visible: root.shownFor("quickAccessDouble") || root.shownFor("quickAccessTriple")
 
                 PanelSectionHeader {
                   text: "QUICK ACCESS"
@@ -1466,6 +1675,83 @@ Panel {
                 opacity: enabled ? 1 : root.disabledOpacity
                 onClicked: root.activate("touchPanel")
                 onHovered: function(h) { if (h) root.setCursor("touchPanel") }
+              }
+
+              // Earbud touch sensor presets: one chip row per earbud.
+              Column {
+                width: parent.width
+                spacing: Style.space(6)
+                // Bind to the targets, not to the rows' `visible`: a child of a
+                // hidden item reads as hidden, so that binding never recovers.
+                visible: root.shownFor("touchFunctionLeft") || root.shownFor("touchFunctionRight")
+
+                PanelSectionHeader {
+                  text: "TOUCH FUNCTIONS"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                PressRow {
+                  id: touchLeftRow
+                  width: parent.width
+                  label: "Left earbud"
+                  labelWidth: Style.space(76)
+                  visible: root.shownFor("touchFunctionLeft")
+                  enabled: root.enabledFor("touchFunctionLeft")
+                  opacity: enabled ? 1 : root.disabledOpacity
+                  options: root.choicesFor("touchFunctionLeft")
+                  value: root.st.touchFunctionLeft
+                  cursorIndex: root.cursorIndexFor("touchFunctionLeft")
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onPicked: function(i) { root.activate("touchFunctionLeft", i) }
+                  onHoveredIndex: function(i, h) { if (h) root.setCursor("touchFunctionLeft", i) }
+                }
+
+                PressRow {
+                  id: touchRightRow
+                  width: parent.width
+                  label: "Right earbud"
+                  labelWidth: Style.space(76)
+                  visible: root.shownFor("touchFunctionRight")
+                  enabled: root.enabledFor("touchFunctionRight")
+                  opacity: enabled ? 1 : root.disabledOpacity
+                  options: root.choicesFor("touchFunctionRight")
+                  value: root.st.touchFunctionRight
+                  cursorIndex: root.cursorIndexFor("touchFunctionRight")
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onPicked: function(i) { root.activate("touchFunctionRight", i) }
+                  onHoveredIndex: function(i, h) { if (h) root.setCursor("touchFunctionRight", i) }
+                }
+
+                Caption {
+                  text: "What a tap, double tap and hold on each earbud do."
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                Caption {
+                  text: Model.touchFunctionOtherText(root.st)
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+              }
+
+              Toggle {
+                id: sidetoneToggle
+                width: parent.width
+                visible: root.shownFor("sidetone")
+                label: "Hear your voice in calls"
+                description: "Plays your own voice in the earbuds during a call"
+                checked: root.st.sidetone === true
+                hasCursor: root.hasCursor("sidetone")
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                enabled: root.enabledFor("sidetone")
+                opacity: enabled ? 1 : root.disabledOpacity
+                onClicked: root.activate("sidetone")
+                onHovered: function(h) { if (h) root.setCursor("sidetone") }
               }
             }
           }
