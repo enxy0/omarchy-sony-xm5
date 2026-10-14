@@ -692,3 +692,12 @@ Run `sony-ctl probe` (see the contract) on a real XM5 to answer these:
 9. Does the XM5 advertise `F3` or `FE`, and which keys and presets does the
    assignable capability list?
 10. Does the XM5 answer the table 2 worn status `F2 00`?
+11. Does the XM5 ACK the multipoint write `D8 Dn 00 VV` before it sends the
+    alert `99 00 MT 01`, or does it hold the ACK until the host answers? The
+    daemon keeps rule 4 of section 1 (one unacknowledged data packet): the
+    answer `98 00 MT 01` waits until `D8` is ACKed or its retries run out.
+    Sending it earlier needs a seq the rules do not define: seq `S` reads as
+    a retransmit of `D8`, and seq `1 - S` is not yet expected. If the XM5
+    holds the ACK, `sony-ctl multipoint` returns `ERR device timeout` after
+    1.8 s, then the queued answer goes out and the toggle still applies. The
+    `recent_frames` of `sony-ctl probe` show which order the XM5 uses.

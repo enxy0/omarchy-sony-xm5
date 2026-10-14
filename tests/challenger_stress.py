@@ -25,7 +25,7 @@ import random
 
 DAEMON_BIN = os.environ.get(
     "DAEMON_BIN",
-    "/home/roykevin/Projects/omarchy-sony/build/daemon/sony-headphones-daemon"
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "build", "daemon", "sony-headphones-daemon")
 )
 
 def check_mode(path, expected_mode):
@@ -140,8 +140,8 @@ def test_rapid_concurrent_status(sbox):
 
                 # 2. Strict JSON validation
                 data = json.loads(trimmed)
-                if data.get("schema_version") != 1:
-                    errors.append(f"Worker {worker_id} query {i}: schema_version != 1")
+                if data.get("schema_version") != 2:
+                    errors.append(f"Worker {worker_id} query {i}: schema_version != 2")
                 if not data.get("connected"):
                     errors.append(f"Worker {worker_id} query {i}: connected is not True")
                 if not isinstance(data.get("battery_level"), int):
@@ -231,7 +231,7 @@ def test_atomic_file_updates_under_load(sbox):
         cmds = [
             "noise anc\n",
             "noise ambient\n",
-            "noise wind\n",
+            "noise off\n",
             "ambient-level 5\n",
             "ambient-level 18\n",
             "eq vocal\n",
@@ -493,7 +493,7 @@ def test_pipelined_mixed_commands(sbox):
 
     # Verify line 5: status (compact JSON)
     st5 = json.loads(lines[5])
-    if st5.get("schema_version") != 1:
+    if st5.get("schema_version") != 2:
         print(f"FAILED: Line 5 schema_version is invalid")
         return False
 

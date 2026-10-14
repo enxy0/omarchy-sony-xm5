@@ -56,7 +56,7 @@ section_header() {
 # ------------------------------------------------------------------------------
 # 1. Environment Sandbox Setup
 # ------------------------------------------------------------------------------
-SANDBOX_DIR=$(mktemp -d /tmp/omasony-e2e.XXXXXX)
+SANDBOX_DIR=$(mktemp -d "${SANDBOX_PARENT:-/tmp}/e2e.XXXXXX")
 export XDG_STATE_HOME="$SANDBOX_DIR/state"
 export XDG_RUNTIME_DIR="$SANDBOX_DIR/run"
 export XDG_CONFIG_HOME="$SANDBOX_DIR/config"
@@ -80,27 +80,33 @@ trap cleanup EXIT INT TERM
 # 2. Locate or Fall Back to CLI Binary
 # ------------------------------------------------------------------------------
 CLI_BIN=""
-if command -v sony-ctl >/dev/null 2>&1; then
-  CLI_BIN="sony-ctl"
-  CLI_TYPE="system binary ($(command -v sony-ctl))"
+if [[ -x "$REPO_ROOT/build/cli/sony-ctl" ]]; then
+  CLI_BIN="$REPO_ROOT/build/cli/sony-ctl"
+  CLI_TYPE="build binary ($CLI_BIN)"
 elif [[ -x "$REPO_ROOT/cli/build/sony-ctl" ]]; then
   CLI_BIN="$REPO_ROOT/cli/build/sony-ctl"
   CLI_TYPE="build binary ($CLI_BIN)"
-elif [[ -x "$REPO_ROOT/build/cli/sony-ctl" ]]; then
-  CLI_BIN="$REPO_ROOT/build/cli/sony-ctl"
-  CLI_TYPE="build binary ($CLI_BIN)"
-elif [[ -x "$HOME/.local/bin/sony-ctl" ]]; then
-  CLI_BIN="$HOME/.local/bin/sony-ctl"
-  CLI_TYPE="user bin ($CLI_BIN)"
+elif command -v sony-ctl >/dev/null 2>&1; then
+  CLI_BIN="sony-ctl"
+  CLI_TYPE="system binary ($(command -v sony-ctl))"
 else
   CLI_BIN="$SCRIPT_DIR/mock_sony_ctl.py"
   CLI_TYPE="built-in reference simulation client ($CLI_BIN)"
+fi
+
+DAEMON_BIN="${DAEMON_BIN:-$REPO_ROOT/build/daemon/sony-headphones-daemon}"
+if [[ -x "$DAEMON_BIN" ]]; then
+  DAEMON_TYPE="daemon binary with simulated headset ($DAEMON_BIN --mock)"
+else
+  DAEMON_BIN=""
+  DAEMON_TYPE="python mock daemon ($SCRIPT_DIR/mock_daemon.py)"
 fi
 
 echo -e "${BOLD}omarchy-sony End-to-End Simulation & Verification Test Suite${NC}"
 echo "Repository:  $REPO_ROOT"
 echo "Sandbox:     $SANDBOX_DIR"
 echo "CLI Driver:  $CLI_TYPE"
+echo "Daemon:      $DAEMON_TYPE"
 echo "Fixtures:    $FIXTURES_DIR"
 
 # Helper to run CLI with isolated socket
@@ -122,9 +128,15 @@ write_status_atomic() {
 start_daemon() {
   local ready_file="$SANDBOX_DIR/daemon_ready"
   rm -f "$ready_file"
-  python3 "$SCRIPT_DIR/mock_daemon.py" \
-    --state-dir "$XDG_STATE_HOME" \
-    --runtime-dir "$XDG_RUNTIME_DIR" > "$ready_file" 2>&1 &
+  if [[ -n "$DAEMON_BIN" ]]; then
+    "$DAEMON_BIN" --mock \
+      --state-dir "$XDG_STATE_HOME" \
+      --runtime-dir "$XDG_RUNTIME_DIR" > "$ready_file" 2>&1 &
+  else
+    python3 "$SCRIPT_DIR/mock_daemon.py" \
+      --state-dir "$XDG_STATE_HOME" \
+      --runtime-dir "$XDG_RUNTIME_DIR" > "$ready_file" 2>&1 &
+  fi
   DAEMON_PID=$!
   local max_wait=30
   local count=0
@@ -134,6 +146,20 @@ start_daemon() {
     if [[ $count -ge $max_wait ]]; then
       echo "Failed to start mock daemon within 3 seconds"
       cat "$ready_file" 2>/dev/null || true
+      exit 1
+    fi
+  done
+  wait_connected
+}
+
+wait_connected() {
+  local count=0
+  until jq -e '.connected == true and .supported != null' "$STATUS_FILE" >/dev/null 2>&1; do
+    sleep 0.1
+    count=$((count + 1))
+    if [[ $count -ge 30 ]]; then
+      echo "Daemon did not report a connected headset within 3 seconds"
+      cat "$STATUS_FILE" 2>/dev/null || true
       exit 1
     fi
   done
@@ -166,10 +192,10 @@ else
 fi
 
 # T1.D2: Atomic initial status.json generation
-if [[ -f "$STATUS_FILE" ]] && jq -e '.schema_version == 1 and .connected == true and .device_name == "WH-1000XM5"' "$STATUS_FILE" >/dev/null 2>&1; then
-  pass_test "T1.D2" "Daemon creates valid initial status.json matching schema_version 1"
+if [[ -f "$STATUS_FILE" ]] && jq -e '.schema_version == 2 and .connected == true and .device_name == "WH-1000XM5" and (.supported | type) == "object"' "$STATUS_FILE" >/dev/null 2>&1; then
+  pass_test "T1.D2" "Daemon creates valid initial status.json matching schema_version 2"
 else
-  fail_test "T1.D2" "status.json missing or does not match schema_version 1"
+  fail_test "T1.D2" "status.json missing or does not match schema_version 2" "$(cat "$STATUS_FILE" 2>/dev/null)"
 fi
 
 # T1.D3: File permissions security (0600 for status.json)
@@ -182,7 +208,7 @@ fi
 
 # T1.D4: Socket IPC status query
 status_out=$(run_cli status 2>/dev/null || true)
-if echo "$status_out" | jq -e '.schema_version == 1 and .device_name == "WH-1000XM5"' >/dev/null 2>&1; then
+if echo "$status_out" | jq -e '.schema_version == 2 and .device_name == "WH-1000XM5"' >/dev/null 2>&1; then
   pass_test "T1.D4" "Socket IPC responds to 'status' with valid JSON snapshot"
 else
   fail_test "T1.D4" "Socket IPC failed to respond to 'status'" "Got: $status_out"
@@ -234,15 +260,15 @@ fi
 # T1.D10: Disconnect state persistence
 kill -USR1 "$DAEMON_PID"
 sleep 0.2
-if jq -e '.schema_version == 1 and .connected == false' "$STATUS_FILE" >/dev/null 2>&1; then
-  pass_test "T1.D10" "Daemon writes connected:false payload on Bluetooth disconnect without unlinking"
+if jq -e '.schema_version == 2 and .connected == false and (keys | length) == 3' "$STATUS_FILE" >/dev/null 2>&1; then
+  pass_test "T1.D10" "Daemon writes the three-key connected:false payload on disconnect without unlinking"
 else
   fail_test "T1.D10" "status.json did not record connected:false on disconnect"
 fi
 
 # Reconnect for remaining tests
 kill -USR2 "$DAEMON_PID"
-sleep 0.2
+wait_connected
 
 # ------------------------------------------------------------------------------
 # Feature 1.2: CLI (sony-ctl) Features (>=5 test cases)
@@ -440,12 +466,14 @@ else
   fail_test "T2.B6" "Missing status_schema_too_new.json fixture"
 fi
 
-# T2.B7: Ambient sound level boundary values (0 and 20 exact, <0 and >20 boundary)
+# T2.B7: Ambient sound level boundary values (1 and 20 exact; 0, <1 and >20 rejected)
 set +e
-run_cli ambient-level 0 >/dev/null 2>&1
-c_zero=$?
+run_cli ambient-level 1 >/dev/null 2>&1
+c_one=$?
 run_cli ambient-level 20 >/dev/null 2>&1
 c_twenty=$?
+run_cli ambient-level 0 >/dev/null 2>&1
+c_zero=$?
 run_cli ambient-level -1 >/dev/null 2>&1
 c_under=$?
 run_cli ambient-level 21 >/dev/null 2>&1
@@ -453,10 +481,10 @@ c_over=$?
 run_cli ambient-level not_a_number >/dev/null 2>&1
 c_nan=$?
 set -e
-if [[ $c_zero -eq 0 && $c_twenty -eq 0 && $c_under -eq 1 && $c_over -eq 1 && $c_nan -eq 1 ]]; then
-  pass_test "T2.B7" "Ambient level boundary values [0, 20] accepted; out-of-range rejected with code 1"
+if [[ $c_one -eq 0 && $c_twenty -eq 0 && $c_zero -eq 1 && $c_under -eq 1 && $c_over -eq 1 && $c_nan -eq 1 ]]; then
+  pass_test "T2.B7" "Ambient level boundary values [1, 20] accepted; 0 and out-of-range rejected with code 1"
 else
-  fail_test "T2.B7" "Ambient level boundary check failed" "c0=$c_zero, c20=$c_twenty, c_under=$c_under, c_over=$c_over, c_nan=$c_nan"
+  fail_test "T2.B7" "Ambient level boundary check failed" "c1=$c_one, c20=$c_twenty, c0=$c_zero, c_under=$c_under, c_over=$c_over, c_nan=$c_nan"
 fi
 
 # T2.B8: Custom EQ bands boundary values ([-10, 10] exact, out-of-bounds rejected)
@@ -508,23 +536,26 @@ fi
 # ==============================================================================
 section_header "Tier 3: Cross-Feature Combinations & State Transitions"
 
-# T3.S1: Full Listening Mode Cycle (ANC -> Ambient -> Wind -> Off -> ANC)
+# T3.S1: Full Listening Mode Cycle (ANC -> Ambient 14 -> wind rejected -> Off -> ANC keeps level 14)
 run_cli noise anc >/dev/null 2>&1
 s1=$(jq -r '.noise_mode' "$STATUS_FILE")
 run_cli noise ambient >/dev/null 2>&1
 run_cli ambient-level 14 >/dev/null 2>&1
 s2=$(jq -r '.noise_mode + ":" + (.ambient_sound_level|tostring)' "$STATUS_FILE")
+set +e
 run_cli noise wind >/dev/null 2>&1
+c_wind=$?
+set -e
 s3=$(jq -r '.noise_mode + ":" + (.ambient_sound_level|tostring)' "$STATUS_FILE")
 run_cli noise off >/dev/null 2>&1
 s4=$(jq -r '.noise_mode' "$STATUS_FILE")
 run_cli noise anc >/dev/null 2>&1
-s5=$(jq -r '.noise_mode' "$STATUS_FILE")
+s5=$(jq -r '.noise_mode + ":" + (.ambient_sound_level|tostring)' "$STATUS_FILE")
 
-if [[ "$s1" == "anc" && "$s2" == "ambient:14" && "$s3" == "wind:0" && "$s4" == "off" && "$s5" == "anc" ]]; then
-  pass_test "T3.S1" "Complete Listening Mode Cycle (ANC -> Ambient 14 -> Wind 0 -> Off -> ANC)"
+if [[ "$s1" == "anc" && "$s2" == "ambient:14" && $c_wind -eq 1 && "$s3" == "ambient:14" && "$s4" == "off" && "$s5" == "anc:14" ]]; then
+  pass_test "T3.S1" "Listening mode cycle (ANC -> Ambient 14 -> 'wind' rejected -> Off -> ANC keeps level 14)"
 else
-  fail_test "T3.S1" "Listening mode cycle mismatch: s1=$s1, s2=$s2, s3=$s3, s4=$s4, s5=$s5"
+  fail_test "T3.S1" "Listening mode cycle mismatch: s1=$s1, s2=$s2, wind_code=$c_wind, s3=$s3, s4=$s4, s5=$s5"
 fi
 
 # T3.S2: Connection State Transition Cycle (Disconnected -> Connected -> Disconnected -> Reconnected)
@@ -617,7 +648,7 @@ stress_reader() {
     local content
     content=$(cat "$STATUS_FILE" 2>/dev/null || true)
     if [[ -n "$content" ]]; then
-      if ! echo "$content" | jq -e '.schema_version == 1' >/dev/null 2>&1; then
+      if ! echo "$content" | jq -e '.schema_version == 2' >/dev/null 2>&1; then
         echo "Torn read detected in stress reader!" >> "$SANDBOX_DIR/stress_err.log"
       fi
     fi
@@ -632,7 +663,7 @@ READER_PID=$!
 
 # Execute 50 rapid atomic status writes
 for i in {1..50}; do
-  write_status_atomic "{\"schema_version\": 1, \"connected\": true, \"device_name\": \"WH-1000XM5\", \"battery_level\": $((i % 100)), \"last_updated\": $i}"
+  write_status_atomic "{\"schema_version\": 2, \"connected\": true, \"device_name\": \"WH-1000XM5\", \"battery_level\": $((i % 100)), \"last_updated\": $i}"
   usleep 2000 2>/dev/null || sleep 0.005
 done
 

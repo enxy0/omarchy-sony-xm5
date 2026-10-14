@@ -75,7 +75,8 @@ the daemon. The CLI socket timeout is 2 s.
 
 v1 keys keep their v1 name and meaning. New in v2: they may be `null`
 (v1 daemons wrote invented defaults such as `codec: "LDAC"`; v2 daemons must
-not).
+not). An option list (`eq_presets`, `button_functions`) is never `[]`: when
+no reported value maps to a contract value, the daemon writes `null`.
 
 **Identity**
 

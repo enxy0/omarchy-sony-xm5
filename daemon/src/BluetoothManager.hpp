@@ -178,6 +178,7 @@ public:
     void start();
     void stop();
     void disconnect();
+    void reconnect(const std::string& reason);
 
     // Packet transmission
     bool sendPacket(const uint8_t* data, size_t length);
