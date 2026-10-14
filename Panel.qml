@@ -398,15 +398,38 @@ Panel {
     selected: !!tabData && tabData.selected
     horizontalPadding: Style.space(8)
     verticalPadding: Style.space(6)
-    implicitHeight: tabContent.implicitHeight + verticalPadding * 2
 
-    readonly property color contentColor: selected ? tab._selectedColor : foreground
+    // Button reserves the widest border any of its states paints (normal,
+    // hover-cursor, selected for a bordered, non-focusable chip), so the
+    // content does not move when the state changes. Same reservation here,
+    // from the public Border API.
+    readonly property var _borderSpecs: [
+      Border.controlSpec("normal", foreground, accent),
+      Border.controlSpec("hover-cursor", foreground, accent),
+      Border.controlSpec("selected", foreground, accent)
+    ]
+    function _reserved(side) {
+      var w = 0
+      for (var i = 0; i < _borderSpecs.length; i++) w = Math.max(w, Border[side](_borderSpecs[i]))
+      return w
+    }
+    readonly property real insetLeft: horizontalPadding + _reserved("left")
+    readonly property real insetRight: horizontalPadding + _reserved("right")
+    readonly property real insetTop: verticalPadding + _reserved("top")
+    readonly property real insetBottom: verticalPadding + _reserved("bottom")
+
+    implicitHeight: tabContent.implicitHeight + insetTop + insetBottom
+
+    // Same text color as Button's own label: the selected-state color.
+    readonly property color contentColor: selected ? Style.selectedStateColor(foreground, accent) : foreground
 
     Item {
       id: tabContent
       anchors.fill: parent
-      anchors.leftMargin: tab.horizontalPadding
-      anchors.rightMargin: tab.horizontalPadding
+      anchors.leftMargin: tab.insetLeft
+      anchors.rightMargin: tab.insetRight
+      anchors.topMargin: tab.insetTop
+      anchors.bottomMargin: tab.insetBottom
       implicitHeight: Math.max(tabIcon.height, tabName.implicitHeight)
 
       SonyIcon {
@@ -833,15 +856,16 @@ Panel {
             readonly property var tabs: Model.switcherTabs(sony.status, root.shownId)
             readonly property real cellWidth: tabs.length > 0 ? (width - spacing * (tabs.length - 1)) / tabs.length : width
 
+            // An int model, as bandRepeater uses: a status write builds a new
+            // tabs array, and an array model would recreate every tab.
             Repeater {
-              model: switcherRow.tabs
+              model: root.hasSwitcher ? Model.headsetCount(sony.status) : 0
 
               HeadsetTab {
-                required property var modelData
                 required property int index
                 width: switcherRow.cellWidth
-                tabData: modelData
-                tooltipText: modelData.id
+                tabData: switcherRow.tabs[index] || null
+                tooltipText: tabData ? tabData.id : ""
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 hasCursor: root.hasCursor(Model.SWITCHER_TARGET, index)
