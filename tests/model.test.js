@@ -514,8 +514,15 @@ suite("Suite 19: Display Formatters & Helpers", () => {
   check("formatBattery(-1)", Model.formatBattery(-1), "—");
   check("levelFraction(78)", Model.levelFraction(78), 0.78);
   check("levelFraction(-1)", Model.levelFraction(-1), 0.0);
-  check("batteryIcon charging", typeof Model.batteryIcon(50, true), "string");
-  check("batteryIcon unknown", Model.batteryIcon(null, false), Model.batteryIcon(-1, false));
+  check("batteryIcon charging", Model.batteryIcon(50, true), "\u{F0084}");
+  check("batteryIcon unknown", [Model.batteryIcon(null, false), Model.batteryIcon(-1, false)], ["\u{F0091}", "\u{F0091}"]);
+  check("batteryIcon levels", [100, 90, 80, 70, 60, 50, 40, 30, 20, 10, 4].map((l) => Model.batteryIcon(l, false).codePointAt(0).toString(16)),
+    ["f0079", "f0082", "f0081", "f0080", "f007f", "f007e", "f007d", "f007c", "f007b", "f007a", "f008e"]);
+  // Codepoints pinned against the JetBrainsMono Nerd Font names.
+  check("noiseModeIcon codepoints", ["anc", "ambient", "wind", "off", null].map((m) => Model.noiseModeIcon(m).codePointAt(0).toString(16)),
+    ["f0a45", "f07c5", "f059d", "f07ce", "f0a45"]);
+  check("headset and bolt glyphs", [Model.GLYPH_HEADPHONES, Model.GLYPH_EARBUDS, Model.GLYPH_BOLT].map((g) => g.codePointAt(0).toString(16)),
+    ["f02cb", "f184f", "f0241"]);
   check("cycleNoiseMode", ["anc", "ambient", "off", "wind", null].map(Model.cycleNoiseMode), ["ambient", "off", "anc", "anc", "anc"]);
   const elided = Model.elideError("Error: " + "a".repeat(200));
   check("elideError length <= 140", elided.length <= 140, true);

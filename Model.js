@@ -1107,13 +1107,14 @@ function noiseModeLabel(mode) {
   }
 }
 
+// Material Design glyphs (names from the Nerd Font).
 function noiseModeIcon(mode) {
   switch (mode) {
-    case NOISE_ANC: return "󰍋";
-    case NOISE_AMBIENT: return "󰈦";
-    case NOISE_WIND: return "󰒚";
-    case NOISE_OFF: return "󰍌";
-    default: return "󰍋";
+    case NOISE_ANC: return "\u{F0A45}";     // md-ear_hearing_off
+    case NOISE_AMBIENT: return "\u{F07C5}"; // md-ear_hearing
+    case NOISE_WIND: return "\u{F059D}";    // md-weather_windy
+    case NOISE_OFF: return "\u{F07CE}";     // md-headphones_off
+    default: return "\u{F0A45}";
   }
 }
 
@@ -1337,19 +1338,21 @@ function levelFraction(level) {
   return Math.max(0.0, Math.min(1.0, level / 100.0));
 }
 
+// Material Design battery glyphs (names from the Nerd Font).
 function batteryIcon(level, charging) {
-  if (charging) return "󰂄";
-  if (level === null || level === undefined || level < 0) return "󰂃";
-  if (level >= 95) return "󰁹";
-  if (level >= 85) return "󰂂";
-  if (level >= 75) return "󰂁";
-  if (level >= 65) return "󰂀";
-  if (level >= 55) return "󰁿";
-  if (level >= 45) return "󰁾";
-  if (level >= 35) return "󰁽";
-  if (level >= 25) return "󰁼";
-  if (level >= 15) return "󰁻";
-  return "󰂎";
+  if (charging) return "\u{F0084}";                                    // md-battery_charging
+  if (level === null || level === undefined || level < 0) return "\u{F0091}"; // md-battery_unknown
+  if (level >= 95) return "\u{F0079}";                                 // md-battery
+  if (level >= 85) return "\u{F0082}";                                 // md-battery_90
+  if (level >= 75) return "\u{F0081}";                                 // md-battery_80
+  if (level >= 65) return "\u{F0080}";                                 // md-battery_70
+  if (level >= 55) return "\u{F007F}";                                 // md-battery_60
+  if (level >= 45) return "\u{F007E}";                                 // md-battery_50
+  if (level >= 35) return "\u{F007D}";                                 // md-battery_40
+  if (level >= 25) return "\u{F007C}";                                 // md-battery_30
+  if (level >= 15) return "\u{F007B}";                                 // md-battery_20
+  if (level >= 5) return "\u{F007A}";                                  // md-battery_10
+  return "\u{F008E}";                                                  // md-battery_outline
 }
 
 function deviceTitle(status) {
