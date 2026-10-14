@@ -25,29 +25,15 @@ repository root, so a new QML file there needs no change in `setup`.
 
 | Item | Content |
 |---|---|
-| Size | `BarIconButton`, as the first-party icon widgets (Audio, Bluetooth, Agents): `Style.bar.iconSlot` along the bar, the bar thickness across it. With the percentage: two icon slots, as Power, wider only when the text needs it |
+| Size | `BarIconButton`, as the first-party icon widgets (Audio, Bluetooth, Agents): `Style.bar.iconSlot` along the bar, the bar thickness across it. Icon only, no text |
 | Headset | The `primary` headset (contract 2.4). The popup's selected tab does not change the bar button |
-| Icon | `SonyIcon` with `kind` from the primary headset: the headphones glyph (U+F02CB) for `headphones`, the earbuds glyph (U+F184F) for `earbuds`; the headphones glyph when disconnected. Box `Style.bar.iconCanvas`, glyph at `Style.bar.iconFont`, as `BarIconButton` draws a glyph. Dim (alpha 0.45, the value of first-party `WidgetButton.dimmed`) when disconnected or in an error state, green while the bar charging value is `true`, urgent when the bar battery is below 20 %. The tints work in both display modes |
-| Vertical position | The glyph sits on the same vertical center as the first-party glyph icons (Audio, Bluetooth) next to it. The old vector outline painted from about 0.12 to 0.92 of its box and sat about 1 px (at scale 1.25) below its neighbours. `SonyIcon` now paints the font glyph through `OpticalGlyph`, the component `BarIconButton` uses, in a box of `Style.bar.iconCanvas`; the bar row is exactly that box high and centered in the button, as `BarIconButton` centers its canvas. Both Material Design glyphs have their ink centered on the same line as the neighbours' glyphs. Measured at scale 1.25: painted center within 0.1 px of the Audio and Bluetooth glyph centers |
-| Text | Only when the `showPercentage` setting is on and the bar is horizontal (Power does the same). The **bar battery** of the primary headset (contract 3.3: `battery_level` for headphones, the lower earbud for earbuds) as `80%` at `Style.bar.iconFont`; `—` when unknown or disconnected; hidden when the primary headset has neither `supported.battery` nor `supported.battery_lr` |
-| Charging hint | a bolt glyph after the percentage while the bar charging value is `true`; only with the text |
+| Icon | `SonyIcon` with `kind` from the primary headset: the headphones glyph (U+F02CB) for `headphones`, the earbuds glyph (U+F184F) for `earbuds`; the headphones glyph when disconnected. Box `Style.bar.iconCanvas`, glyph at `Style.bar.iconFont`, as `BarIconButton` draws a glyph. The normal foreground colour in every state, also when disconnected or in an error state (first-party icon widgets do the same); green while the bar charging value is `true`, urgent when the bar battery is below 20 % |
+| Vertical position | The glyph sits on the same vertical center as the first-party glyph icons (Audio, Bluetooth) next to it. The old vector outline painted from about 0.12 to 0.92 of its box and sat about 1 px (at scale 1.25) below its neighbours. `SonyIcon` now paints the font glyph through `OpticalGlyph`, the component `BarIconButton` uses, in a box of `Style.bar.iconCanvas`; the icon is exactly that box and centered in the button, as `BarIconButton` centers its canvas. Both Material Design glyphs have their ink centered on the same line as the neighbours' glyphs. Measured at scale 1.25: painted center within 0.1 px of the Audio and Bluetooth glyph centers |
 | Tooltip, one headset | line 1 `device_name`; line 2 noise mode name and codec (`Noise Cancelling · LDAC`); line 3 battery: headphones `Battery 80% (charging)`, earbuds `Battery L 70% · R 65% · case 53%` (each `—` when `null`; `case` part omitted when `battery_case` is unsupported; `(charging)` after a part whose charging flag is `true`) |
 | Tooltip, two or more headsets | one line per headset in `headsets` order: `device_name: noise mode · battery`, for example `WH-1000XM5: Noise Cancelling · 80%` and `WF-1000XM5: Ambient Sound · L 70% R 65% case 53%`. The primary headset's line ends with ` (bar)` |
 | Tooltip, other states | Disconnected: `Sony headphones: disconnected`. Initializing (one headset, `supported: null`): `<device_name>: reading headset settings…`; with two or more headsets an initializing entry has that line. Error states: the error text |
 | Left click | open or close the popup |
 | Right click | cycle the noise mode ANC → Ambient → Off (`noise`) on the **primary** headset, with `--headset <primary id>`. Ignored unless that headset's noise control is enabled (section 4) |
-
-### Display setting
-
-`showPercentage` (boolean, default `false`: icon only) is an inline field of
-the widget's entry in `~/.config/omarchy/shell.json`, the store Omarchy uses
-for every widget setting. `manifest.json` declares it in `barWidget.defaults`
-and `barWidget.schema`. Omarchy has no settings screen for bar widgets, so the
-user changes it with the popup toggle (section 2) or with
-`omarchy bar set io.github.androydified.omasony showPercentage true --json`.
-The popup writes through `bar.shell.updateEntryInline`, as Power and Clock do.
-`Model.showBarPercentage` also reads the strings `true`/`false`/`on`/`off`,
-because `omarchy bar set` without `--json` stores a string.
 
 ## 2. Popup layout
 
@@ -81,7 +67,6 @@ Sections use the existing style: `PanelSectionHeader` titles,
 │ HEADSET                        Vol 12    ▸    │  collapsible, closed
 │ MULTIPOINT                     Off       ▸    │  collapsible, closed
 │ ──────────────────────────────────────────── │
-│ Battery percentage in the bar         [off]   │  always shown
 │ WH-1000XM5 · firmware 2.3.1 · AC:80:…         │  info footer
 │ Limited: headset did not report its features  │  fallback only
 └──────────────────────────────────────────────┘
@@ -169,7 +154,6 @@ after a 400 ms pause.
 | Hero | Codec and the worn text in the meta line (section 2, earbuds hero) | `codec`, `worn`, `worn_left`, `worn_right` | none | `codec`, `worn` |
 | Hero | Battery: headphones level, or earbuds L / R and case (section 2) | `battery_level` or `battery_left`, `battery_right`, `battery_case` and their charging flags | none | `battery`, `battery_lr`, `battery_case` |
 | Switcher | one tab per headset, only with two or more | `headsets[].id`, `kind`, `device_name`, bar battery | none (UI state) | none |
-| Footer | Battery percentage in the bar toggle; shown in every state, also disconnected | widget setting `showPercentage` | none (writes shell.json) | none |
 | Info footer | `model_name`, `firmware_version`, `address` of the shown headset; fallback hint | identity, `supported_source` | none | none |
 
 A section is hidden when all of its controls are hidden.
@@ -267,10 +251,9 @@ header, volume, voice guidance, guidance volume, auto power off, NC/AMB
 cycle, button function, Quick Access double tap, triple tap, pause when
 taken off, touch controls, left earbud touch function, right earbud touch
 function, hear your voice in calls, Multipoint header, toggle,
-device rows, the bar percentage toggle. Hidden controls have no target;
-disabled controls keep their target but ignore activation. The bar
-percentage toggle is the only target while the headset is disconnected. The
-panel scrolls to keep the cursor visible.
+device rows. Hidden controls have no target; disabled controls keep their
+target but ignore activation. There is no target while the headset is
+disconnected. The panel scrolls to keep the cursor visible.
 
 ## 7. Contract readings (safe choices)
 

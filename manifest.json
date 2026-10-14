@@ -17,18 +17,6 @@
     "description": "Sony WH-1000XM5 Headphone Manager",
     "category": "Audio",
     "allowMultiple": false,
-    "defaultSection": "right",
-    "defaults": {
-      "showPercentage": false
-    },
-    "schema": [
-      {
-        "key": "showPercentage",
-        "type": "boolean",
-        "label": "Show battery percentage",
-        "description": "Off shows only the headphone icon. The tooltip still shows the battery level, and the icon still turns green while charging and red below 20 %.",
-        "defaultValue": false
-      }
-    ]
+    "defaultSection": "right"
   }
 }

@@ -158,7 +158,6 @@ suite("Suite 4: Disconnected State", () => {
     check(`${f}: noise mode null`, r.noiseMode, null);
     check(`${f}: every control hidden`, Model.FEATURE_KEYS.every((k) => Model.controlState(r, k, true) === "hidden"), true);
     check(`${f}: no cursor targets`, Model.cursorSections(r, { sound: true }), []);
-    check(`${f}: bar text`, Model.barBatteryText(r), "—");
     check(`${f}: tooltip`, Model.barTooltip(r), "Sony headphones: disconnected");
     check(`${f}: hero meta`, Model.heroMeta(r), "Disconnected");
   }
@@ -224,7 +223,6 @@ suite("Suite 6: v2 Full Fixture", () => {
     ["multipoint", s.multipoint], ["devices", s.devices]
   ].every(([k, v]) => Model.controlState(s, k, v) === "enabled"), true);
   check("All sections visible", ["noise", "sound", "customEq", "speakToChat", "headset", "multipoint"].map((n) => Model.sectionVisible(s, n)), [true, true, true, true, true, true]);
-  check("Bar text", Model.barBatteryText(s), "80%");
   check("Tooltip", Model.barTooltip(s), "WH-1000XM5\nAmbient Sound · LDAC\nBattery 80%");
   check("Hero meta", Model.heroMeta(s), "Connected · LDAC · On head");
   check("Footer", Model.footerLines(s), ["WH-1000XM5 · firmware 2.3.1 · AC:80:0A:12:34:56", "Old daemon (status schema 2)"]);
@@ -295,14 +293,13 @@ suite("Suite 9: v2 Initializing Fixture", () => {
   check("supported null", [s.supported, s.supportedSource], [null, null]);
   check("Every control disabled", Model.FEATURE_KEYS.every((k) => Model.controlState(s, k, "x") === "disabled"), true);
   check("Every section visible", ["noise", "sound", "customEq", "speakToChat", "headset", "multipoint"].every((n) => Model.sectionVisible(s, n)), true);
-  check("Bar text unknown battery", Model.barBatteryText(s), "—");
   check("Tooltip", Model.barTooltip(s), "WH-1000XM5: reading headset settings…");
   check("Hero meta", Model.heroMeta(s), "Reading settings");
   check("Commands refused", Model.buildCommand("noise", "anc", s), { error: "Reading headset settings…" });
   check("Cursor still lists headers", ids(Model.cursorSections(s, {})),
     ["noise", "ambient", "focusVoice", "sound", "customEq", "speakToChatHeader", "headset", "multipointHeader"]);
   const known = parse({ schema_version: 2, connected: true, supported: null, battery_level: 40, device_name: "x" });
-  check("Battery shown while reading", Model.barBatteryText(known), "40%");
+  check("Battery shown while reading", Model.barBatteryLevel(known), 40);
 });
 
 suite("Suite 10: v2 Fallback Fixture", () => {
@@ -329,7 +326,6 @@ suite("Suite 11: supported false nulls its fields", () => {
   check("Battery kept", s.batteryLevel, 50);
   check("Missing supported keys read as false", s.supported.devices, false);
   const noBattery = parse({ schema_version: 2, connected: true, supported: { battery: false }, battery_level: 50 });
-  check("Battery hidden: empty bar text", Model.barBatteryText(noBattery), "");
   check("Battery hidden: no battery line", Model.barTooltip(noBattery), "WH-1000XM5");
 });
 
@@ -604,47 +600,12 @@ suite("Suite 23: Target Table", () => {
   check("Minimal: headers hidden", Model.targetState(Model.parseStatus(fixture("status_v2_minimal.json")), "headset"), "hidden");
 });
 
-suite("Suite 24: Bar Display Setting", () => {
+suite("Suite 24: Bar Icon", () => {
   const s = full();
   const charging = Object.assign({}, s, { batteryCharging: true });
-  const off = Model.parseStatus(fixture("status_v2_disconnected.json"));
-  check("Default is icon only", [Model.showBarPercentage({}), Model.showBarPercentage(null), Model.showBarPercentage(undefined)], [false, false, false]);
-  check("Boolean values", [Model.showBarPercentage({ showPercentage: false }), Model.showBarPercentage({ showPercentage: true })], [false, true]);
-  check("Strings from omarchy bar set", ["false", "False", " off ", "0", "no", "true", "on", "1", "yes"].map((v) => Model.showBarPercentage({ showPercentage: v })),
-    [false, false, false, false, false, true, true, true, true]);
-  check("Numbers", [Model.showBarPercentage({ showPercentage: 0 }), Model.showBarPercentage({ showPercentage: 1 })], [false, true]);
-  check("Unreadable value falls back to the default", [Model.showBarPercentage({ showPercentage: "maybe" }), Model.showBarPercentage({ showPercentage: null })], [false, false]);
-
-  check("Percentage mode text", Model.barText(s, true, false), "80%");
-  check("Icon-only mode has no text", Model.barText(s, false, false), "");
-  check("Vertical bar has no text", Model.barText(s, true, true), "");
-  check("Disconnected percentage mode shows a dash", Model.barText(off, true, false), "—");
-  check("Bolt with the percentage while charging", Model.barChargingHint(charging, true, false), true);
-  check("No bolt in icon-only mode", Model.barChargingHint(charging, false, false), false);
-  check("No bolt on a vertical bar", Model.barChargingHint(charging, true, true), false);
-  check("No bolt while not charging", Model.barChargingHint(s, true, false), false);
-  // Icon-only mode keeps the battery in the tooltip and the icon tint inputs.
   check("Tooltip keeps the battery", Model.barTooltip(charging).split("\n").pop(), "Battery 80% (charging)");
   check("Charging state for the icon tint", Model.isCharging(charging), true);
-
-  check("Entry keeps other fields and puts id first",
-    JSON.stringify(Model.settingsEntry("io.github.androydified.omasony", { id: "x", statusPath: "/tmp/s.json" }, { showPercentage: true })),
-    JSON.stringify({ id: "io.github.androydified.omasony", statusPath: "/tmp/s.json", showPercentage: true }));
-  check("Entry ignores an id in the new values", Model.settingsEntry("a", null, { id: "b", showPercentage: true }), { id: "a", showPercentage: true });
-
-  check("Setting target", [Model.isSettingTarget("barPercentage"), Model.isSettingTarget("dsee"), Model.isSettingTarget("toString")], [true, false, false]);
-  check("Activation flips the default", Model.settingActivation({}, "barPercentage"), { showPercentage: true });
-  check("Activation flips a string value", Model.settingActivation({ showPercentage: "true" }, "barPercentage"), { showPercentage: false });
-  check("Activation of an unknown target", Model.settingActivation({}, "dsee"), null);
-
-  check("Popup cursor ends with the setting", ids(Model.panelCursorSections(s, {})).slice(-2), ["multipointHeader", "barPercentage"]);
-  check("Status cursor list is unchanged", ids(Model.cursorSections(s, {})).includes("barPercentage"), false);
-  check("Setting reachable while disconnected", Model.panelCursorSections(off, {}), [{ id: "barPercentage", kind: "single", count: 1 }]);
-  check("Setting reachable without a status file", ids(Model.panelCursorSections(Model.parseStatus(""), {})), ["barPercentage"]);
-  const down = Model.cursorMove({ section: "multipointHeader", index: 0 }, 0, 1, Model.panelCursorSections(s, {}));
-  check("Cursor moves from the last section to the setting", [down.section, down.index, down.action], ["barPercentage", 0, null]);
-  const side = Model.cursorMove({ section: "barPercentage", index: 0 }, 1, 0, Model.panelCursorSections(s, {}));
-  check("h/l on the setting does nothing", [side.section, side.action], ["barPercentage", null]);
+  check("Popup cursor ends with the multipoint header", ids(Model.panelCursorSections(s, {})).slice(-1), ["multipointHeader"]);
 });
 
 suite("Suite 25: Touch Panel and Quick Access", () => {
@@ -730,7 +691,6 @@ suite("Suite 26: v3 WH-1000XM5 Fixture", () => {
   check("Headphones battery", [s.batteryLevel, s.batteryCharging, Model.barBattery(s), Model.barCharging(s)], [53, false, 53, false]);
   check("Earbuds fields null", [s.batteryLeft, s.batteryRight, s.batteryCase, s.wornLeft, s.touchFunctionLeft, s.sidetone], [null, null, null, null, null, null]);
   check("v3 keys", [s.supported.battery_lr, s.supported.battery_case, s.supported.touch_function, s.supported.sidetone], [false, false, false, false]);
-  check("Bar text", Model.barText(s, true, false), "53%");
   check("Tooltip", Model.barTooltip(s), "WH-1000XM5\nOff · LDAC\nBattery 53%");
   check("Hero meta: worn unsupported", Model.heroMeta(s), "Connected · LDAC");
   check("Footer: no old-daemon line", Model.footerLines(s), ["WH-1000XM5 · firmware 2.5.1 · AC:80:0A:12:34:56"]);
@@ -757,8 +717,8 @@ suite("Suite 27: v3 WF-1000XM5 Fixture", () => {
   check("Earbuds battery", [s.batteryLeft, s.batteryLeftCharging, s.batteryRight, s.batteryRightCharging, s.batteryCase, s.batteryCaseCharging],
     [70, false, 65, false, 53, false]);
   check("Headphones battery unsupported", [s.batteryLevel, s.batteryCharging, s.supported.battery], [-1, null, false]);
-  check("Bar battery is the lower earbud", [Model.barBattery(s), Model.barBatteryText(s), Model.barText(s, true, false)], [65, "65%", "65%"]);
-  check("Bar not charging", [Model.barCharging(s), Model.isCharging(s), Model.barChargingHint(s, true, false)], [false, false, false]);
+  check("Bar battery is the lower earbud", [Model.barBattery(s), Model.barBatteryLevel(s)], [65, 65]);
+  check("Bar not charging", [Model.barCharging(s), Model.isCharging(s)], [false, false]);
   check("Icon tint input", Model.barBatteryLevel(s), 65);
   check("Worn per side", [s.worn, s.wornLeft, s.wornRight], [true, true, true]);
   check("Hero meta", Model.heroMeta(s), "Connected · LDAC · In ears");
@@ -819,7 +779,7 @@ suite("Suite 28: v3 Both Headsets", () => {
   const s = v3("status_v3_both.json");
   check("Order kept, headphones first", s.headsets.map((h) => [h.id, h.kind]), [[WH, "headphones"], [WF, "earbuds"]]);
   check("parseStatus gives the primary view", [s.primary, s.id, s.kind, s.connected], [WF, WF, "earbuds", true]);
-  check("Bar follows the primary", [Model.barBatteryText(s), Model.headsetGlyph(s.kind)], ["65%", "\u{F184F}"]);
+  check("Bar follows the primary", [Model.barBatteryLevel(s), Model.headsetGlyph(s.kind)], [65, "\u{F184F}"]);
   check("Tooltip, one line per headset", Model.barTooltip(s),
     "WH-1000XM5: Off · 53%\nWF-1000XM5: Off · L 70% R 65% case 53% (bar)");
   check("Switcher visible", [Model.switcherVisible(s), Model.headsetCount(s)], [true, 2]);
@@ -894,7 +854,7 @@ suite("Suite 29: v3 Initializing and Disconnected Fixtures", () => {
   check("Commands refused", Model.buildCommand("sidetone", true, s), { error: "Reading headset settings…" });
   check("Tooltip", Model.barTooltip(s), "WF-1000XM5: reading headset settings…");
   check("Hero meta", Model.heroMeta(s), "Reading settings");
-  check("Bar text unknown", [Model.barText(s, true, false), Model.barBatteryLevel(s)], ["—", -1]);
+  check("Bar battery level unknown", Model.barBatteryLevel(s), -1);
   check("Footer without identity", Model.footerLines(s), ["AC:80:0A:65:43:21"]);
   const both = rawFixture("status_v3_both.json");
   both.headsets[0] = rawFixture("status_v3_initializing.json").headsets[0];
@@ -909,7 +869,7 @@ suite("Suite 29: v3 Initializing and Disconnected Fixtures", () => {
   const off = v3("status_v3_disconnected.json");
   check("Disconnected", [off.ok, off.connected, off.headsets, off.primary, off.id], [true, false, [], null, null]);
   check("No controls, no switcher", [Model.cursorSections(off, { headset: true }), Model.switcherVisible(off)], [[], false]);
-  check("Only the bar setting", ids(Model.panelCursorSections(off, {})), ["barPercentage"]);
+  check("No cursor sections", ids(Model.panelCursorSections(off, {})), []);
   check("Headphones glyph when disconnected", Model.headsetGlyph(off.kind), "\u{F02CB}");
   check("Tooltip", Model.barTooltip(off), "Sony headphones: disconnected");
   check("Hero", [Model.heroMeta(off), Model.deviceTitle(off), Model.emptyStateText(off).includes("Bluetooth")], ["Disconnected", "Sony headset", true]);
@@ -953,13 +913,13 @@ suite("Suite 30: v3 Defensive Reading", () => {
   const wf = v3("status_v3_wf.json");
   const charging = Object.assign({}, wf, { batteryLeftCharging: true, batteryRightCharging: true, batteryCaseCharging: true });
   check("Earbuds charging tooltip", Model.barTooltip(charging).split("\n")[2], "Battery L 70% (charging) · R 65% (charging) · case 53% (charging)");
-  check("Earbuds bolt and tint", [Model.isCharging(charging), Model.barChargingHint(charging, true, false), Model.caseCharging(charging)], [true, true, true]);
+  check("Earbuds charging tint", [Model.isCharging(charging), Model.caseCharging(charging)], [true, true]);
   const low = Object.assign({}, wf, { batteryLeft: 15, batteryRight: null, batteryCase: 5 });
   check("Low side is urgent, unknown side is a dash", Model.earbudBatteryParts(low).map((p) => [p.text, p.low]), [["L 15%", true], ["R —", false]]);
   check("Low earbud drives the icon tint", Model.barBatteryLevel(low), 15);
   check("Unknown case", Model.caseBatteryText(Object.assign({}, wf, { batteryCase: null })), "Case —");
   check("No case part without battery_case", Model.barTooltip(Object.assign({}, wf, { supported: Object.assign({}, wf.supported, { battery_case: false }) })).split("\n")[2], "Battery L 70% · R 65%");
-  check("Showing battery needs battery or battery_lr", Model.barText(Object.assign({}, wf, { supported: Object.assign({}, wf.supported, { battery_lr: false }) }), true, false), "");
+  check("Showing battery needs battery or battery_lr", Model.showBattery(Object.assign({}, wf, { supported: Object.assign({}, wf.supported, { battery_lr: false }) })), false);
 
   // Worn text per side (ui-spec 2, earbuds hero).
   const worn = (l, r) => Model.heroMeta(Object.assign({}, wf, { wornLeft: l, wornRight: r }));
