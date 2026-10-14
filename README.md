@@ -180,10 +180,13 @@ systemctl --user status sony-headphones.service
 journalctl --user -u sony-headphones.service -f
 ```
 
-The daemon picks the first paired Sony headset that BlueZ knows, and
-prefers one that is connected. To use a specific headset, run the daemon
-with `--device <MAC>` (for example in a systemd drop-in that overrides
-`ExecStart`).
+The daemon picks a paired headset whose Bluetooth name contains
+`WH-1000XM5`, and prefers one that is connected. It does not pick other Sony
+models (for example WF-1000XM5 earbuds), even though they offer the same
+service. A paired device without a known name is used only when it offers
+the Sony service and no WH-1000XM5 is paired. To use a specific headset, run
+the daemon with `--device <MAC>` (for example in a systemd drop-in that
+overrides `ExecStart`).
 
 ### Enable the widget
 

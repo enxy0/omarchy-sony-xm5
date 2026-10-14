@@ -1,3 +1,4 @@
+#include "BluetoothManager.hpp"
 #include "HeadphoneState.hpp"
 #include "MDRProtocol.hpp"
 #include "TestUtil.hpp"
@@ -758,6 +759,79 @@ TEST(ProbeListsRawData) {
                                            "support_table2", "general_settings", "eq_capability", "assignable",
                                            "recent_frames"};
     CHECK(j.keyOrder == keys);
+}
+
+// ---------------------------------------------------------------------------
+// Headset selection (BlueZ device list)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+BluetoothDeviceInfo btDevice(const std::string& mac, const std::string& name, bool connected,
+                             bool mdrUuid = true, bool paired = true) {
+    BluetoothDeviceInfo d;
+    d.macAddress = mac;
+    d.name = name;
+    d.alias = name.empty() ? mac : name;
+    d.paired = paired;
+    d.connected = connected;
+    if (mdrUuid) d.uuids.emplace_back(MDR_UUID_XM5_LOWER);
+    return d;
+}
+
+std::optional<std::string> pick(const std::vector<BluetoothDeviceInfo>& devices, const std::string& mac = "") {
+    MockDeviceDiscovery discovery;
+    discovery.devices = devices;
+    auto dev = discovery.findSonyHeadphones(mac);
+    if (!dev) return std::nullopt;
+    return dev->macAddress;
+}
+
+} // namespace
+
+TEST(SelectionPrefersConnectedWh1000xm5OverEarbuds) {
+    std::vector<BluetoothDeviceInfo> devices = {
+        btDevice("AA:BB:CC:DD:EE:02", "WF-1000XM5", true),
+        btDevice("AA:BB:CC:DD:EE:01", "WH-1000XM5", true),
+    };
+    CHECK_EQ(pick(devices), std::optional<std::string>("AA:BB:CC:DD:EE:01"));
+    devices[1].connected = false;
+    CHECK_EQ(pick(devices), std::optional<std::string>("AA:BB:CC:DD:EE:01"));
+    devices.push_back(btDevice("AA:BB:CC:DD:EE:03", "WH-1000XM5", true));
+    CHECK_EQ(pick(devices), std::optional<std::string>("AA:BB:CC:DD:EE:03"));
+}
+
+TEST(SelectionNeverPicksOtherModelsWithoutDevice) {
+    std::vector<BluetoothDeviceInfo> devices = {
+        btDevice("AA:BB:CC:DD:EE:02", "WF-1000XM5", true),
+        btDevice("AA:BB:CC:DD:EE:04", "WH-1000XM4", true),
+        btDevice("AA:BB:CC:DD:EE:05", "Phone", true, false),
+    };
+    CHECK(!pick(devices).has_value());
+    CHECK_EQ(pick(devices, "aa:bb:cc:dd:ee:02"), std::optional<std::string>("AA:BB:CC:DD:EE:02"));
+    CHECK(!pick(devices, "AA:BB:CC:DD:EE:09").has_value());
+}
+
+TEST(SelectionMatchesNameCaseInsensitiveAndIgnoresUnpaired) {
+    std::vector<BluetoothDeviceInfo> devices = {
+        btDevice("AA:BB:CC:DD:EE:01", "WH-1000XM5", true, true, false),
+        btDevice("AA:BB:CC:DD:EE:06", "My wh-1000xm5", false, false),
+    };
+    CHECK_EQ(pick(devices), std::optional<std::string>("AA:BB:CC:DD:EE:06"));
+}
+
+TEST(SelectionUsesUuidOnlyForUnnamedDevices) {
+    std::vector<BluetoothDeviceInfo> devices = {
+        btDevice("AA:BB:CC:DD:EE:07", "", false),
+        btDevice("AA:BB:CC:DD:EE:08", "", true),
+        btDevice("AA:BB:CC:DD:EE:09", "", true, false),
+    };
+    CHECK_EQ(pick(devices), std::optional<std::string>("AA:BB:CC:DD:EE:08"));
+    devices.push_back(btDevice("AA:BB:CC:DD:EE:01", "WH-1000XM5", false));
+    CHECK_EQ(pick(devices), std::optional<std::string>("AA:BB:CC:DD:EE:01"));
+    std::vector<BluetoothDeviceInfo> legacy = {btDevice("AA:BB:CC:DD:EE:0A", "", true, false)};
+    legacy[0].uuids.emplace_back(MDR_UUID_LEGACY);
+    CHECK_EQ(pick(legacy), std::optional<std::string>("AA:BB:CC:DD:EE:0A"));
 }
 
 int main() {

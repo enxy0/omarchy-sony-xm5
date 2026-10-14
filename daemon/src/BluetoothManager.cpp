@@ -34,6 +34,43 @@ std::string connectionStateToString(ConnectionState state) {
     }
 }
 
+std::optional<BluetoothDeviceInfo> selectSonyHeadphones(const std::vector<BluetoothDeviceInfo>& devices,
+                                                        const std::string& preferredMac) {
+    if (!preferredMac.empty()) {
+        for (const auto& dev : devices) {
+            if (strcasecmp(dev.macAddress.c_str(), preferredMac.c_str()) == 0) return dev;
+        }
+        return std::nullopt;
+    }
+
+    auto hasMdrUuid = [](const BluetoothDeviceInfo& dev) {
+        return std::any_of(dev.uuids.begin(), dev.uuids.end(), [](const std::string& u) {
+            return strcasecmp(u.c_str(), MDR_UUID_XM5) == 0 || strcasecmp(u.c_str(), MDR_UUID_LEGACY) == 0;
+        });
+    };
+    auto isWh1000xm5 = [](const BluetoothDeviceInfo& dev) {
+        std::string name = dev.name;
+        std::transform(name.begin(), name.end(), name.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return name.find("wh-1000xm5") != std::string::npos;
+    };
+
+    const BluetoothDeviceInfo* best = nullptr;
+    int bestRank = 0;
+    for (const auto& dev : devices) {
+        if (!dev.paired) continue;
+        int rank = 0;
+        if (isWh1000xm5(dev)) rank = dev.connected ? 4 : 3;
+        else if (dev.name.empty() && hasMdrUuid(dev)) rank = dev.connected ? 2 : 1;
+        if (rank > bestRank) {
+            best = &dev;
+            bestRank = rank;
+        }
+    }
+    if (!best) return std::nullopt;
+    return *best;
+}
+
 static int parseUuidString(const char* szSrc, uint8_t* dst) {
     if (!szSrc || std::strlen(szSrc) != 36) return -1;
     unsigned int b[16];
@@ -238,58 +275,7 @@ public:
     }
 
     std::optional<BluetoothDeviceInfo> findSonyHeadphones(const std::string& preferredMac = "") override {
-        auto devices = getAvailableDevices();
-        if (devices.empty()) return std::nullopt;
-
-        // 1. Explicit MAC match if specified
-        if (!preferredMac.empty()) {
-            for (const auto& dev : devices) {
-                if (strcasecmp(dev.macAddress.c_str(), preferredMac.c_str()) == 0) {
-                    return dev;
-                }
-            }
-            return std::nullopt;
-        }
-
-        // 2. Filter paired devices matching XM5 UUID or Name
-        std::vector<BluetoothDeviceInfo> candidates;
-        for (const auto& dev : devices) {
-            if (!dev.paired) continue;
-
-            bool matchesUuid = false;
-            for (const auto& u : dev.uuids) {
-                if (strcasecmp(u.c_str(), MDR_UUID_XM5) == 0 ||
-                    strcasecmp(u.c_str(), MDR_UUID_XM5_LOWER) == 0 ||
-                    strcasecmp(u.c_str(), MDR_UUID_LEGACY) == 0) {
-                    matchesUuid = true;
-                    break;
-                }
-            }
-
-            bool matchesName = false;
-            std::string nameLower = dev.name;
-            std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), [](unsigned char c){
-                return static_cast<char>(std::tolower(c));
-            });
-            if (nameLower.find("wh-1000xm5") != std::string::npos ||
-                nameLower.find("wf-1000xm5") != std::string::npos ||
-                nameLower.find("wh-1000xm4") != std::string::npos) {
-                matchesName = true;
-            }
-
-            if (matchesUuid || matchesName) {
-                candidates.push_back(dev);
-            }
-        }
-
-        if (candidates.empty()) return std::nullopt;
-
-        // Prioritize device currently marked connected in BlueZ
-        for (const auto& dev : candidates) {
-            if (dev.connected) return dev;
-        }
-
-        return candidates.front();
+        return selectSonyHeadphones(getAvailableDevices(), preferredMac);
     }
 
 private:
@@ -531,17 +517,7 @@ std::optional<BluetoothDeviceInfo> MockDeviceDiscovery::findSonyHeadphones(const
         dev.uuids.push_back(MDR_UUID_XM5_LOWER);
         return dev;
     }
-
-    if (!preferredMac.empty()) {
-        for (const auto& dev : devices) {
-            if (strcasecmp(dev.macAddress.c_str(), preferredMac.c_str()) == 0) {
-                return dev;
-            }
-        }
-        return std::nullopt;
-    }
-
-    return devices.front();
+    return selectSonyHeadphones(devices, preferredMac);
 }
 
 // ---------------------------------------------------------------------------
