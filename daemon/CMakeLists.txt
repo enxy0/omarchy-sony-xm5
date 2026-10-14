@@ -11,6 +11,11 @@ find_package(Threads REQUIRED)
 # ---------------------------------------------------------------------------
 set(PROTOCOL_LIB_SOURCES
     src/MDRProtocol.cpp
+    src/HeadphoneState.cpp
+    src/MdrLink.cpp
+    src/HeadsetSession.cpp
+    src/Commands.cpp
+    src/FakeHeadset.cpp
     src/BluetoothManager.cpp
     src/StateEngine.cpp
     src/IpcServer.cpp
@@ -37,21 +42,21 @@ target_compile_features(sony_protocol_lib PUBLIC cxx_std_20)
 # Target 2: test_protocol (Protocol, Framing, StateEngine & IpcServer Tests)
 # ---------------------------------------------------------------------------
 if(BUILD_TESTING)
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_protocol.cpp")
-        add_executable(test_protocol
-            tests/test_protocol.cpp
-        )
-
-        target_link_libraries(test_protocol PRIVATE
-            sony_protocol_lib
-        )
-
-        target_include_directories(test_protocol PRIVATE
+    foreach(test_name test_protocol test_session test_ipc)
+        add_executable(${test_name} tests/${test_name}.cpp)
+        target_link_libraries(${test_name} PRIVATE sony_protocol_lib)
+        target_include_directories(${test_name} PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests
         )
+        target_compile_definitions(${test_name} PRIVATE
+            SONY_FIXTURES_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures"
+        )
+    endforeach()
 
-        add_test(NAME ProtocolTest COMMAND test_protocol)
-    endif()
+    add_test(NAME ProtocolTest COMMAND test_protocol)
+    add_test(NAME SessionTest COMMAND test_session)
+    add_test(NAME IpcTest COMMAND test_ipc)
 endif()
 
 # ---------------------------------------------------------------------------

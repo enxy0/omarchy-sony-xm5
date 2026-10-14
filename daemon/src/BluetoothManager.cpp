@@ -618,6 +618,12 @@ void BluetoothManager::disconnect() {
     setState(ConnectionState::DISCONNECTED);
 }
 
+void BluetoothManager::reconnect(const std::string& reason) {
+    if (state_ == ConnectionState::CONNECTED || state_ == ConnectionState::CONNECTING) {
+        scheduleReconnect(reason);
+    }
+}
+
 void BluetoothManager::attemptDiscovery() {
     setState(ConnectionState::DISCOVERING);
     if (!discovery_) {

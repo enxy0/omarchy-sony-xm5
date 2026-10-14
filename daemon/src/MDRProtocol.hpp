@@ -1,28 +1,28 @@
 #pragma once
 
-#include <cstdint>
+#include <array>
 #include <cstddef>
-#include <vector>
+#include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
-#include <array>
-#include <optional>
+#include <string_view>
+#include <vector>
 
 namespace omarchy::sony::protocol {
+
+using Bytes = std::vector<uint8_t>;
 
 // ---------------------------------------------------------------------------
 // Wire Framing Constants
 // ---------------------------------------------------------------------------
-inline constexpr uint8_t kStartMarker     = 0x3E; // '>' (Start delimiter)
-inline constexpr uint8_t kEndMarker       = 0x3C; // '<' (End delimiter)
-inline constexpr uint8_t kEscapeSentry    = 0x3D; // '=' (Escape sentry)
-inline constexpr uint8_t kEscaped3C       = 0x2C; // 0x3C is escaped as 0x3D 0x2C
-inline constexpr uint8_t kEscaped3D       = 0x2D; // 0x3D is escaped as 0x3D 0x2D
-inline constexpr uint8_t kEscaped3E       = 0x2E; // 0x3E is escaped as 0x3D 0x2E
+inline constexpr uint8_t kStartMarker     = 0x3E;
+inline constexpr uint8_t kEndMarker       = 0x3C;
+inline constexpr uint8_t kEscapeSentry    = 0x3D;
+inline constexpr uint8_t kEscaped3C       = 0x2C;
+inline constexpr uint8_t kEscaped3D       = 0x2D;
+inline constexpr uint8_t kEscaped3E       = 0x2E;
 
-// ---------------------------------------------------------------------------
-// Protocol Enumerations
-// ---------------------------------------------------------------------------
 enum class PacketType : uint8_t {
     ACK          = 0x01,
     DATA_MDR     = 0x0C,
@@ -30,123 +30,171 @@ enum class PacketType : uint8_t {
     UNKNOWN      = 0xFF
 };
 
-enum class NoiseMode : uint8_t {
-    OFF         = 0,
-    ANC         = 1,
-    AMBIENT     = 2,
-    WIND        = 3
-};
+enum class Table : uint8_t { T1, T2 };
 
-enum class EqPreset : uint8_t {
-    OFF         = 0x00,
-    BRIGHT      = 0x10,
-    EXCITED     = 0x11,
-    MELLOW      = 0x12,
-    RELAXED     = 0x13,
-    VOCAL       = 0x14,
-    TREBLE      = 0x15,
-    BASS        = 0x16,
-    SPEECH      = 0x17,
-    CUSTOM      = 0xA0,
-    UNKNOWN     = 0xFF
-};
+PacketType packetTypeFor(Table table) noexcept;
+std::optional<Table> tableFor(PacketType type) noexcept;
 
-// ---------------------------------------------------------------------------
-// Data Structures
-// ---------------------------------------------------------------------------
 struct UnpackedFrame {
     PacketType type{PacketType::UNKNOWN};
     uint8_t seq{0};
-    std::vector<uint8_t> payload;
-};
-
-struct HeadphoneState {
-    int schema_version = 1;
-    bool connected = false;
-    std::string device_name = "WH-1000XM5";
-    int battery_level = -1;             // 0-100, or -1 if unknown
-    bool battery_charging = false;
-    std::string noise_mode = "anc";     // "anc", "ambient", "wind", "off"
-    int ambient_sound_level = 0;        // 0-20 (0 = wind noise reduction)
-    bool voice_passthrough = false;
-    std::string eq_preset = "off";
-    std::array<int, 5> eq_custom_bands = {0, 0, 0, 0, 0}; // [-10, 10]
-    int clear_bass = 0;                 // [-10, 10]
-    bool speak_to_chat = false;
-    bool dsee_extreme = true;
-    bool multipoint = true;
-    bool ear_detection = true;
-    std::string codec = "LDAC";
-    int64_t last_updated = 0;
-
-    [[nodiscard]] std::string toJson() const;
-    static HeadphoneState makeDisconnected();
+    Bytes payload;
 };
 
 // ---------------------------------------------------------------------------
 // Low-Level Framing & Checksum
 // ---------------------------------------------------------------------------
 uint8_t calculateChecksum(std::span<const uint8_t> data) noexcept;
-std::vector<uint8_t> escapeBytes(std::span<const uint8_t> unescaped);
-std::vector<uint8_t> unescapeBytes(std::span<const uint8_t> escaped);
-
-// Packs a complete frame ready for transmission over RFCOMM (delimited with 0x3E and 0x3C)
-std::vector<uint8_t> packFrame(PacketType type, uint8_t seq, std::span<const uint8_t> payload);
-
-// Unpacks a single complete frame enclosed by [0x3E ... 0x3C]
+Bytes escapeBytes(std::span<const uint8_t> unescaped);
+Bytes unescapeBytes(std::span<const uint8_t> escaped);
+Bytes packFrame(PacketType type, uint8_t seq, std::span<const uint8_t> payload);
 std::optional<UnpackedFrame> unpackFrame(std::span<const uint8_t> frameBytes);
+Bytes serializeACK(uint8_t rxSeq);
 
-// Stream Framer: extracts complete [0x3E ... 0x3C] frames from streaming socket input
 class StreamFramer {
 public:
     void append(std::span<const uint8_t> incoming);
-    std::optional<std::vector<uint8_t>> nextFrame();
+    std::optional<Bytes> nextFrame();
     void reset();
     [[nodiscard]] size_t bufferedBytes() const noexcept { return buffer_.size(); }
 
 private:
-    std::vector<uint8_t> buffer_;
+    Bytes buffer_;
 };
 
 // ---------------------------------------------------------------------------
-// Command Serializers (Host -> XM5)
+// Function IDs
 // ---------------------------------------------------------------------------
-std::vector<uint8_t> serializeACK(uint8_t rx_seq);
-std::vector<uint8_t> serializeNoiseMode(NoiseMode mode, uint8_t ambientLevel = 0, bool voiceFocus = false, uint8_t seq = 0);
-std::vector<uint8_t> serializeAmbientLevel(uint8_t level, bool voiceFocus = false, uint8_t seq = 0);
-std::vector<uint8_t> serializeEqPreset(EqPreset preset, uint8_t seq = 0);
-std::vector<uint8_t> serializeCustomEq(const std::array<int, 5>& bands, int clearBass, uint8_t seq = 0);
-std::vector<uint8_t> serializeSpeakToChat(bool enabled, uint8_t seq = 0);
-std::vector<uint8_t> serializeDsee(bool enabled, uint8_t seq = 0);
-std::vector<uint8_t> serializeMultipoint(bool enabled, uint8_t seq = 0);
-std::vector<uint8_t> serializeEarDetection(bool enabled, uint8_t seq = 0);
+namespace fn1 {
+inline constexpr uint8_t CODEC_INDICATOR = 0x12;
+inline constexpr uint8_t BATTERY_LEVEL_INDICATOR = 0x20;
+inline constexpr uint8_t AUTO_POWER_OFF = 0x24;
+inline constexpr uint8_t AUTO_POWER_OFF_WITH_WEARING_DETECTION = 0x25;
+inline constexpr uint8_t BATTERY_LEVEL_WITH_THRESHOLD = 0x28;
+inline constexpr uint8_t PRESET_EQ = 0x50;
+inline constexpr uint8_t NC_ASM_AUTO = 0x68;
+inline constexpr uint8_t AMBIENT_SOUND_CONTROL_MODE_SELECT = 0x69;
+inline constexpr uint8_t NC_ASM_DUAL = 0x6B;
+inline constexpr uint8_t NC_ASM_NOISE_ADAPTATION = 0x6D;
+inline constexpr uint8_t FIXED_MESSAGE = 0x90;
+inline constexpr uint8_t PLAYBACK_CONTROLLER_FIRST = 0xA1;
+inline constexpr uint8_t PLAYBACK_CONTROLLER_LAST = 0xA4;
+inline constexpr uint8_t GENERAL_SETTING_FIRST = 0xD1;
+inline constexpr uint8_t GENERAL_SETTING_LAST = 0xD4;
+inline constexpr uint8_t CONNECTION_MODE = 0xE1;
+inline constexpr uint8_t UPSCALING_AUTO_OFF = 0xE2;
+inline constexpr uint8_t CONNECTION_MODE_WITH_LDAC_STATUS = 0xE3;
+inline constexpr uint8_t PLAYBACK_CONTROL_BY_WEARING = 0xF1;
+inline constexpr uint8_t ASSIGNABLE_SETTING = 0xF3;
+inline constexpr uint8_t WEARING_STATUS_DETECTOR = 0xF6;
+inline constexpr uint8_t SMART_TALKING_MODE_TYPE2 = 0xFC;
+inline constexpr uint8_t ASSIGNABLE_SETTING_WITH_LIMITATION = 0xFE;
+} // namespace fn1
+
+namespace fn2 {
+inline constexpr uint8_t PAIRING_DEVICE_MANAGEMENT_CLASSIC_BT = 0x30;
+inline constexpr uint8_t SOURCE_SWITCH_CONTROL = 0x31;
+inline constexpr uint8_t PAIRING_DEVICE_MANAGEMENT_WITH_COD_CLASSIC_BT = 0x32;
+inline constexpr uint8_t PAIRING_DEVICE_MANAGEMENT_WITH_COD_CLASSIC_LE = 0x33;
+inline constexpr uint8_t VOICE_GUIDANCE_NOT_SUPPORT_LANGUAGE_SWITCH = 0x40;
+inline constexpr uint8_t VOICE_GUIDANCE_SUPPORT_LANGUAGE_SWITCH = 0x41;
+inline constexpr uint8_t VOICE_GUIDANCE_WITH_VOLUME = 0x42;
+inline constexpr uint8_t VOICE_GUIDANCE_VOLUME_FIXED_5_STEPS = 0x43;
+inline constexpr uint8_t VOICE_GUIDANCE_SETTING_SUPPORT_LANGUAGE_SWITCH = 0x44;
+inline constexpr uint8_t VOICE_GUIDANCE_ONLY_ON_OFF = 0x45;
+inline constexpr uint8_t WEARING_STATUS_CHECKER = 0xF0;
+} // namespace fn2
+
+std::string_view functionName(Table table, uint8_t id) noexcept;
 
 // ---------------------------------------------------------------------------
-// Query Serializers (Host -> XM5 initialization)
+// Request Payload Builders
 // ---------------------------------------------------------------------------
-std::vector<uint8_t> serializeQueryBattery(uint8_t seq = 0);
-std::vector<uint8_t> serializeQueryNoiseMode(uint8_t seq = 0);
-std::vector<uint8_t> serializeQueryEq(uint8_t seq = 0);
-std::vector<uint8_t> serializeQueryDsee(uint8_t seq = 0);
-std::vector<uint8_t> serializeQuerySpeakToChat(uint8_t seq = 0);
-std::vector<uint8_t> serializeQueryEarDetection(uint8_t seq = 0);
-std::vector<uint8_t> serializeQueryGeneralSetting(uint8_t seq = 0);
+struct NcAsmParams {
+    uint8_t type{0x17};
+    uint8_t valueChange{0x01};
+    uint8_t totalEffect{0x01};
+    uint8_t mode{0x00};
+    uint8_t ambientMode{0x00};
+    uint8_t level{20};
+    uint8_t autoAmbient{0x00};
+    uint8_t noiseAdaptive{0x00};
+};
+
+namespace req {
+Bytes getProtocolInfo();
+Bytes getCapabilityInfo();
+Bytes getDeviceInfo(uint8_t infoType);
+Bytes getSupportFunction();
+Bytes getBattery(uint8_t type);
+Bytes getGeneralSettingCapability(uint8_t slot);
+Bytes getGeneralSettingValue(uint8_t slot);
+Bytes setGeneralSettingBool(uint8_t slot, bool on);
+Bytes getUpscalingCapability();
+Bytes getUpscalingStatus();
+Bytes getUpscaling();
+Bytes setUpscaling(bool on);
+Bytes getAssignableCapability(uint8_t type);
+Bytes getAssignableValue(uint8_t type);
+Bytes setAssignableValue(uint8_t type, const std::vector<uint8_t>& presets);
+Bytes enableFixedMessageAlerts();
+Bytes answerAlert(uint8_t messageType, bool positive);
+Bytes getCodec();
+Bytes getVolume();
+Bytes setVolume(int volume);
+Bytes getNcAsm(uint8_t type);
+Bytes setNcAsm(const NcAsmParams& params);
+Bytes getNcAmbButton();
+Bytes setNcAmbButton(uint8_t function);
+Bytes getSpeakToChat();
+Bytes setSpeakToChat(bool on);
+Bytes getSpeakToChatConfig();
+Bytes setSpeakToChatConfig(uint8_t sensitivity, uint8_t timeout);
+Bytes getEqCapability();
+Bytes getEqStatus();
+Bytes getEqValue();
+Bytes setEqPreset(uint8_t presetId);
+Bytes setEqCustom(const std::array<int, 5>& bands, int clearBass);
+Bytes getConnectionQuality(uint8_t type);
+Bytes setConnectionQuality(uint8_t type, uint8_t priorMode);
+Bytes getAutoPowerOff(uint8_t type);
+Bytes setAutoPowerOff(uint8_t type, uint8_t current);
+Bytes getEarDetection();
+Bytes setEarDetection(bool on);
+Bytes enableOperationLog();
+Bytes getPairingMode(uint8_t listType);
+Bytes getPairedDevices(uint8_t listType);
+Bytes getSourceSwitchAuto();
+Bytes setSourceSwitch(const std::string& address);
+Bytes getWornStatus();
+Bytes getVoiceGuidance(uint8_t type);
+Bytes setVoiceGuidance(uint8_t type, bool on, uint8_t language);
+Bytes getVoiceGuidanceVolume();
+Bytes setVoiceGuidanceVolume(int volume);
+} // namespace req
 
 // ---------------------------------------------------------------------------
-// Inbound State Deserializer (XM5 -> Host)
+// Value <-> Contract String Maps
 // ---------------------------------------------------------------------------
-// Parses an unpacked payload into HeadphoneState. Returns true if state was updated.
-bool parseInboundPayload(std::span<const uint8_t> payload, HeadphoneState& state);
+std::string eqPresetName(uint8_t presetId);
+std::optional<uint8_t> eqPresetId(std::string_view name);
+std::string codecName(uint8_t codec);
+std::optional<std::string> autoPowerOffName(uint8_t value);
+std::optional<uint8_t> autoPowerOffValue(std::string_view name);
+std::optional<std::string> ncAmbButtonName(uint8_t value);
+std::optional<uint8_t> ncAmbButtonValue(std::string_view name);
+std::string buttonFunctionName(uint8_t preset);
+std::optional<uint8_t> buttonFunctionValue(std::string_view name);
+std::optional<std::string> speakToChatSensitivityName(uint8_t value);
+std::optional<uint8_t> speakToChatSensitivityValue(std::string_view name);
+std::optional<std::string> speakToChatTimeoutName(uint8_t value);
+std::optional<uint8_t> speakToChatTimeoutValue(std::string_view name);
+std::string connectionQualityName(uint8_t priorMode);
+std::optional<uint8_t> connectionQualityValue(std::string_view name);
 
-// ---------------------------------------------------------------------------
-// Enum <-> String Helpers
-// ---------------------------------------------------------------------------
-std::string eqPresetToString(EqPreset preset);
-EqPreset stringToEqPreset(const std::string& str);
-std::string noiseModeToString(NoiseMode mode);
-NoiseMode stringToNoiseMode(const std::string& str);
+std::string hexByte(uint8_t value);
+std::string hexBytes(std::span<const uint8_t> data);
 
 } // namespace omarchy::sony::protocol
 
-// Provide convenient alias for consumer code
 namespace sony = omarchy::sony;

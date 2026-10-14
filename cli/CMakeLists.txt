@@ -25,6 +25,11 @@ endif()
 
 add_executable(sony-ctl
     src/main.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../daemon/src/Commands.cpp
+)
+
+target_include_directories(sony-ctl PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../daemon/src
 )
 
 target_compile_features(sony-ctl PRIVATE cxx_std_20)
