@@ -164,6 +164,8 @@ TEST(InitRequestsMatchProtocolTable) {
     CHECK_EQ(req::enableOperationLog(), B({0xC4, 0x01, 0x00}));
     CHECK_EQ(req::getBattery(0x00), B({0x22, 0x00}));
     CHECK_EQ(req::getBattery(0x08), B({0x22, 0x08}));
+    CHECK_EQ(req::getQuickAccessCapability(), B({0xF0, 0x0D}));
+    CHECK_EQ(req::getQuickAccess(), B({0xF6, 0x0D}));
 }
 
 TEST(EqQueryCarriesInquiredType) {
@@ -214,6 +216,8 @@ TEST(SetterPayloadsMatchProtocol) {
     CHECK_EQ(req::setGeneralSettingBool(0xD3, true), B({0xD8, 0xD3, 0x00, 0x00}));
     CHECK_EQ(req::setGeneralSettingBool(0xD1, false), B({0xD8, 0xD1, 0x00, 0x01}));
     CHECK_EQ(req::answerAlert(0x07, true), B({0x98, 0x00, 0x07, 0x01}));
+    CHECK_EQ(req::setQuickAccess({0x00, 0x01}), B({0xF8, 0x0D, 0x02, 0x00, 0x01}));
+    CHECK_EQ(req::setQuickAccess({0x01, 0x00}), B({0xF8, 0x0D, 0x02, 0x01, 0x00}));
     Bytes source = req::setSourceSwitch("5C:E9:1E:BB:00:02");
     CHECK_EQ(Bytes(source.begin(), source.begin() + 2), B({0x3C, 0x01}));
     CHECK_EQ(std::string(source.begin() + 2, source.end()), std::string("5C:E9:1E:BB:00:02"));
@@ -359,6 +363,78 @@ TEST(EqValueForPresetOffCarriesBandsFromXm5Capture) {
     for (const auto& band : j["eq_custom_bands"].array) CHECK_EQ(band.number, 0.0);
     REQUIRE(j["eq_bands"].array.size() == 5);
     CHECK_EQ(j["clear_bass"].number, 0.0);
+}
+
+TEST(QuickAccessParsesXm5Capture) {
+    HeadphoneState s = withSupport({0xFD});
+    s.connected = true;
+    CHECK(apply1(B({0xF1, 0x0D, 0x01, 0x01, 0x02, 0x01, 0x00, 0x04, 0x00, 0x05, 0x01, 0x02,
+                    0x02, 0x00, 0x04, 0x00, 0x05, 0x01, 0x02}), s));
+    REQUIRE(s.quickAccessCapability.has_value());
+    CHECK_EQ(s.quickAccessCapability->key, uint8_t{0x01});
+    CHECK_EQ(s.quickAccessCapability->keyType, uint8_t{0x01});
+    REQUIRE(s.quickAccessCapability->actions.size() == 2);
+    CHECK_EQ(s.quickAccessCapability->actions[1].action, uint8_t{0x02});
+    CHECK_EQ(s.quickAccessCapability->actions[1].functions, B({0x00, 0x05, 0x01, 0x02}));
+    CHECK(!s.assignableCapability.has_value());
+
+    CHECK(apply1(B({0xF7, 0x0D, 0x02, 0x00, 0x00}), s));
+    CHECK(!s.assignableValue.has_value());
+    CHECK_EQ(s.quickAccessString(kActionDoubleTap), std::optional<std::string>("off"));
+    CHECK_EQ(s.quickAccessString(kActionTripleTap), std::optional<std::string>("off"));
+    CHECK(apply1(B({0xF9, 0x0D, 0x02, 0x05, 0x01}), s));
+    CHECK_EQ(s.quickAccessString(kActionDoubleTap), std::optional<std::string>("other"));
+    CHECK_EQ(s.quickAccessString(kActionTripleTap), std::optional<std::string>("spotify"));
+
+    s.supported = deriveSupported(s);
+    CHECK(s.supported->quick_access);
+    Json j = parsed(statusJson(s, 1));
+    CHECK_EQ(j["quick_access_double_tap"].string, std::string("other"));
+    CHECK_EQ(j["quick_access_triple_tap"].string, std::string("spotify"));
+    const Json options = j["quick_access_double_tap_options"];
+    REQUIRE(options.array.size() == 2);
+    CHECK_EQ(options.array[0].string, std::string("off"));
+    CHECK_EQ(options.array[1].string, std::string("spotify"));
+    CHECK_EQ(j["quick_access_triple_tap_options"].array.size(), size_t{2});
+
+    CHECK(!apply1(B({0xF1, 0x0D, 0x01, 0x01, 0x02, 0x01, 0x00, 0x04, 0x00}), s));
+    CHECK(!apply1(B({0xF7, 0x0D, 0x02, 0x00}), s));
+}
+
+TEST(QuickAccessWithoutCapabilityUsesDoubleThenTriple) {
+    HeadphoneState s;
+    CHECK(apply1(B({0xF7, 0x0D, 0x02, 0x01, 0x00}), s));
+    CHECK_EQ(s.quickAccessIndex(kActionDoubleTap), std::optional<size_t>(0));
+    CHECK_EQ(s.quickAccessIndex(kActionTripleTap), std::optional<size_t>(1));
+    CHECK_EQ(s.quickAccessString(kActionDoubleTap), std::optional<std::string>("spotify"));
+    CHECK(!s.quickAccessOptions(kActionDoubleTap).has_value());
+    CHECK_EQ(quickAccessValue("spotify"), std::optional<uint8_t>(0x01));
+    CHECK_EQ(quickAccessValue("off"), std::optional<uint8_t>(0x00));
+    CHECK(!quickAccessValue("other").has_value());
+}
+
+TEST(TouchPanelSlotIsFoundBySubject) {
+    HeadphoneState s = withSupport({0xD1, 0xD2});
+    s.connected = true;
+    CHECK(apply1(B({0xD1, 0xD1, 0x00, 0x01, 0x13, 'T', 'O', 'U', 'C', 'H', '_', 'P', 'A', 'N', 'E', 'L', '_',
+                    'S', 'E', 'T', 'T', 'I', 'N', 'G', 0x00}), s));
+    CHECK(apply1(withString(withString(B({0xD1, 0xD2, 0x00, 0x01}), "MULTIPOINT_SETTING"),
+                            "MULTIPOINT_SETTING_SUMMARY_LDAC_AVAILABLE"), s));
+    selectVariants(s);
+    CHECK_EQ(s.variants.touchPanelSlot, std::optional<uint8_t>(0xD1));
+    CHECK_EQ(s.variants.multipointSlot, std::optional<uint8_t>(0xD2));
+    CHECK(apply1(B({0xD7, 0xD1, 0x00, 0x00}), s));
+    CHECK(apply1(B({0xD7, 0xD2, 0x00, 0x00}), s));
+    CHECK_EQ(s.touchPanelValue(), std::optional<bool>(true));
+    CHECK(apply1(B({0xD9, 0xD1, 0x00, 0x01}), s));
+    CHECK_EQ(s.touchPanelValue(), std::optional<bool>(false));
+    CHECK_EQ(s.multipointValue(), std::optional<bool>(true));
+    s.supported = deriveSupported(s);
+    CHECK(s.supported->touch_panel);
+    Json j = parsed(statusJson(s, 1));
+    CHECK(!j["touch_panel"].boolean);
+    CHECK(!j["touch_panel"].isNull());
+    CHECK_EQ(req::setGeneralSettingBool(0xD1, false), B({0xD8, 0xD1, 0x00, 0x01}));
 }
 
 TEST(DseeAndConnectionQualityShareAudioCommands) {
@@ -600,13 +676,15 @@ TEST(SupportedFollowsContractTable) {
     CHECK(sup.nc_amb_button);
     CHECK(!sup.button_function);
     CHECK(sup.ear_detection);
-    CHECK(sup.worn);
+    CHECK(!sup.worn);
     CHECK(sup.volume);
     CHECK(sup.connection_quality);
     CHECK(sup.codec);
     CHECK(!sup.multipoint);
     CHECK(sup.devices);
     CHECK(sup.source_switch);
+    CHECK(!sup.touch_panel);
+    CHECK(!sup.quick_access);
 
     s.eqCapability = EqCapability{6, 21, {}};
     CHECK(deriveSupported(s).eq_custom);
@@ -615,8 +693,12 @@ TEST(SupportedFollowsContractTable) {
     s.eqCustomSeen = true;
     CHECK(deriveSupported(s).eq_custom);
 
-    auto noTable2 = withSupport({0xF1}, {}, false);
+    auto noTable2 = withSupport({0xF6}, {}, false);
     CHECK(!deriveSupported(noTable2).worn);
+    CHECK(deriveSupported(withSupport({0xF6}, {})).worn);
+    CHECK(deriveSupported(withSupport({}, {0xF0})).worn);
+    CHECK(!deriveSupported(withSupport({0xF1}, {0x41})).worn);
+    CHECK(deriveSupported(withSupport({0xFD})).quick_access);
     auto sourceOnly = withSupport({}, {0x31});
     CHECK(!deriveSupported(sourceOnly).source_switch);
     auto volumeOnly = withSupport({}, {0x43});

@@ -72,6 +72,8 @@ public:
     bool earDetection{true};
     uint8_t worn{0x00};
     bool multipoint{false};
+    bool touchPanel{true};
+    std::vector<uint8_t> quickAccess{0x00, 0x01};
     uint8_t playbackSlot{1};
     std::vector<FakePairedDevice> devices{{"F0:1D:BC:AA:00:01", "laptop", 1}};
     std::vector<Bytes> alertsAnswered;

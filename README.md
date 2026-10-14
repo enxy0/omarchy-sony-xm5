@@ -240,6 +240,8 @@ sony-ctl [-s <socket>] <verb> [args...]
 | `connection-quality` | `sound`, `connection` | Connection priority |
 | `multipoint` | `on`, `off` | Multipoint; the headset reconnects |
 | `source` | Bluetooth address | Make a connected device the audio source |
+| `touch-panel` | `on`, `off` | Touch sensor control panel |
+| `quick-access` | `double` or `triple`, then `off` or `spotify` | Quick Access function for a double or triple press of the NC/AMB button |
 
 Exit codes: `0` success, `1` bad arguments or an error from the daemon,
 `2` the daemon socket is not available. A setter prints `OK` when the

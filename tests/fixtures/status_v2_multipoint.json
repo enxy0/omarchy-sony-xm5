@@ -20,13 +20,15 @@
     "nc_amb_button": true,
     "button_function": false,
     "ear_detection": true,
-    "worn": true,
+    "worn": false,
     "volume": true,
     "connection_quality": true,
     "codec": true,
     "multipoint": true,
     "devices": true,
-    "source_switch": true
+    "source_switch": true,
+    "touch_panel": false,
+    "quick_access": false
   },
   "battery_level": 62,
   "battery_charging": false,
@@ -62,5 +64,10 @@
     {"address": "F0:1D:BC:AA:00:01", "name": "laptop", "connected": true, "active": false},
     {"address": "5C:E9:1E:BB:00:02", "name": "Pixel 8", "connected": true, "active": true},
     {"address": "3C:22:FB:CC:00:03", "name": "", "connected": false, "active": false}
-  ]
+  ],
+  "touch_panel": null,
+  "quick_access_double_tap": null,
+  "quick_access_triple_tap": null,
+  "quick_access_double_tap_options": null,
+  "quick_access_triple_tap_options": null
 }

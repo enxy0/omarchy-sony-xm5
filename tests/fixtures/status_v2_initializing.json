@@ -38,5 +38,10 @@
   "ear_detection": null,
   "worn": null,
   "multipoint": null,
-  "devices": null
+  "devices": null,
+  "touch_panel": null,
+  "quick_access_double_tap": null,
+  "quick_access_triple_tap": null,
+  "quick_access_double_tap_options": null,
+  "quick_access_triple_tap_options": null
 }

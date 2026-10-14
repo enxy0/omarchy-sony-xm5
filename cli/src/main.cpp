@@ -29,7 +29,8 @@ void print_usage(std::ostream& os) {
                       cmd::Verb::EqCustom, cmd::Verb::Dsee, cmd::Verb::SpeakToChat, cmd::Verb::SpeakToChatConfig,
                       cmd::Verb::VoiceGuidance, cmd::Verb::VoiceGuidanceVolume, cmd::Verb::AutoPowerOff,
                       cmd::Verb::NcAmbButton, cmd::Verb::ButtonFunction, cmd::Verb::EarDetect, cmd::Verb::Volume,
-                      cmd::Verb::ConnectionQuality, cmd::Verb::Multipoint, cmd::Verb::Source}) {
+                      cmd::Verb::ConnectionQuality, cmd::Verb::Multipoint, cmd::Verb::Source,
+                      cmd::Verb::TouchPanel, cmd::Verb::QuickAccess}) {
         os << "  " << cmd::usage(verb) << "\n";
     }
     os << "\nOptions:\n"

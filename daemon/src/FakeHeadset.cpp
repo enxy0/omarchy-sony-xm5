@@ -26,11 +26,14 @@ constexpr PresetName kEqPresetNames[] = {
 
 constexpr uint8_t kAssignablePresets[] = {0x00, 0x31, 0x32, 0x36};
 
+constexpr uint8_t kQuickAccessCapability[] = {0xF1, 0x0D, 0x01, 0x01, 0x02, 0x01, 0x00, 0x04, 0x00, 0x05, 0x01,
+                                              0x02, 0x02, 0x00, 0x04, 0x00, 0x05, 0x01, 0x02};
+
 } // namespace
 
 FakeHeadsetProfile FakeHeadsetProfile::xm5() {
     FakeHeadsetProfile p;
-    p.table1 = {0x12, 0x20, 0x25, 0x50, 0x69, 0x6B, 0x90, 0xA1, 0xD1, 0xE1, 0xE2, 0xF1, 0xF3, 0xF6, 0xFC};
+    p.table1 = {0x12, 0x20, 0x25, 0x50, 0x69, 0x6B, 0x90, 0xA1, 0xD1, 0xD2, 0xE1, 0xE2, 0xF1, 0xF3, 0xF6, 0xFC, 0xFD};
     p.table2 = {0x32, 0x31, 0x42, 0xF0};
     return p;
 }
@@ -295,13 +298,16 @@ void FakeHeadset::handle(Table table, const Bytes& p, Bytes& out, bool& ackFirst
     }
     case 0xD6:
         if (type == profile.multipointSlot) reply({0xD7, type, 0x00, static_cast<uint8_t>(multipoint ? 0x00 : 0x01)});
-        else reply({0xD7, type, 0x00, 0x00});
+        else reply({0xD7, type, 0x00, static_cast<uint8_t>(touchPanel ? 0x00 : 0x01)});
         return;
     case 0xD8:
         if (type == profile.multipointSlot) {
             pendingMultipoint_ = true;
             pendingMultipointValue_ = (at(3) == 0x00);
             notify({0x99, 0x00, 0x07, 0x01});
+        } else {
+            touchPanel = (at(3) == 0x00);
+            notify({0xD9, type, 0x00, at(3)});
         }
         return;
     case 0xE0: reply({0xE1, 0x01, 0x02}); return;
@@ -320,6 +326,10 @@ void FakeHeadset::handle(Table table, const Bytes& p, Bytes& out, bool& ackFirst
         }
         return;
     case 0xF0: {
+        if (type == 0x0D) {
+            reply(Bytes(std::begin(kQuickAccessCapability), std::end(kQuickAccessCapability)));
+            return;
+        }
         Bytes r{0xF1, type};
         if (type == 0x0E) r.push_back(0x00);
         r.push_back(0x01);
@@ -342,6 +352,10 @@ void FakeHeadset::handle(Table table, const Bytes& p, Bytes& out, bool& ackFirst
             Bytes r{0xF7, type, static_cast<uint8_t>(assignable.size())};
             r.insert(r.end(), assignable.begin(), assignable.end());
             reply(r);
+        } else if (type == 0x0D) {
+            Bytes r{0xF7, 0x0D, static_cast<uint8_t>(quickAccess.size())};
+            r.insert(r.end(), quickAccess.begin(), quickAccess.end());
+            reply(r);
         }
         return;
     case 0xF8:
@@ -355,6 +369,11 @@ void FakeHeadset::handle(Table table, const Bytes& p, Bytes& out, bool& ackFirst
             assignable.assign(p.begin() + 3, p.end());
             Bytes r{0xF9, type, static_cast<uint8_t>(assignable.size())};
             r.insert(r.end(), assignable.begin(), assignable.end());
+            notify(r);
+        } else if (type == 0x0D) {
+            quickAccess.assign(p.begin() + 3, p.end());
+            Bytes r{0xF9, 0x0D, static_cast<uint8_t>(quickAccess.size())};
+            r.insert(r.end(), quickAccess.begin(), quickAccess.end());
             notify(r);
         }
         return;

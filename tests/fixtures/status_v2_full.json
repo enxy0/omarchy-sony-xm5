@@ -26,7 +26,9 @@
     "codec": true,
     "multipoint": true,
     "devices": true,
-    "source_switch": true
+    "source_switch": true,
+    "touch_panel": true,
+    "quick_access": true
   },
   "battery_level": 80,
   "battery_charging": false,
@@ -60,5 +62,10 @@
   "multipoint": false,
   "devices": [
     {"address": "F0:1D:BC:AA:00:01", "name": "laptop", "connected": true, "active": true}
-  ]
+  ],
+  "touch_panel": true,
+  "quick_access_double_tap": "off",
+  "quick_access_triple_tap": "spotify",
+  "quick_access_double_tap_options": ["off", "spotify"],
+  "quick_access_triple_tap_options": ["off", "spotify"]
 }

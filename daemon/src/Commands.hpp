@@ -28,6 +28,8 @@ enum class Verb {
     ConnectionQuality,
     Multipoint,
     Source,
+    TouchPanel,
+    QuickAccess,
     TestSetBattery,
     TestDisconnect,
     TestReconnect,

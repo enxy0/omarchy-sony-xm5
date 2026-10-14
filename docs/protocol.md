@@ -310,6 +310,7 @@ Only the IDs this project uses. Full lists: mos9527 `ProtocolV2.hpp`,
 | `69` | AMBIENT_SOUND_CONTROL_MODE_SELECT | NC/AMB button cycle |
 | `6B` | MODE_NC_ASM_NOISE_CANCELLING_DUAL_AMBIENT_SOUND_MODE_LEVEL_ADJUSTMENT | NC/ASM, inquired type `17` |
 | `6D` | same + NOISE_ADAPTATION | NC/ASM, inquired type `19` |
+| `70` | AUTO_NCASM | Adaptive Sound Control; not implemented (section 6) |
 | `90` | FIXED_MESSAGE | confirmation alerts |
 | `A1`..`A4` | PLAYBACK_CONTROLLER_* | headset volume |
 | `D1`..`D4` | GENERAL_SETTING_1..4 | general setting slots (multipoint, touch panel) |
@@ -338,7 +339,9 @@ Only the IDs this project uses. Full lists: mos9527 `ProtocolV2.hpp`,
 | `43` | VOICE_GUIDANCE_VOLUME_SETTING_MTK_FIXED_TO_5_STEPS | voice guidance volume |
 | `44` | VOICE_GUIDANCE_SETTING_SUPPORT_LANGUAGE_SWITCH | voice guidance, inquired type `02` |
 | `45` | VOICE_GUIDANCE_SETTING_ONLY_ON_OFF_SWITCH | voice guidance, inquired type `03` |
+| `50` | SAFE_LISTENING_HBS_1 | sound pressure; not implemented (section 6) |
 | `F0` | WEARING_STATUS_CHECKER | worn sensor |
+| `F2` | QUICK_ACCESS_EASY_SETTING | Quick Access setup from the phone app; not implemented (section 6) |
 
 ## 5. Features
 
@@ -754,15 +757,66 @@ Other operations in the same group (not in the contract yet):
 | Gate | T1 `23` POWER_OFF |
 | SET | T1 `24 03 01` (POWER_SET_STATUS, POWER_OFF, USER_POWER_OFF) |
 
+### 5.17 Touch panel on/off
+
+The touch sensor control panel is a **general setting** slot, like
+multipoint (5.13). Find the slot by its subject, never by its number.
+
+| Item | Value |
+|---|---|
+| Confidence | read: **confirmed on WH-1000XM5 fw 2.5.1** (slot `D1`, `D7 D1 00 00` = on). SET: **verified on XM5** (mos9527 "Touch Sensor Enable/Disable ✅", which writes the generic GsSetParamBoolean); not yet sent by this project to a real XM5 |
+| Gate | T1 `Dn` (n = 1..4) **and** the slot capability subject is `"TOUCH_PANEL_SETTING"` with `ST = 00` (boolean) |
+| GET capability | T1 `D0 Dn 01` → `D1 Dn 00 01 13 "TOUCH_PANEL_SETTING" 00` |
+| GET value | T1 `D6 Dn` → `D7 Dn 00 VV` (NTFY `D9 Dn 00 VV`) |
+| SET | T1 `D8 Dn 00 VV` |
+| `VV` | `GsSettingValue`: `00` on, `01` off |
+
+No source describes a confirmation alert for this slot; the daemon does not
+open the alert window for it.
+
+### 5.18 Quick Access
+
+Quick Access assigns a phone app to a double or triple press of a key. The
+headset stores the assignment; the app runs on the phone.
+
+| Item | Value |
+|---|---|
+| Confidence | reads: **confirmed on WH-1000XM5 fw 2.5.1** (capability and value below). Layout: mos9527 `SystemRetCapabilityQuickAccess`, `SystemRetParamQuickAccess`, `SystemSetParamQuickAccess` (no handler in mos9527 `libmdr/src`). SET: **verified on XM5** by Gadgetbridge (`QuickAccess` capability in its XM5 coordinator; facts only); not yet sent by this project to a real XM5 |
+| Gate | T1 `FD` QUICK_ACCESS |
+| GET capability | T1 `F0 0D` → `F1 0D KK KT NA (AC DF NF (FN) x NF) x NA` |
+| GET value | T1 `F6 0D` → `F7 0D NN (FN) x NN` (NTFY `F9 0D NN (FN) x NN`) |
+| SET | T1 `F8 0D NN (FN) x NN`, one function per action, in capability order |
+
+| Byte | Meaning |
+|---|---|
+| `KK` | `QuickAccessKey`: `00` L/R key, `01` NC/AMB key, `02` fixed Quick Access key |
+| `KT` | key `Type`: `00` touch sensor, `01` button, `02` face tap |
+| `AC` | `Action`: `01` double tap, `02` triple tap (others exist in the enum) |
+| `DF` | default function of this action |
+| `FN` | Quick Access function. `00` off, `01` Spotify (both from Gadgetbridge, which only names these two). Other values have no name in any source; the contract shows them as `other` |
+
+XM5 fw 2.5.1 capture:
+
+| Request | Reply | Meaning |
+|---|---|---|
+| T1 `F0 0D` | `F1 0D 01 01 02 01 00 04 00 05 01 02 02 00 04 00 05 01 02` | NC/AMB key, a button, two actions. Double tap and triple tap both default to `00` and accept `00`, `05`, `01`, `02` |
+| T1 `F6 0D` | `F7 0D 02 00 00` | double tap off, triple tap off |
+
+Gadgetbridge sends `F8 0D 02 DD TT` (double, then triple), which matches the
+capability order above. The daemon writes the full list and changes only the
+requested action. Functions `02` and `05` are accepted by the XM5 but have no
+known meaning, so the daemon does not offer them.
+
 ## 6. Features we skip
 
 | Feature | Reason |
 |---|---|
 | Playback control and track metadata (T1 `A2`/`A4`, `A6 01`) | The desktop already controls playback through MPRIS and AVRCP. mos9527 reports the XM5 metadata notify as broken |
-| Safe listening / sound pressure (T2 `5A`, `58`) | Needs periodic polling and a health-style UI; no value for a bar widget |
+| Safe listening / sound pressure (T2 `50` SAFE_LISTENING_HBS_1; GET `5A 00` → `5B 00 LP EC`) | The XM5 advertises T2 `50`, and mos9527 reads `5A 00` in its periodic sync. But the reply has no stable meaning for us: the level `LP` ("levelPerPeriod") has no unit or period in any source, and `EC` (`SafeListeningErrorCause`) has no "valid" value (`00` not playing, `01` in call, `02` detached). The XM5 fw 2.5.1 answered `5B 00 00 03` twice, 30 s apart, while audio played: level 0 and cause `03`, which is outside the enum. The Sony app builds its Safe Listening data from timestamped log records (`SafeListeningData`, `logCapacity`) over an app session. **Confidence**: capture-based; skipped |
+| Adaptive Sound Control (T1 `70` AUTO_NCASM) | The XM5 advertises T1 `70`. In mos9527 the matching command group is SENSE (`70`..`7B`): the phone sends `SENSE_SET_STATUS` (start / end setting) and `SENSE_SET_PARAM` with the NC/ASM values to apply; the headset only answers with NTFY. There is no GET for an on/off state or a sensitivity: the activity detection runs in the phone app. The only NC sensitivity in the protocol (`NoiseAdaptiveSensitivity`) belongs to NC/ASM type `19` (T1 `6D`), which the XM5 does not advertise. mos9527 has no implementation. **Confidence**: from the mos9527 message definitions; skipped |
+| Quick Access easy setting (T2 `F2` QUICK_ACCESS_EASY_SETTING) | Only `SYSTEM_SET_PARAM` (GATT setting, preset list, function list) and an NTFY with OK / CANCELED exist. It is the phone app's one-step setup, with no GET. Quick Access itself is read and set through T1 `FD` (5.18) |
 | 360 Reality Audio | Needs the Sony app account and ear photo analysis; no MDR setting is useful on a PC |
-| Touch panel on/off (general setting `"TOUCH_PANEL_SETTING"`) | Can be added later with the same mechanism as multipoint (5.13) |
-| Quick Access, head gestures, listening modes (BGM, cinema) | Not requested for this widget |
+| Head gestures, listening modes (BGM, cinema) | Not requested for this widget |
 
 ## 7. Upstream implementation review
 

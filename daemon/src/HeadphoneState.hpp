@@ -7,6 +7,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace omarchy::sony::protocol {
@@ -50,6 +51,21 @@ struct AssignableCapability {
     std::vector<AssignableKey> keys;
 };
 
+inline constexpr uint8_t kActionDoubleTap = 0x01;
+inline constexpr uint8_t kActionTripleTap = 0x02;
+
+struct QuickAccessAction {
+    uint8_t action{0};
+    uint8_t defaultFunction{0};
+    std::vector<uint8_t> functions;
+};
+
+struct QuickAccessCapability {
+    uint8_t key{0};
+    uint8_t keyType{0};
+    std::vector<QuickAccessAction> actions;
+};
+
 struct PairedDevice {
     std::string address;
     std::string name;
@@ -76,6 +92,8 @@ struct Supported {
     bool multipoint{false};
     bool devices{false};
     bool source_switch{false};
+    bool touch_panel{false};
+    bool quick_access{false};
 
     static Supported fallback();
     bool operator==(const Supported&) const = default;
@@ -90,6 +108,7 @@ struct Variants {
     uint8_t assignableType{0x03};
     uint8_t deviceListType{0x02};
     std::optional<uint8_t> multipointSlot;
+    std::optional<uint8_t> touchPanelSlot;
 };
 
 struct HeadphoneState {
@@ -113,6 +132,7 @@ struct HeadphoneState {
     std::array<GeneralSettingSlot, 4> generalSettings{};
     std::optional<EqCapability> eqCapability;
     std::optional<AssignableCapability> assignableCapability;
+    std::optional<QuickAccessCapability> quickAccessCapability;
     std::optional<uint8_t> upscalingType;
 
     std::optional<Supported> supported;
@@ -152,9 +172,12 @@ struct HeadphoneState {
     uint8_t playbackSlot{0};
     std::optional<bool> sourceSwitchAuto;
     std::optional<uint8_t> pairingMode;
+    std::optional<std::vector<uint8_t>> quickAccessValue;
 
     [[nodiscard]] bool hasFunction(Table table, uint8_t id) const;
+    [[nodiscard]] const GeneralSettingSlot* settingSlot(std::string_view subject) const;
     [[nodiscard]] const GeneralSettingSlot* multipointSlot() const;
+    [[nodiscard]] const GeneralSettingSlot* touchPanelSlot() const;
     [[nodiscard]] const AssignableKey* ncAmbKey() const;
     [[nodiscard]] std::optional<uint8_t> ncAmbKeyIndex() const;
 
@@ -166,7 +189,11 @@ struct HeadphoneState {
     [[nodiscard]] std::optional<std::string> buttonFunctionString() const;
     [[nodiscard]] std::optional<std::vector<std::string>> buttonFunctionOptions() const;
     [[nodiscard]] std::optional<bool> multipointValue() const;
+    [[nodiscard]] std::optional<bool> touchPanelValue() const;
     [[nodiscard]] std::optional<bool> worn() const;
+    [[nodiscard]] std::optional<size_t> quickAccessIndex(uint8_t action) const;
+    [[nodiscard]] std::optional<std::string> quickAccessString(uint8_t action) const;
+    [[nodiscard]] std::optional<std::vector<std::string>> quickAccessOptions(uint8_t action) const;
 
     void resetForConnection(const std::string& name, const std::optional<std::string>& addr);
 };

@@ -391,6 +391,14 @@ Bytes setVoiceGuidanceVolume(int volume) {
     return {0x48, 0x20, static_cast<uint8_t>(static_cast<int8_t>(std::clamp(volume, -2, 2))), 0x00};
 }
 
+Bytes getQuickAccessCapability() { return {0xF0, 0x0D}; }
+Bytes getQuickAccess() { return {0xF6, 0x0D}; }
+Bytes setQuickAccess(const std::vector<uint8_t>& functions) {
+    Bytes out{0xF8, 0x0D, static_cast<uint8_t>(functions.size())};
+    out.insert(out.end(), functions.begin(), functions.end());
+    return out;
+}
+
 } // namespace req
 
 // ---------------------------------------------------------------------------
@@ -432,6 +440,7 @@ constexpr NamedValue kButtonFunctions[] = {
 constexpr NamedValue kSensitivity[] = {{0x00, "auto"}, {0x01, "high"}, {0x02, "low"}};
 constexpr NamedValue kTimeout[] = {{0x00, "short"}, {0x01, "standard"}, {0x02, "long"}, {0x03, "off"}};
 constexpr NamedValue kConnectionQuality[] = {{0x00, "sound"}, {0x01, "connection"}};
+constexpr NamedValue kQuickAccess[] = {{0x00, "off"}, {0x01, "spotify"}};
 
 template <size_t N>
 std::optional<std::string> nameOf(const NamedValue (&table)[N], uint8_t value) {
@@ -468,6 +477,8 @@ std::string connectionQualityName(uint8_t priorMode) {
     return nameOf(kConnectionQuality, priorMode).value_or("other");
 }
 std::optional<uint8_t> connectionQualityValue(std::string_view name) { return valueOf(kConnectionQuality, name); }
+std::string quickAccessName(uint8_t function) { return nameOf(kQuickAccess, function).value_or("other"); }
+std::optional<uint8_t> quickAccessValue(std::string_view name) { return valueOf(kQuickAccess, name); }
 
 std::string hexByte(uint8_t value) {
     char buf[8];

@@ -11,6 +11,7 @@ namespace omarchy::sony::protocol {
 namespace {
 
 constexpr std::string_view kMultipointSubject = "MULTIPOINT_SETTING";
+constexpr std::string_view kTouchPanelSubject = "TOUCH_PANEL_SETTING";
 
 // Bounds-checked reader over one payload.
 class Reader {
@@ -301,7 +302,24 @@ bool applyT1(std::span<const uint8_t> p, HeadphoneState& s, InboundEvents& ev) {
         if (type == 0x00 || type == 0x02) { s.connectionQuality = value; return true; }
         return false;
     }
-    case 0xF1: { // SYSTEM_RET_CAPABILITY (assignable)
+    case 0xF1: { // SYSTEM_RET_CAPABILITY (assignable, quick access)
+        if (type == 0x0D) {
+            QuickAccessCapability cap;
+            cap.key = r.u8();
+            cap.keyType = r.u8();
+            uint8_t actionCount = r.u8();
+            for (uint8_t a = 0; a < actionCount && r.ok(); ++a) {
+                QuickAccessAction action;
+                action.action = r.u8();
+                action.defaultFunction = r.u8();
+                uint8_t n = r.u8();
+                for (uint8_t i = 0; i < n && r.ok(); ++i) action.functions.push_back(r.u8());
+                if (r.ok()) cap.actions.push_back(std::move(action));
+            }
+            if (!r.ok()) return false;
+            s.quickAccessCapability = std::move(cap);
+            return true;
+        }
         if (type != 0x03 && type != 0x0E) return false;
         AssignableCapability cap;
         cap.type = type;
@@ -328,12 +346,13 @@ bool applyT1(std::span<const uint8_t> p, HeadphoneState& s, InboundEvents& ev) {
             s.speakToChat = (value == 0x00);
             return true;
         }
-        if (type == 0x03 || type == 0x0E) {
+        if (type == 0x03 || type == 0x0E || type == 0x0D) {
             uint8_t n = r.u8();
-            std::vector<uint8_t> presets;
-            for (uint8_t i = 0; i < n && r.ok(); ++i) presets.push_back(r.u8());
+            std::vector<uint8_t> values;
+            for (uint8_t i = 0; i < n && r.ok(); ++i) values.push_back(r.u8());
             if (!r.ok()) return false;
-            s.assignableValue = std::move(presets);
+            if (type == 0x0D) s.quickAccessValue = std::move(values);
+            else s.assignableValue = std::move(values);
             return true;
         }
         return false;
@@ -470,14 +489,18 @@ bool HeadphoneState::hasFunction(Table table, uint8_t id) const {
     return std::any_of(list->begin(), list->end(), [id](const SupportEntry& e) { return e.id == id; });
 }
 
-const GeneralSettingSlot* HeadphoneState::multipointSlot() const {
+const GeneralSettingSlot* HeadphoneState::settingSlot(std::string_view subject) const {
     for (const auto& slot : generalSettings) {
-        if (slot.advertised && slot.capabilityRead && slot.type == 0x00 && slot.subject == kMultipointSubject) {
+        if (slot.advertised && slot.capabilityRead && slot.type == 0x00 && slot.subject == subject) {
             return &slot;
         }
     }
     return nullptr;
 }
+
+const GeneralSettingSlot* HeadphoneState::multipointSlot() const { return settingSlot(kMultipointSubject); }
+
+const GeneralSettingSlot* HeadphoneState::touchPanelSlot() const { return settingSlot(kTouchPanelSubject); }
 
 std::optional<uint8_t> HeadphoneState::ncAmbKeyIndex() const {
     if (!assignableCapability) return std::nullopt;
@@ -561,6 +584,45 @@ std::optional<bool> HeadphoneState::multipointValue() const {
     return slot->value;
 }
 
+std::optional<bool> HeadphoneState::touchPanelValue() const {
+    const auto* slot = touchPanelSlot();
+    if (!slot) return std::nullopt;
+    return slot->value;
+}
+
+std::optional<size_t> HeadphoneState::quickAccessIndex(uint8_t action) const {
+    if (quickAccessCapability) {
+        const auto& actions = quickAccessCapability->actions;
+        for (size_t i = 0; i < actions.size(); ++i) {
+            if (actions[i].action == action) return i;
+        }
+        return std::nullopt;
+    }
+    if (action == kActionDoubleTap) return size_t{0};
+    if (action == kActionTripleTap) return size_t{1};
+    return std::nullopt;
+}
+
+std::optional<std::string> HeadphoneState::quickAccessString(uint8_t action) const {
+    auto idx = quickAccessIndex(action);
+    if (!idx || !quickAccessValue || *idx >= quickAccessValue->size()) return std::nullopt;
+    return quickAccessName((*quickAccessValue)[*idx]);
+}
+
+std::optional<std::vector<std::string>> HeadphoneState::quickAccessOptions(uint8_t action) const {
+    if (!quickAccessCapability) return std::nullopt;
+    auto idx = quickAccessIndex(action);
+    if (!idx) return std::nullopt;
+    std::vector<std::string> names;
+    for (uint8_t function : quickAccessCapability->actions[*idx].functions) {
+        auto name = quickAccessName(function);
+        if (name == "other") continue;
+        if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
+    }
+    if (names.empty()) return std::nullopt;
+    return names;
+}
+
 std::optional<bool> HeadphoneState::worn() const {
     if (!wornStatus) return std::nullopt;
     switch (*wornStatus) {
@@ -616,6 +678,8 @@ void selectVariants(HeadphoneState& s) {
     }
     const auto* mp = s.multipointSlot();
     if (mp) v.multipointSlot = mp->slot; else v.multipointSlot.reset();
+    const auto* tp = s.touchPanelSlot();
+    if (tp) v.touchPanelSlot = tp->slot; else v.touchPanelSlot.reset();
 }
 
 Supported deriveSupported(const HeadphoneState& s) {
@@ -640,7 +704,7 @@ Supported deriveSupported(const HeadphoneState& s) {
                           s.ncAmbKey() != nullptr;
     out.ear_detection = t1(fn1::PLAYBACK_CONTROL_BY_WEARING);
     out.worn = s.table2Supported && s.support2.has_value() &&
-               (t2(fn2::WEARING_STATUS_CHECKER) || t1(fn1::WEARING_STATUS_DETECTOR) || t1(fn1::PLAYBACK_CONTROL_BY_WEARING));
+               (t2(fn2::WEARING_STATUS_CHECKER) || t1(fn1::WEARING_STATUS_DETECTOR));
     bool anyPlayback = false;
     for (uint8_t id = fn1::PLAYBACK_CONTROLLER_FIRST; id <= fn1::PLAYBACK_CONTROLLER_LAST; ++id) anyPlayback |= t1(id);
     out.volume = anyPlayback;
@@ -651,6 +715,8 @@ Supported deriveSupported(const HeadphoneState& s) {
                   t2(fn2::PAIRING_DEVICE_MANAGEMENT_WITH_COD_CLASSIC_BT) ||
                   t2(fn2::PAIRING_DEVICE_MANAGEMENT_WITH_COD_CLASSIC_LE);
     out.source_switch = t2(fn2::SOURCE_SWITCH_CONTROL) && out.devices;
+    out.touch_panel = s.touchPanelSlot() != nullptr;
+    out.quick_access = t1(fn1::QUICK_ACCESS);
     return out;
 }
 
@@ -739,6 +805,8 @@ std::string statusJson(const HeadphoneState& s, int64_t lastUpdated) {
         w.field("multipoint", sup.multipoint);
         w.field("devices", sup.devices);
         w.field("source_switch", sup.source_switch);
+        w.field("touch_panel", sup.touch_panel);
+        w.field("quick_access", sup.quick_access);
         w.endObject();
     }
 
@@ -834,6 +902,14 @@ std::string statusJson(const HeadphoneState& s, int64_t lastUpdated) {
         }
         w.endArray();
     }
+
+    w.field("touch_panel", gate(sup.touch_panel, s.touchPanelValue()));
+    w.field("quick_access_double_tap", gate(sup.quick_access, s.quickAccessString(kActionDoubleTap)));
+    w.field("quick_access_triple_tap", gate(sup.quick_access, s.quickAccessString(kActionTripleTap)));
+    w.key("quick_access_double_tap_options");
+    writeStringArray(w, sup.quick_access ? s.quickAccessOptions(kActionDoubleTap) : std::nullopt);
+    w.key("quick_access_triple_tap_options");
+    writeStringArray(w, sup.quick_access ? s.quickAccessOptions(kActionTripleTap) : std::nullopt);
 
     w.endObject();
     return w.str();
