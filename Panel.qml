@@ -402,6 +402,10 @@ Panel {
   function activate(id, index) {
     var i = index === undefined ? 0 : index
     setCursor(id, i)
+    if (Model.isSettingTarget(id)) {
+      persistSettings(Model.settingActivation(root.settings, id))
+      return
+    }
     var a = Model.targetActivation(st, id, i)
     if (!a) return
     if (a.expand) toggleExpanded(a.expand)
@@ -418,7 +422,7 @@ Panel {
   property bool cursorActive: false
   property string focusSection: ""
   property int selectedIndex: 0
-  readonly property var cursorSections: Model.cursorSections(st, expanded)
+  readonly property var cursorSections: Model.panelCursorSections(st, expanded)
 
   function hasCursor(id, index) {
     return cursorActive && focusSection === id && selectedIndex === (index === undefined ? 0 : index)
@@ -491,6 +495,7 @@ Panel {
     case "multipointHeader": return multipointHeader
     case "multipoint": return multipointToggle
     case "devices": return deviceRepeater.itemAt(index)
+    case "barPercentage": return barPercentageToggle
     default: return null
     }
   }
@@ -534,26 +539,54 @@ Panel {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
+  // ---- widget settings (inline fields of the shell.json bar entry) ----------
+
+  readonly property bool showPercentage: Model.showBarPercentage(root.settings)
+
+  // Same path as the first-party Power and Clock widgets: update the local
+  // copy at once, then let the shell write shell.json.
+  function persistSettings(values) {
+    var entry = Model.settingsEntry(root.moduleName, root.settings, values)
+    root.settings = entry
+    if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
+      root.bar.shell.updateEntryInline(root.moduleName, entry)
+  }
+
   // ---- bar button ----------------------------------------------------------
 
-  WidgetButton {
+  readonly property string barText: Model.barText(root.st, root.showPercentage, button.vertical)
+  // As Power does with its percentage: the open-panel dot spans what the
+  // button paints, not a fraction of the wider slot.
+  readonly property real openPanelIndicatorWidth: barText !== "" ? barContent.implicitWidth : 0
+
+  // BarIconButton gives the first-party icon slot: Style.bar.iconSlot along
+  // the bar, the bar thickness across it. With the percentage the slot is two
+  // icon slots, as Power uses, and grows only when the text needs more, so
+  // the side padding never drops below what an icon slot leaves around its
+  // canvas.
+  BarIconButton {
     id: button
     anchors.fill: parent
     bar: root.bar
-    labelVisible: false
     hasVisualContent: true
-    fixedWidth: vertical ? -1 : (contentRow.implicitWidth + scaledHorizontalMargin * 2)
+    slotSize: root.barText === ""
+      ? Style.bar.iconSlot
+      : Math.max(Style.bar.iconSlot * 2,
+                 Math.ceil(barContent.implicitWidth) + Style.bar.iconSlot - Style.bar.iconCanvas)
     tooltipText: Model.barTooltip(root.st)
 
     readonly property color contentColor: button.active ? button.activeColor : button.foreground
 
     Row {
-      id: contentRow
+      id: barContent
       anchors.centerIn: parent
       spacing: Style.space(4)
 
       SonyIcon {
         anchors.verticalCenter: parent.verticalCenter
+        // Vector icons in first-party bar buttons size themselves with
+        // Style.space (Tailscale 11, Dropbox 12); 14 gives this outline the
+        // painted height of the neighbouring glyphs.
         iconSize: Style.space(14)
         connected: root.live
         batteryLevel: root.st.batteryLevel
@@ -564,23 +597,24 @@ Panel {
 
       Text {
         anchors.verticalCenter: parent.verticalCenter
-        visible: !button.vertical && text !== ""
+        visible: text !== ""
         textFormat: Text.PlainText
-        text: Model.barBatteryText(root.st)
+        text: root.barText
         color: button.contentColor
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
+        font.family: button.fontFamily
+        font.pixelSize: Style.bar.iconFont
         renderType: Text.NativeRendering
       }
 
       Text {
         anchors.verticalCenter: parent.verticalCenter
-        visible: !button.vertical && Model.isCharging(root.st)
+        visible: Model.barChargingHint(root.st, root.showPercentage, button.vertical)
         textFormat: Text.PlainText
         text: "\u{F0241}"
         color: button.contentColor
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
+        font.family: button.fontFamily
+        font.pixelSize: Style.bar.iconFont
+        renderType: Text.NativeRendering
       }
     }
 
@@ -1408,27 +1442,45 @@ Panel {
             }
           }
 
-          // -- info footer ----------------------------------------------------
-          PanelSeparator {
-            visible: infoFooter.visible
-            foreground: root.foreground
-          }
+          // -- widget settings and info footer --------------------------------
+          // Omarchy has no settings screen for bar widgets, so the bar
+          // display toggle lives here; it writes the same shell.json field as
+          // `omarchy bar set`. Shown in every state, connected or not.
+          PanelSeparator { foreground: root.foreground }
 
           Column {
             id: infoFooter
             width: parent.width
-            spacing: Style.space(2)
-            visible: footerRepeater.count > 0
+            spacing: Style.space(6)
 
-            Repeater {
-              id: footerRepeater
-              model: Model.footerLines(root.st)
+            Toggle {
+              id: barPercentageToggle
+              width: parent.width
+              label: "Battery percentage in the bar"
+              description: "Off shows only the icon; the tooltip keeps the level"
+              checked: root.showPercentage
+              hasCursor: root.hasCursor("barPercentage")
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.activate("barPercentage")
+              onHovered: function(h) { if (h) root.setCursor("barPercentage") }
+            }
 
-              Caption {
-                required property var modelData
-                text: String(modelData)
-                foreground: root.foreground
-                fontFamily: root.fontFamily
+            Column {
+              width: parent.width
+              spacing: Style.space(2)
+              visible: footerRepeater.count > 0
+
+              Repeater {
+                id: footerRepeater
+                model: Model.footerLines(root.st)
+
+                Caption {
+                  required property var modelData
+                  text: String(modelData)
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
               }
             }
           }

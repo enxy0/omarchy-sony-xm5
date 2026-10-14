@@ -928,6 +928,18 @@ function isCharging(status) {
   return showBattery(status) && status.batteryCharging === true;
 }
 
+// Text beside the bar icon. Empty in icon-only mode and on a vertical bar,
+// as the first-party Power widget does; the tooltip keeps the battery.
+function barText(status, showPercentage, vertical) {
+  if (showPercentage !== true || vertical === true) return "";
+  return barBatteryText(status);
+}
+
+// The charging bolt goes with the percentage text.
+function barChargingHint(status, showPercentage, vertical) {
+  return barText(status, showPercentage, vertical) !== "" && isCharging(status);
+}
+
 function barTooltip(status) {
   if (!status || status.ok !== true) {
     if (status && status.schemaTooNew) return "Sony headphones: update the widget\n" + status.lastError;
@@ -1260,4 +1272,71 @@ function adjustedValue(status, id, index, delta) {
   default:
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Widget settings: inline fields of the plugin's shell.json bar entry, the
+// same store first-party widgets use. manifest.json declares the defaults and
+// the schema; `omarchy bar set <id> <key> <value>` writes them as strings
+// unless given --json, so a value is read leniently.
+// ---------------------------------------------------------------------------
+
+var SETTING_SHOW_PERCENTAGE = "showPercentage";
+// Icon only by default, like the first-party Power widget.
+var SETTING_DEFAULTS = { showPercentage: false };
+
+function settingBool(settings, key) {
+  var fallback = SETTING_DEFAULTS[key] === true;
+  var v = settings ? settings[key] : undefined;
+  if (v === true || v === false) return v;
+  if (typeof v === "number") return v !== 0;
+  if (typeof v === "string") {
+    var s = v.trim().toLowerCase();
+    if (s === "true" || s === "on" || s === "yes" || s === "1") return true;
+    if (s === "false" || s === "off" || s === "no" || s === "0") return false;
+  }
+  return fallback;
+}
+
+function showBarPercentage(settings) {
+  return settingBool(settings, SETTING_SHOW_PERCENTAGE);
+}
+
+// The bar entry to persist: the current fields, `values` on top, `id` first.
+function settingsEntry(moduleName, settings, values) {
+  var entry = { id: moduleName };
+  var key;
+  for (key in settings || {}) if (key !== "id") entry[key] = settings[key];
+  for (key in values || {}) if (key !== "id") entry[key] = values[key];
+  return entry;
+}
+
+// Popup targets for widget settings. They do not depend on the headset, so
+// they follow the status targets and stay reachable while disconnected.
+var SETTING_TARGETS = {
+  barPercentage: { kind: "single", setting: SETTING_SHOW_PERCENTAGE }
+};
+var SETTING_TARGET_ORDER = ["barPercentage"];
+
+function isSettingTarget(id) {
+  return SETTING_TARGETS.hasOwnProperty(id);
+}
+
+// Status targets, then setting targets: the cursor list of the popup.
+function panelCursorSections(status, expanded) {
+  var list = cursorSections(status, expanded);
+  for (var i = 0; i < SETTING_TARGET_ORDER.length; i++) {
+    var id = SETTING_TARGET_ORDER[i];
+    list.push({ id: id, kind: SETTING_TARGETS[id].kind, count: 1 });
+  }
+  return list;
+}
+
+// Enter/Space or a click on a setting target: the fields to persist, or null.
+function settingActivation(settings, id) {
+  var t = SETTING_TARGETS[id];
+  if (!t) return null;
+  var values = {};
+  values[t.setting] = !settingBool(settings, t.setting);
+  return values;
 }

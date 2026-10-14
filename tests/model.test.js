@@ -570,6 +570,49 @@ suite("Suite 23: Target Table", () => {
   check("Minimal: headers hidden", Model.targetState(Model.parseStatus(fixture("status_v2_minimal.json")), "headset"), "hidden");
 });
 
+suite("Suite 24: Bar Display Setting", () => {
+  const s = full();
+  const charging = Object.assign({}, s, { batteryCharging: true });
+  const off = Model.parseStatus(fixture("status_v2_disconnected.json"));
+  check("Default is icon only", [Model.showBarPercentage({}), Model.showBarPercentage(null), Model.showBarPercentage(undefined)], [false, false, false]);
+  check("Boolean values", [Model.showBarPercentage({ showPercentage: false }), Model.showBarPercentage({ showPercentage: true })], [false, true]);
+  check("Strings from omarchy bar set", ["false", "False", " off ", "0", "no", "true", "on", "1", "yes"].map((v) => Model.showBarPercentage({ showPercentage: v })),
+    [false, false, false, false, false, true, true, true, true]);
+  check("Numbers", [Model.showBarPercentage({ showPercentage: 0 }), Model.showBarPercentage({ showPercentage: 1 })], [false, true]);
+  check("Unreadable value falls back to the default", [Model.showBarPercentage({ showPercentage: "maybe" }), Model.showBarPercentage({ showPercentage: null })], [false, false]);
+
+  check("Percentage mode text", Model.barText(s, true, false), "80%");
+  check("Icon-only mode has no text", Model.barText(s, false, false), "");
+  check("Vertical bar has no text", Model.barText(s, true, true), "");
+  check("Disconnected percentage mode shows a dash", Model.barText(off, true, false), "—");
+  check("Bolt with the percentage while charging", Model.barChargingHint(charging, true, false), true);
+  check("No bolt in icon-only mode", Model.barChargingHint(charging, false, false), false);
+  check("No bolt on a vertical bar", Model.barChargingHint(charging, true, true), false);
+  check("No bolt while not charging", Model.barChargingHint(s, true, false), false);
+  // Icon-only mode keeps the battery in the tooltip and the icon tint inputs.
+  check("Tooltip keeps the battery", Model.barTooltip(charging).split("\n").pop(), "Battery 80% (charging)");
+  check("Charging state for the icon tint", Model.isCharging(charging), true);
+
+  check("Entry keeps other fields and puts id first",
+    JSON.stringify(Model.settingsEntry("io.github.androydified.omasony", { id: "x", statusPath: "/tmp/s.json" }, { showPercentage: true })),
+    JSON.stringify({ id: "io.github.androydified.omasony", statusPath: "/tmp/s.json", showPercentage: true }));
+  check("Entry ignores an id in the new values", Model.settingsEntry("a", null, { id: "b", showPercentage: true }), { id: "a", showPercentage: true });
+
+  check("Setting target", [Model.isSettingTarget("barPercentage"), Model.isSettingTarget("dsee"), Model.isSettingTarget("toString")], [true, false, false]);
+  check("Activation flips the default", Model.settingActivation({}, "barPercentage"), { showPercentage: true });
+  check("Activation flips a string value", Model.settingActivation({ showPercentage: "true" }, "barPercentage"), { showPercentage: false });
+  check("Activation of an unknown target", Model.settingActivation({}, "dsee"), null);
+
+  check("Popup cursor ends with the setting", ids(Model.panelCursorSections(s, {})).slice(-2), ["multipointHeader", "barPercentage"]);
+  check("Status cursor list is unchanged", ids(Model.cursorSections(s, {})).includes("barPercentage"), false);
+  check("Setting reachable while disconnected", Model.panelCursorSections(off, {}), [{ id: "barPercentage", kind: "single", count: 1 }]);
+  check("Setting reachable without a status file", ids(Model.panelCursorSections(Model.parseStatus(""), {})), ["barPercentage"]);
+  const down = Model.cursorMove({ section: "multipointHeader", index: 0 }, 0, 1, Model.panelCursorSections(s, {}));
+  check("Cursor moves from the last section to the setting", [down.section, down.index, down.action], ["barPercentage", 0, null]);
+  const side = Model.cursorMove({ section: "barPercentage", index: 0 }, 1, 0, Model.panelCursorSections(s, {}));
+  check("h/l on the setting does nothing", [side.section, side.action], ["barPercentage", null]);
+});
+
 console.log(`\nSummary: ${passed} passed, ${failed} failed`);
 if (failed > 0) {
   if (typeof Deno !== "undefined") Deno.exit(1);
