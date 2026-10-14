@@ -1,9 +1,12 @@
-# WH-1000XM5 MDR v2 protocol reference
+# Sony XM5 MDR v2 protocol reference (WH-1000XM5, WF-1000XM5)
 
 This document describes the Sony MDR protocol, version 2, as the WH-1000XM5
-speaks it over Bluetooth RFCOMM. It is the byte-level reference for the
-daemon (`daemon/src/MDRProtocol.*`). The contract between the daemon and the
-bar widget is a separate document: [`backend-contract.md`](backend-contract.md).
+headphones and the WF-1000XM5 earbuds speak it over Bluetooth RFCOMM. It is
+the byte-level reference for the daemon (`daemon/src/MDRProtocol.*`).
+Sections 1 to 8 describe the WH-1000XM5; most of it applies to the
+WF-1000XM5 too. Section 9 lists what is new or different on the WF-1000XM5.
+The contract between the daemon and the bar widget is a separate document:
+[`backend-contract.md`](backend-contract.md).
 
 ## Sources and confidence
 
@@ -15,6 +18,8 @@ All byte values come from these sources.
 | mos9527 `docs/device-support/WH-1000XM5.md` | MIT | Which features users confirmed on a real XM5 |
 | Gadgetbridge `SonyWH1000XM5Coordinator.java`, `SonyProtocolImplV2.java` | AGPL-3.0 | Facts only (feature list of the XM5, a few byte values). No code or text is copied |
 | Capture from a WH-1000XM5, firmware 2.5.1, made with this daemon (init sequence, `sony-ctl probe`, `sony-ctl status`) | this project | What the device advertises and answers. Section 3.4 |
+| Capture from a WF-1000XM5, firmware 6.1.0, made with this daemon (read-only init, `sony-ctl probe`, `sony-ctl status`) | this project | What the earbuds advertise and answer. Section 9.1 |
+| mos9527 `docs/device-support/WF-1000XM5.md` and the packet captures in `tests/WF-1000XM5-6.1.0/` | MIT | Which features work on a real WF-1000XM5; replies this daemon did not request (L/R and case battery) |
 
 Each feature table has a **Confidence** value:
 
@@ -25,6 +30,11 @@ Each feature table has a **Confidence** value:
   the Gadgetbridge XM5 coordinator enables it.
 - **in code, unverified on XM5**: the layout exists in mos9527 (or Gadgetbridge
   for other models), but no source confirms it on an XM5.
+
+Section 9 uses the same three levels for the earbuds: **confirmed on
+WF-1000XM5 fw 6.1.0** (our capture, section 9.1), **verified on WF-1000XM5**
+(mos9527 `WF-1000XM5.md` or its WF-1000XM5 packet captures), and **in code,
+unverified on WF**.
 
 Notation: all numbers are hexadecimal unless written in words. A request or
 reply is shown as its **payload** bytes only (what goes inside the frame). The
@@ -568,10 +578,11 @@ steps through. The assignment chooses what the button does at all.
 | SET | T1 `F8 03 NN (preset) x NN` |
 
 Each key in the capability is: `KEY TYPE DEFAULT NP (presetCapability) x NP`,
-and each preset capability is `PRESET NA (ACTION FUNCTION) x NA NC
-(ACTION DEFAULT NF (FUNCTION) x NF) x NC`. See mos9527 `AssignableSettingsKey`
-and `AssignableSettingsPresetCapability`. `KEY` `04` = NC_AMB_KEY,
-`05` = NC_AMBIENT_KEY, `02` = CUSTOM.
+and each preset capability is `PRESET NA NC (ACTION FUNCTION) x NA
+(ACTION DEFAULT NF (FUNCTION) x NF) x NC`: both counts come before both
+lists (mos9527 `AssignableSettingsPresetCapability::Read`; confirmed by the
+WF-1000XM5 capture in 9.3). `KEY` `04` = NC_AMB_KEY, `05` = NC_AMBIENT_KEY,
+`02` = CUSTOM; `00` / `01` = left / right side (9.3).
 
 The value list has one preset per key, in capability key order. SET must
 send the full list; change only the NC/AMB key.
@@ -878,4 +889,392 @@ Run `sony-ctl probe` (see the contract) on a real XM5 to answer these:
     holds the ACK, `sony-ctl multipoint` returns `ERR device timeout` after
     1.8 s, then the queued answer goes out and the toggle still applies. The
     `recent_frames` of `sony-ctl probe` show which order the XM5 uses.
-12. What do `CS` and `PB` look like with two connected sources?
+12. What do `CS` and `PB` look like with two connected sources? The
+    WF-1000XM5 capture (section 9.1) shows it for the earbuds: the two
+    connected sources have `CS = 01` and `CS = 02`, and `PB = 01`. Not yet
+    captured on the WH-1000XM5.
+
+## 9. WF-1000XM5 earbuds
+
+The WF-1000XM5 speaks the same MDR v2 protocol on the same RFCOMM service
+(channel 9 in the capture). Framing, ACK rules, the init order (section 3)
+and every feature layout in section 5 apply unchanged, unless this section
+says otherwise. The features below are gated by the support function lists
+exactly as on the WH-1000XM5; the daemon needs no model check to choose a
+request.
+
+### 9.1 Capture: WF-1000XM5, firmware 6.1.0
+
+One read-only init sequence of this daemon (the WH-1000XM5 build) against a
+real WF-1000XM5. Addresses and names are replaced. Every request got its
+ACK.
+
+**Identity**
+
+| Request | Reply | Meaning |
+|---|---|---|
+| T1 `00 00` | `01 00 03 00 30 18 00 00` | protocol version `03003018` (50343960); table 1 and table 2 supported |
+| T1 `02 00` | `03 00 0C 11 <17 bytes>` | capability counter `0C`; the unique ID is the earbuds' own Bluetooth address |
+| T1 `04 02` | `05 02 05 "6.1.0"` | firmware version |
+| T1 `04 01` | `05 01 0A "WF-1000XM5"` | model name |
+| T1 `04 03` | `05 03 30 03` | series `30` (PREMIUM), color `03` |
+
+The earbuds sent one unsolicited T1 `F5 10 01 00` before the protocol info
+reply (see "Unsolicited packets" below). The receiver must accept data
+packets before the first reply.
+
+**Support function lists**
+
+T1 `06 00` → `07 00 2E ...`, 46 IDs (priority in brackets, none = `FF`):
+
+| ID | Name | ID | Name |
+|---|---|---|---|
+| `10` | CONCIERGE_DATA | `12` | CODEC_INDICATOR |
+| `13` | UPSCALING_INDICATOR | `14` | BLE_SETUP |
+| `15` | TUTORIAL_CONTENTS_SELECT_ON_CONCIERGE | `16` | CONNECTION_ESTABLISHED_TIME |
+| `17` | UNNECESSARY_AUTO_RECONNECTION | `23` | POWER_OFF |
+| `25` | AUTO_POWER_OFF_WITH_WEARING_DETECTION (`36`) | `11` | CONNECTION_STATUS |
+| `27` | TANDEM_KEEP_ALIVE | `29` | LR_BATTERY_LEVEL_WITH_THRESHOLD |
+| `2A` | CRADLE_BATTERY_LEVEL_WITH_THRESHOLD | `92` | FIXED_MESSAGE_WITH_LR_SELECTION |
+| `50` | PRESET_EQ (`11`) | `6B` | MODE_NC_ASM_NOISE_CANCELLING_DUAL_AMBIENT_SOUND_MODE_LEVEL_ADJUSTMENT (`08`) |
+| `70` | AUTO_NCASM (`01`) | `90` | FIXED_MESSAGE |
+| `A1` | PLAYBACK_CONTROLLER_WITH_CALL_VOLUME_ADJUSTMENT (`12`) | `C1` | ACTION_LOG_NOTIFIER |
+| `C2` | TIME_SERIES_OPERATIONLOG_NOTIFIER | `E2` | UPSCALING_AUTO_OFF (`1B`) |
+| `F1` | PLAYBACK_CONTROL_BY_WEARING_REMOVING_HEADPHONE_ON_OFF (`38`) | `FC` | SMART_TALKING_MODE_TYPE2 (`0D`) |
+| `93` | VOICE_ASSISTANT_ALERT_NOTIFICATION | `F6` | WEARING_STATUS_DETECTOR (`33`) |
+| `F9` | RESET_SETTINGS (`41`) | `D1` | GENERAL_SETTING_1 (`3B`) |
+| `94` | LE_AUDIO_ALERT_NOTIFICATION | `40` | TWS_SUPPORTS_A2DP_LEA_UNI_LEA_BROAD_WITH_CTKD (`2E`) |
+| `42` | CLASSIC_ONLY_LE_CLASSIC_SETTING (`3A`) | `44` | CHANGE_TANDEM_CONNECTION_PROFILE_FOR_ANDROID |
+| `FF` | HEAD_GESTURE_ON_OFF_TRAINING (`2D`) | `19` | PHONE_AND_CONNECTED_DEVICE_INFOMATION_FOR_CLASSIC |
+| `F3` | ASSIGNABLE_SETTING (`26`) | `E7` | CONNECTION_MODE_CLASSIC_AUDIO_LE_AUDIO (`1A`) |
+| `D2` | GENERAL_SETTING_2 (`20`) | `FD` | QUICK_ACCESS (`2B`) |
+| `B6` | SAR_OPTIMIZATION_ACCEL_TYPE (`1D`) | `B0` | SAR (`42`) |
+| `B2` | GATT_CONNECTABLE (`43`) | `B8` | INTEGRATED_AUTO_PLAY (`1F`) |
+| `B7` | HEAD_TRACKER_ACCEL_TYPE (`15`) | `34` | FW_UPDATE_MTK_TRANSFER_WITHOUT_DISCONNECTION_AUTO_UPDATE (`3F`) |
+| `F4` | VOICE_ASSISTANT_SETTINGS (`23`) | `F5` | VOICE_ASSISTANT_WAKE_WORD_ON_OFF (`24`) |
+
+T2 `06 00` → `07 00 0B ...`, 11 IDs:
+
+| ID | Name |
+|---|---|
+| `42` | VOICE_GUIDANCE_SETTING_MTK_TRANSFER_WITHOUT_DISCONNECTION_SUPPORT_LANGUAGE_SWITCH_AND_VOLUME_ADJUSTMENT (`3D`) |
+| `53` | SAFE_LISTENING_TWS_2 |
+| `54` | SAFE_VOLUME_CONTROL |
+| `F1` | REPEAT_TAP_TRAINING_MODE |
+| `60` | LE_AUDIO_CONNECTION_STATE_NOTIFICATION |
+| `61` | LE_AUDIO_SWITCH_SUPPORTED_COMPATIBILITY |
+| `F2` | QUICK_ACCESS_EASY_SETTING |
+| `63` | GET_IDENTITY_RESOLVING_KEY |
+| `F8` | LINK_AUTO_SWITCH_FOR_HEADSETS (`30`) |
+| `32` | PAIRING_DEVICE_MANAGEMENT_WITH_BLUETOOTH_CLASS_OF_DEVICE_CLASSIC_BT (`04`) |
+| `31` | SOURCE_SWITCH_CONTROL |
+
+Not advertised: T1 `20`, `21`, `22`, `24`, `28`, `68`, `69`, `6D`, `E1`,
+`E3`, `ED`, `FE`, and T2 `30`, `33`, `40`, `41`, `43`..`45`, `50`, `F0`.
+
+**Variants the daemon chose**
+
+| Feature | Advertised | Variant |
+|---|---|---|
+| Battery | T1 `29`, `2A` (not `20` or `28`) | the WH-1000XM5 daemon has no request for these; battery stayed unknown. See 9.2 |
+| NC/ASM | T1 `6B` | type `17`, as on the WH-1000XM5 |
+| Auto power off | T1 `25` | type `05` |
+| DSEE | T1 `E2` | type `01`; capability `E1 01 02` = DSEE_HX_AI |
+| Connection quality | T1 `E7` (not `E1` or `E3`) | none; see 9.5 |
+| General settings | T1 `D1`, `D2` | `D1` = `SIDETONE_SETTING`, `D2` = `MULTIPOINT_SETTING`. No `TOUCH_PANEL_SETTING` slot |
+| Button assignment | T1 `F3` | type `03`; per-side touch sensor keys, see 9.3 |
+| Device list | T2 `32` | type `02` |
+| Voice guidance | T2 `42` | type `01`, with volume (`46 20`) |
+
+**Capability and value replies**
+
+| Request | Reply | Meaning |
+|---|---|---|
+| T1 `D0 D1 01` | `D1 D1 00 01 10 "SIDETONE_SETTING" 18 "SIDETONE_SETTING_SUMMARY"` | boolean, enum name |
+| T1 `D0 D2 01` | `D1 D2 00 01 12 "MULTIPOINT_SETTING" 29 "MULTIPOINT_SETTING_SUMMARY_LDAC_AVAILABLE"` | boolean, enum name |
+| T1 `E0 01` | `E1 01 02` | DSEE_HX_AI |
+| T1 `F0 03` | `F1 03 02 ...` (79 bytes) | two touch sensor keys, left and right. Full bytes and decoding in 9.3 |
+| T1 `50 00 01` | `51 00 06 15 0C (PID 00) x 0C` | 6 bands, 21 steps, 12 presets: `00`, `10`..`17`, `A0`, `A1`, `A2`; empty names. Same as the WH-1000XM5 |
+| T1 `F0 0D` | `F1 0D 00 00 02 01 00 00 02 00 00` | Quick Access: L/R key, touch sensor, double tap and triple tap, each with default `00` and **no** selectable function. See 9.6 |
+| T1 `94 00 00` | ACK only | FIXED_MESSAGE alerts enabled |
+| T1 `D6 D1` | `D7 D1 00 00` | sidetone on |
+| T1 `D6 D2` | `D7 D2 00 00` | multipoint on |
+| T1 `12 02` | `13 02 10` | codec LDAC |
+| T1 `A6 20` | `A7 20 12` | volume 18 |
+| T1 `66 17` | `67 17 01 00 00 00 14` | NC/ASM off, mode NC, Focus on Voice off, ambient level 20 |
+| T2 `32 02` | `33 02 00 00` | pairing mode normal |
+| T2 `36 02` | `37 02 04 (ADDR CS COD name) x 4 01` | four paired devices. This computer: `CS = 01`, COD `6C 01 04`. A phone: `CS = 02`, COD `5A 42 0C`. Two others: `CS = 00`, COD `FF FF FF`. `PB = 01`: this computer plays audio |
+| T2 `36 01` | `37 01 01` | automatic source switch on |
+| T1 `F6 0C` | `F7 0C 01 01` | Speak-to-Chat off |
+| T1 `FA 0C` | `FB 0C 00 01` | sensitivity auto, timeout standard |
+| T1 `52 00` | `53 00 00` | EQ can be used |
+| T1 `56 00` | `57 00 00 06 0A 0A 0A 0A 0A 0A` | preset off, six band steps at level 0 |
+| T1 `E2 01` | `E3 01 00` | DSEE available |
+| T1 `E6 01` | `E7 01 00` | DSEE off |
+| T1 `F6 03` | `F7 03 02 20 20` | left and right touch sensor: both PLAYBACK_CONTROL |
+| T1 `26 05` | `27 05 10 00` | auto power off: when taken off |
+| T1 `F6 01` | `F7 01 00` | pause when taken off: on |
+| T2 `F2 00` | `F3 00 00` | worn: both earbuds in the ears. The WH-1000XM5 does not answer this request |
+| T2 `46 01` | `47 01 00 01` | voice guidance on; the last byte is the language |
+| T2 `46 20` | `47 20 00` | voice guidance volume 0 |
+| T1 `F6 0D` | `F7 0D 02 00 00` | Quick Access double tap off, triple tap off |
+| T1 `C4 01 00` | ACK only | operation log enabled |
+
+**Unsolicited packets**
+
+| Payload | Meaning (mos9527 enums) |
+|---|---|
+| T1 `C9 01 0B "lUnitRemove" 00 00`, `C9 01 0B "rUnitRemove" 00 00`, `C9 01 09 "rUnitWear" 00 00`, `C9 01 09 "lUnitWear" 00 00` | operation log lines when an earbud is taken out or put in. The first letter is the side (`l`, `r`), and `U` is upper case. The WH-1000XM5 sends `"unitWear"` / `"unitRemove"` |
+| T1 `F5 10 01 00`, `F5 10 01 01` | SYSTEM_NTFY_STATUS, inquired type `10` HEAD_GESTURE_TRAINING: `01` = OUT_OF_TEST_MODE, then `EnableDisable`. It flips together with the wear log lines. Ignore it |
+
+### 9.2 Battery: left, right and case
+
+The earbuds report one level per earbud and one for the charging case.
+There is no single battery value (no T1 `20` or `28`).
+
+| Item | Value |
+|---|---|
+| Confidence | **verified on WF-1000XM5** (mos9527 "Battery Life ✅"; replies below from its fw 6.1.0 packet capture). Not yet requested by this daemon |
+| Gate L/R | T1 `29` LR_BATTERY_LEVEL_WITH_THRESHOLD → type `09`; else T1 `21` LEFT_RIGHT_BATTERY_LEVEL_INDICATOR → type `01` |
+| Gate case | T1 `2A` CRADLE_BATTERY_LEVEL_WITH_THRESHOLD → type `0A`; else T1 `22` CRADLE_BATTERY_LEVEL_INDICATOR → type `02` |
+| GET | T1 `22 09` (or `22 01`); T1 `22 0A` (or `22 02`) |
+| RET L/R | `23 09 LL LC RL RC LT RT` (type `01`: `23 01 LL LC RL RC`) |
+| RET case | `23 0A CL CC CT` (type `02`: `23 02 CL CC`) |
+| NTFY | `25` with the same layout as the RET |
+| SET | none |
+
+| Byte | Meaning |
+|---|---|
+| `LL`, `RL`, `CL` | level 0..100 of the left earbud, right earbud, case |
+| `LC`, `RC`, `CC` | `BatteryChargingStatus` (5.1): `00` not charging, `01` charging, `02` unknown, `03` charged |
+| `LT`, `RT`, `CT` | threshold of the left earbud, right earbud, case. Not used |
+
+mos9527 WF-1000XM5 fw 6.1.0 capture:
+
+| Request | Reply | Meaning |
+|---|---|---|
+| T1 `22 09` | `23 09 00 00 64 00 64 64` | left 0 %, not charging; right 100 %, not charging; thresholds 100 |
+| T1 `22 0A` | `23 0A 35 00 1E` | case 53 %, not charging, threshold 30 |
+
+The capture does not say why the left earbud reads 0 %. It may have been in
+the case or switched off. See 9.10, question 1.
+
+Re-read L/R and case battery in the periodic sync (3.3), as for T1 `20`.
+
+### 9.3 Touch sensor function per earbud (ASSIGNABLE_SETTING)
+
+The WF-1000XM5 has a touch sensor on each earbud. The user chooses one
+**preset** per side; the preset decides what a tap, double tap, triple tap
+and hold do. This is the same message as 5.8 "Assignment", with two keys.
+
+| Item | Value |
+|---|---|
+| Confidence | capability and value read: **confirmed on WF-1000XM5 fw 6.1.0**. SET: **verified on WF-1000XM5** (mos9527 "Touch Sensor Gesture ✅"; its capture reads `F7 03 02 35 20`); not yet sent by this project |
+| Gate | T1 `F3` → type `03` (T1 `FE` → type `0E`, layout below with `LT`) |
+| GET capability | T1 `F0 03` → `F1 03 NK (key) x NK` (type `0E`: `F1 0E LT NK (key) x NK`) |
+| GET value | T1 `F6 03` → `F7 03 NN (PRESET) x NN` (NTFY `F9 03 NN (PRESET) x NN`) |
+| SET | T1 `F8 03 NN (PRESET) x NN`: one preset per key, in capability key order. Always send the full list |
+
+The section 5.8 key layout was incomplete. The exact layout (mos9527
+`AssignableSettingsPresetCapability::Read`) is:
+
+```
+key    = KEY TYPE DEFAULT NP (preset) x NP
+preset = PRESET NA NC (ACTION FUNCTION) x NA (ACTION DEFAULT NF (FUNCTION) x NF) x NC
+```
+
+`NA` and `NC` both come **before** the two lists. `NA` = fixed actions,
+`NC` = customizable actions (the user picks one of `NF` functions). The
+daemon's parser at the time of the capture rejected this reply ("unhandled
+payload"), so `sony-ctl probe` showed `assignable.type: null`. It must
+parse this layout.
+
+| Field | Values (mos9527 `t1` enums) |
+|---|---|
+| `KEY` (`Key`) | `00` LEFT_SIDE, `01` RIGHT_SIDE, `02` CUSTOM, `03` C, `04` NC_AMB_KEY, `05` NC_AMBIENT_KEY |
+| `TYPE` | `00` touch sensor, `01` button |
+| `ACTION` (`Action`) | `00` single tap, `01` double tap, `02` triple tap, `03` repeat tap, `10` single tap and hold, `11` double tap and hold, `21` long press then activate, `22` long press during activate |
+| `FUNCTION` (`Function`) | `00` none, `01` NC → Ambient → Off, `02` NC → Ambient, `03` NC → Off, `04` Ambient → Off, `10` Quick Attention, `20` play/pause, `21` next track, `22` previous track, `23` volume up, `24` volume down, `43` Quick Access 1, `44` Quick Access 2 (others in the enum) |
+| `PRESET` (`Preset`) | see the table below |
+
+Capture (fw 6.1.0), one line per key:
+
+```
+F1 03 02
+00 00 35 03  35 04 01 01 43 02 44 22 10 03 24 00 02 04 01 02 03 04  20 04 00 00 20 01 21 02 22 03 24  FF 01 00 00 00
+01 00 20 03  35 04 01 01 43 02 44 22 10 03 23 00 02 04 01 02 03 04  20 04 00 00 20 01 21 02 22 03 23  FF 01 00 00 00
+```
+
+Decoded:
+
+| Key | Type | Default | Preset | Fixed actions | Customizable actions |
+|---|---|---|---|---|---|
+| `00` left | touch | `35` | `35` | double tap → `43`, triple tap → `44`, long press during activate → `10`, repeat tap → `24` | single tap: default `02`, one of `01`, `02`, `03`, `04` |
+| | | | `20` | single → `20`, double → `21`, triple → `22`, repeat tap → `24` | none |
+| | | | `FF` | single → `00` | none |
+| `01` right | touch | `20` | `35` | same as left, but repeat tap → `23` | same as left |
+| | | | `20` | single → `20`, double → `21`, triple → `22`, repeat tap → `23` | none |
+| | | | `FF` | single → `00` | none |
+
+So each earbud accepts three presets: Ambient Sound Control (with Quick
+Access on double and triple tap), Playback Control, and none. Repeat tap
+changes the volume (left down, right up).
+
+Preset IDs and contract values (contract `touch_function_left` /
+`touch_function_right`):
+
+| `PRESET` | mos9527 name | Contract value |
+|---|---|---|
+| `00` | AMBIENT_SOUND_CONTROL | `ambient_sound_control` |
+| `35` | AMBIENT_SOUND_CONTROL_QUICK_ACCESS | `ambient_sound_control` |
+| `10` | VOLUME_CONTROL | `volume_control` |
+| `20` | PLAYBACK_CONTROL | `playback_control` |
+| `30` | VOICE_RECOGNITION | `voice_recognition` |
+| `31` | GOOGLE_ASSIST | `google_assistant` |
+| `32` | AMAZON_ALEXA | `amazon_alexa` |
+| `36` | QUICK_ACCESS | `quick_access` |
+| `FF` | NO_FUNCTION | `none` |
+| other | | `other` |
+
+Two IDs map to `ambient_sound_control`. For a SET, the daemon sends the ID
+that the capability lists for that key; if a key lists both, it sends `35`.
+
+SET example, left to Ambient Sound Control, right kept at Playback Control:
+`F8 03 02 35 20`. The device answers with NTFY `F9 03 02 35 20`; read `F6 03`
+again if no NTFY arrives.
+
+The customizable single-tap function of preset `35` (which NC/ASM modes a
+single tap cycles through) has no known GET or SET in mos9527. It is not in
+the contract.
+
+### 9.4 Wearing status per earbud
+
+| Item | Value |
+|---|---|
+| Confidence | read: **confirmed on WF-1000XM5 fw 6.1.0** (`F3 00 00`). Per-side codes `02`, `03`: **in code, unverified on WF** (mos9527 `WearingStatusCode`) |
+| Gate | as 5.9: table 2 present and (T2 `F0` or T1 `F6`). The WF-1000XM5 advertises T1 `F6`, not T2 `F0` |
+| GET | T2 `F2 00` → `F3 00 WS` (NTFY `F5 00 WS`) |
+
+| `WS` | Meaning | `worn` | `worn_left` | `worn_right` |
+|---|---|---|---|---|
+| `00` | both earbuds in the ears | `true` | `true` | `true` |
+| `01` | sensor error | `null` | `null` | `null` |
+| `02` | left earbud not worn | `true` | `false` | `true` |
+| `03` | right earbud not worn | `true` | `true` | `false` |
+| `04` | neither earbud worn | `false` | `false` | `false` |
+
+T1 `F6` WEARING_STATUS_DETECTOR is the earpiece fit test (mos9527
+`SystemRetParamWearingStatusDetector`: fitting results, earpiece series and
+size), not the wear sensor. It only satisfies the gate; the daemon never
+sends its requests.
+
+Re-read trigger: the earbuds send the log lines `"lUnitWear"`,
+`"rUnitWear"`, `"lUnitRemove"`, `"rUnitRemove"` (9.1). The daemon's match
+for `"unitWear"` / `"unitRemove"` must ignore case, else it misses them.
+
+### 9.5 Connection mode: classic audio / LE audio
+
+| Item | Value |
+|---|---|
+| Confidence | **in code, unverified on WF**. The daemon did not send these requests. mos9527 has the message layouts but no handler and no names for `V1`, `V2` |
+| Gate | T1 `E7` CONNECTION_MODE_CLASSIC_AUDIO_LE_AUDIO → audio inquired type `05` |
+| GET capability | T1 `E0 05` → `E1 05 NP (PM) x NP NL (LX) x NL`: accepted `PriorMode` values, then LDAC exclusive features (`00` GATT_CONNECTABLE) |
+| GET status | T1 `E2 05` → `E3 05 V1 V2` (NTFY `E5 05 V1 V2`), both `EnableDisable` |
+| SET | T1 `E8 05 PM V2` (`PriorMode` as in 5.11, then `EnableDisable`) |
+
+The WF-1000XM5 advertises T1 `E7` instead of `E1` / `E3`, so
+`connection_quality` (5.11) is unsupported on it. The Sony app's "sound
+quality / stable connection" choice for the earbuds probably lives in the
+`PM` byte of this message, and LE audio on/off in `V1` or `V2`. No source
+confirms either, and mos9527 has no GET_PARAM reply layout for type `05`.
+The connection from this computer is always classic Bluetooth (RFCOMM, LDAC
+in the capture). The contract therefore does not expose this message yet.
+`sony-ctl probe` should include the raw `E1 05` and `E3 05` replies so a
+device run can name the bytes (9.10, question 3).
+
+### 9.6 Quick Access on the WF-1000XM5
+
+The WF-1000XM5 advertises T1 `FD`, but its capability lists no selectable
+function: `F1 0D 00 00 02 01 00 00 02 00 00` = key `00` (L/R key), type `00`
+(touch sensor), two actions (double tap, triple tap), each with default
+`00` and `NF = 00`. The value reply `F7 0D 02 00 00` reads off / off.
+
+On the earbuds, Quick Access is part of the touch preset `35` (double tap →
+`43` Quick Access 1, triple tap → `44` Quick Access 2, 9.3); the phone app
+assigns the app through T2 `F2` QUICK_ACCESS_EASY_SETTING (section 6). The
+contract hides Quick Access when every action in the capability has
+`NF = 00`.
+
+**Confidence**: **confirmed on WF-1000XM5 fw 6.1.0** (capability and value
+read).
+
+### 9.7 Sidetone (capture voice during a call)
+
+Sidetone plays the user's own voice in the earbuds during a phone call. It
+is a general setting slot (5.13), found by its subject.
+
+| Item | Value |
+|---|---|
+| Confidence | read: **confirmed on WF-1000XM5 fw 6.1.0** (slot `D1`, `D7 D1 00 00` = on). SET: **verified on WF-1000XM5** (mos9527 "Capture Voice During a Phone Call ✅", generic GsSetParamBoolean); not yet sent by this project |
+| Gate | T1 `Dn` (n = 1..4) **and** the slot capability subject is `"SIDETONE_SETTING"` with `ST = 00` (boolean) |
+| GET capability | T1 `D0 Dn 01` → `D1 Dn 00 01 10 "SIDETONE_SETTING" 18 "SIDETONE_SETTING_SUMMARY"` |
+| GET value | T1 `D6 Dn` → `D7 Dn 00 VV` (NTFY `D9 Dn 00 VV`) |
+| SET | T1 `D8 Dn 00 VV` |
+| `VV` | `GsSettingValue`: `00` on, `01` off |
+
+No source describes a confirmation alert for this slot.
+
+### 9.8 Existing features on the WF-1000XM5
+
+| Feature (section) | On the WF-1000XM5 | Confidence |
+|---|---|---|
+| Battery (5.1) | no T1 `20` / `28`; use 9.2 | verified on WF-1000XM5 |
+| NC/ASM (5.2) | same, type `17` | read confirmed on WF-1000XM5 fw 6.1.0; setters verified on WF-1000XM5 (mos9527 "NC/AMB Settings") |
+| EQ (5.3) | same capability and value layout, presets incl. `user1`, `user2` | read confirmed on WF-1000XM5 fw 6.1.0; SET verified on WF-1000XM5 (mos9527 "Equalizer") |
+| DSEE (5.4) | same, DSEE_HX_AI | read confirmed on WF-1000XM5 fw 6.1.0 |
+| Speak-to-Chat (5.5) | same | read confirmed on WF-1000XM5 fw 6.1.0; verified on WF-1000XM5 (mos9527 "Speak to Chat") |
+| Voice guidance (5.6) | T2 `42`: on/off **and** volume (`47 20 00`) | read confirmed on WF-1000XM5 fw 6.1.0; volume SET verified on WF-1000XM5 (mos9527 "Voice Guidance Volume") |
+| Auto power off (5.7) | same, type `05` | read confirmed on WF-1000XM5 fw 6.1.0 |
+| NC/AMB button cycle (5.8) | no T1 `69`; unsupported | confirmed on WF-1000XM5 fw 6.1.0 |
+| Button assignment (5.8) | no NC/AMB key; per-side touch keys instead (9.3). `button_function` stays unsupported | confirmed on WF-1000XM5 fw 6.1.0 |
+| Pause when taken off (5.9) | same | read confirmed on WF-1000XM5 fw 6.1.0 |
+| Worn status (5.9) | answered, per side (9.4) | confirmed on WF-1000XM5 fw 6.1.0 |
+| Volume (5.10) | same | read confirmed on WF-1000XM5 fw 6.1.0; SET verified on WF-1000XM5 (mos9527 "Volume") |
+| Connection quality (5.11) | no T1 `E1` / `E3`; see 9.5 | confirmed on WF-1000XM5 fw 6.1.0 |
+| Codec (5.12) | same | confirmed on WF-1000XM5 fw 6.1.0 |
+| Multipoint (5.13) | same, slot `D2` | read confirmed on WF-1000XM5 fw 6.1.0 |
+| Devices, source switch (5.14) | same, T2 `32` and `31` | list read confirmed on WF-1000XM5 fw 6.1.0; switch verified on WF-1000XM5 (mos9527 "Multipoint Control (device change)") |
+| Power off (5.16) | T1 `23` | verified on WF-1000XM5 (mos9527 "Power Off") |
+| Touch panel on/off (5.17) | no `TOUCH_PANEL_SETTING` slot; unsupported | confirmed on WF-1000XM5 fw 6.1.0 |
+| Quick Access (5.18) | advertised, but no selectable function (9.6) | confirmed on WF-1000XM5 fw 6.1.0 |
+
+### 9.9 WF-1000XM5 features we skip
+
+| Feature | Reason |
+|---|---|
+| Safe listening (T2 `53` SAFE_LISTENING_TWS_2; GET `5A 03` → `5B 03 LP EC`) | Same layout and same problem as SAFE_LISTENING_HBS_1 in section 6: `LP` has no unit or period in any source, and `EC` has no "valid" value. The mos9527 WF-1000XM5 capture answers `5B 03 FF 00` (level `FF`, cause "not playing"). No defined readable meaning. **Confidence**: from the mos9527 capture; skipped |
+| Safe volume control (T2 `54`) | mos9527 names the inquired type (`04`) but has no message layout for it |
+| LE audio state and compatibility (T2 `60`, `61`, `63`; T1 `40`, `42`, `44`, `94`) | Notifications about the LE audio link to the phone. The link to this computer is classic Bluetooth |
+| Connection mode classic / LE audio (T1 `E7`) | Byte meanings unknown (9.5). Probe only |
+| Earpiece fit test (T1 `F6`), repeat tap training (T2 `F1`), head gestures (T1 `FF`) | Phone app procedures with no lasting state that a bar widget should show |
+| Fixed message with L/R selection (T1 `92`) | An alert variant that names a side. No contract feature opens such an alert. The daemon answers it like `99` only if a device run shows that a SET triggers it |
+| Adaptive Sound Control (T1 `70`) | As section 6 |
+
+### 9.10 Open questions for a real WF-1000XM5
+
+1. What does `23 09` report for an earbud that is in the closed case or out
+   of range: level `00` (as in the mos9527 capture), or a charging status
+   `02` (unknown)? The contract writes the reported values; the UI rule
+   for the bar battery depends on the answer.
+2. Does `23 0A` (case) answer while both earbuds are out of the case and
+   the lid is closed, and is the value then stale?
+3. What do `E1 05` and `E3 05 V1 V2` (9.5) return with LE audio on and off,
+   and with sound quality versus stable connection selected in the Sony
+   app?
+4. Does `F8 03 02 LL RR` apply at once and answer with NTFY `F9 03`?
+5. Does `F8 03` accept preset `00` (plain AMBIENT_SOUND_CONTROL), or only
+   the IDs the capability lists?
+6. Does the WF-1000XM5 send NTFY `25 09` / `25 0A` when a level changes, or
+   only when the charging status changes?
+7. Does `F3 00` ever report `02` or `03` (one earbud out), or does it report
+   `00` while at least one earbud is worn?
