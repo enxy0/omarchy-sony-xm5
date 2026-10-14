@@ -7,17 +7,20 @@ bar widget is a separate document: [`backend-contract.md`](backend-contract.md).
 
 ## Sources and confidence
 
-All byte values come from these sources. No value in this document was
-captured from a real XM5 by this project.
+All byte values come from these sources.
 
 | Source | License | Used for |
 |---|---|---|
 | [mos9527/SonyHeadphonesClient](https://github.com/mos9527/SonyHeadphonesClient) `libmdr/include/mdr/ProtocolV2.hpp`, `ProtocolV2T1.hpp`, `ProtocolV2T2.hpp`, `libmdr/src/HeadphonesV2*.cpp`, `libmdr/src/DetailsV2.hpp`, `libmdr/src/Command.cpp`, `libmdr/src/Headphones.cpp`, `client/Client.cpp` | MIT | Message layouts, enum values, init order, gating rules |
 | mos9527 `docs/device-support/WH-1000XM5.md` | MIT | Which features users confirmed on a real XM5 |
 | Gadgetbridge `SonyWH1000XM5Coordinator.java`, `SonyProtocolImplV2.java` | AGPL-3.0 | Facts only (feature list of the XM5, a few byte values). No code or text is copied |
+| Capture from a WH-1000XM5, firmware 2.5.1, made with this daemon (init sequence, `sony-ctl probe`, `sony-ctl status`) | this project | What the device advertises and answers. Section 3.4 |
 
 Each feature table has a **Confidence** value:
 
+- **confirmed on WH-1000XM5 fw 2.5.1**: the capture in section 3.4 shows the
+  request and the reply. For a setter this confirms the read path only,
+  unless the row says otherwise.
 - **verified on XM5**: mos9527 `WH-1000XM5.md` marks the feature as working, or
   the Gadgetbridge XM5 coordinator enables it.
 - **in code, unverified on XM5**: the layout exists in mos9527 (or Gadgetbridge
@@ -160,7 +163,7 @@ them per Bluetooth address.
 | 23 | T1 | `69` AMBIENT_SOUND_CONTROL_MODE_SELECT | `66 30` | NC/AMB button cycle |
 | 24 | T1 | `24` (else `25`) | `26 04` (for `25`: `26 05`) | auto power off |
 | 25 | T1 | `F1` PLAYBACK_CONTROL_BY_WEARING_REMOVING_HEADPHONE_ON_OFF | `F6 01` | pause when taken off |
-| 26 | T2 | table 2 present and (T2 `F0` or T1 `F6` or T1 `F1`) | `F2 00` | worn status |
+| 26 | T2 | table 2 present and (T2 `F0` or T1 `F6`); mos9527 also sends it for T1 `F1`, which the XM5 does not answer (3.4) | `F2 00` | worn status |
 | 27 | T2 | any of T2 `40`..`45` | `46 01` (and `46 20` if T2 `42` or `43`) | voice guidance on/off, voice guidance volume |
 | 28 | T1 | none | `C4 01 00` LOG_SET_STATUS, TIME_SERIES_OPERATIONLOG_NOTIFIER, ENABLE | the device then sends operation log lines (`C9`), including `"unitWear"` / `"unitRemove"` |
 
@@ -177,6 +180,114 @@ mos9527 `RequestSyncV2` re-reads values that the device does not always push:
 The battery is also pushed with `25` (NTFY). Re-read the worn status when a
 `C9 01` log line carries `"unitWear"` or `"unitRemove"`; the device does not
 push `F5 00` by itself (mos9527 `DetailsV2.hpp` comment).
+
+### 3.4 Capture: WH-1000XM5, firmware 2.5.1
+
+One full init sequence of this daemon against a real WH-1000XM5. Addresses
+and names of paired devices are replaced. Every request got its ACK.
+
+**Identity**
+
+| Request | Reply | Meaning |
+|---|---|---|
+| T1 `00 00` | `01 00 03 00 20 16 00 00` | protocol version `03002016` (50339862); table 1 and table 2 supported |
+| T1 `02 00` | `03 00 03 11 <17 bytes>` | capability counter `03`; the unique ID is the headset's own Bluetooth address |
+| T1 `04 02` | `05 02 05 "2.5.1"` | firmware version |
+| T1 `04 01` | `05 01 0A "WH-1000XM5"` | model name |
+| T1 `04 03` | `05 03 30 03` | series `30` (PREMIUM), color `03` (SILVER) |
+
+**Support function lists**
+
+T1 `06 00` → `07 00 21 ...`, 33 IDs (priority in brackets, `FF` = none):
+
+| ID | Name | ID | Name |
+|---|---|---|---|
+| `10` | CONCIERGE_DATA | `A1` | PLAYBACK_CONTROLLER_WITH_CALL_VOLUME_ADJUSTMENT (`0B`) |
+| `12` | CODEC_INDICATOR | `C1` | ACTION_LOG_NOTIFIER |
+| `13` | UPSCALING_INDICATOR | `C2` | TIME_SERIES_OPERATIONLOG_NOTIFIER |
+| `14` | BLE_SETUP | `E1` | CONNECTION_MODE_SOUND_QUALITY_CONNECTION_QUALITY (`0D`) |
+| `23` | POWER_OFF | `E2` | UPSCALING_AUTO_OFF (`0F`) |
+| `25` | AUTO_POWER_OFF_WITH_WEARING_DETECTION (`21`) | `F4` | VOICE_ASSISTANT_SETTINGS (`14`) |
+| `20` | BATTERY_LEVEL_INDICATOR | `93` | VOICE_ASSISTANT_ALERT_NOTIFICATION |
+| `27` | TANDEM_KEEP_ALIVE | `69` | AMBIENT_SOUND_CONTROL_MODE_SELECT (`1A`) |
+| `D1` | GENERAL_SETTING_1 (`19`) | `D2` | GENERAL_SETTING_2 (`12`) |
+| `32` | FW_UPDATE_MTK_TRANSFER_WITHOUT_DISCONNECTION (`26`) | `F9` | RESET_SETTINGS (`27`) |
+| `50` | PRESET_EQ (`0A`) | `B0` | SAR (`28`) |
+| `6B` | MODE_NC_ASM_NOISE_CANCELLING_DUAL_AMBIENT_SOUND_MODE_LEVEL_ADJUSTMENT (`06`) | `B2` | GATT_CONNECTABLE (`2B`) |
+| `70` | AUTO_NCASM (`01`) | `B6` | SAR_OPTIMIZATION_ACCEL_TYPE (`2A`) |
+| `90` | FIXED_MESSAGE | `F1` | PLAYBACK_CONTROL_BY_WEARING_REMOVING_HEADPHONE_ON_OFF (`23`) |
+| `FD` | QUICK_ACCESS (`1B`) | `FC` | SMART_TALKING_MODE_TYPE2 (`09`) |
+| `B8` | INTEGRATED_AUTO_PLAY | `B7` | HEAD_TRACKER_ACCEL_TYPE |
+| `19` | PHONE_AND_CONNECTED_DEVICE_INFOMATION_FOR_CLASSIC | | |
+
+T2 `06 00` → `07 00 06 41 25 50 FF F2 FF 32 03 31 FF F8 1E`:
+
+| ID | Name |
+|---|---|
+| `41` | VOICE_GUIDANCE_SETTING_MTK_TRANSFER_WITHOUT_DISCONNECTION_SUPPORT_LANGUAGE_SWITCH |
+| `50` | SAFE_LISTENING_HBS_1 |
+| `F2` | QUICK_ACCESS_EASY_SETTING |
+| `32` | PAIRING_DEVICE_MANAGEMENT_WITH_BLUETOOTH_CLASS_OF_DEVICE_CLASSIC_BT |
+| `31` | SOURCE_SWITCH_CONTROL |
+| `F8` | LINK_AUTO_SWITCH_FOR_HEADSETS |
+
+Not advertised: T1 `24`, `28`, `68`, `6D`, `E3`, `ED`, `F3`, `FE`, `F6`, and
+T2 `30`, `33`, `40`, `42`..`45`, `F0`.
+
+**Variants the daemon chose**
+
+| Feature | Advertised | Variant |
+|---|---|---|
+| Battery | T1 `20` | type `00` |
+| NC/ASM | T1 `6B` | type `17` |
+| Auto power off | T1 `25` | type `05` |
+| DSEE | T1 `E2` | type `01`; capability `E1 01 02` = DSEE_HX_AI (DSEE Extreme) |
+| Connection quality | T1 `E1` | type `00` |
+| General settings | T1 `D1`, `D2` | `D1` = `TOUCH_PANEL_SETTING`, `D2` = `MULTIPOINT_SETTING` |
+| Device list | T2 `32` | type `02` |
+| Voice guidance | T2 `41` | type `01` |
+
+**Capability and value replies**
+
+| Request | Reply | Meaning |
+|---|---|---|
+| T1 `D0 D1 01` | `D1 D1 00 01 13 "TOUCH_PANEL_SETTING" 00` | boolean, enum name, empty summary |
+| T1 `D0 D2 01` | `D1 D2 00 01 12 "MULTIPOINT_SETTING" 29 "MULTIPOINT_SETTING_SUMMARY_LDAC_AVAILABLE"` | boolean, enum name |
+| T1 `D6 D1` | `D7 D1 00 00` | touch panel on |
+| T1 `D6 D2` | `D7 D2 00 00` | multipoint on |
+| T1 `50 00 01` | `51 00 06 15 0C (PID 00) x 0C` | 6 bands, 21 steps, 12 presets: `00`, `10`..`17`, `A0`, `A1`, `A2`. Every preset name is an empty string |
+| T1 `52 00` | `53 00 00` | EQ can be used |
+| T1 `56 00` | `57 00 00 06 0A 0A 0A 0A 0A 0A` | preset `00` (off) **with** 6 band steps, all `0A` (level 0). See 5.3 |
+| T1 `22 00` | `23 00 35 00` | battery 53 %, not charging |
+| T1 `94 00 00` | ACK only | FIXED_MESSAGE alerts enabled |
+| T1 `12 02` | `13 02 10` | codec LDAC |
+| T1 `A6 20` | `A7 20 12` | volume 18 |
+| T1 `66 17` | `67 17 01 00 00 01 14` | NC/ASM off, mode NC, Focus on Voice on, ambient level 20 |
+| T2 `32 02` | `33 02 00 00` | pairing mode normal |
+| T2 `36 02` | `37 02 03 (ADDR CS COD name) x 3 01` | three paired devices; one has `CS = 01` and COD `6C 01 04`; the two others have `CS = 00` and COD `FF FF FF`; `PB = 01`. Names are UTF-8 and can hold non-ASCII text |
+| T2 `36 01` | `37 01 01` | automatic source switch on |
+| T1 `F6 0C` | `F7 0C 01 01` | Speak-to-Chat off |
+| T1 `FA 0C` | `FB 0C 00 01` | sensitivity auto, timeout standard |
+| T1 `E6 00` | `E7 00 00` | connection quality: sound |
+| T1 `E2 01` | `E3 01 00` | DSEE available |
+| T1 `E6 01` | `E7 01 00` | DSEE off |
+| T1 `66 30` | `67 30 01` | NC/AMB button cycles NC → Ambient → Off |
+| T1 `26 05` | `27 05 10 00` | auto power off: when taken off |
+| T1 `F6 01` | `F7 01 00` | pause when taken off: on |
+| T2 `F2 00` | **no reply** (ACK only) | worn status is not answered; also not in the periodic sync. See 5.9 |
+| T2 `46 01` | `47 01 00 01` | voice guidance on; the last byte is the language |
+| T1 `C4 01 00` | ACK only | operation log enabled |
+
+**Unsolicited packets after init** (the daemon does not parse them):
+
+| Payload | Meaning (mos9527 enums) |
+|---|---|
+| T1 `15 03 02 00` | COMMON_NTFY_STATUS, inquired type `03` UPSCALING_EFFECT |
+| T1 `45 01 00 02` | LEA group (`40`..`4F`), sent twice |
+
+**Features the XM5 does not have**: voice guidance volume (no T2 `42` or
+`43`; mos9527 also marks it ❌), button assignment (no T1 `F3` or `FE`, so
+`button_function` is unsupported), worn status (no T2 `F0` or T1 `F6`).
 
 ## 4. Function ID tables
 
@@ -210,6 +321,7 @@ Only the IDs this project uses. Full lists: mos9527 `ProtocolV2.hpp`,
 | `F3` | ASSIGNABLE_SETTING | button assignment |
 | `F6` | WEARING_STATUS_DETECTOR | worn sensor |
 | `FC` | SMART_TALKING_MODE_TYPE2 | Speak-to-Chat |
+| `FD` | QUICK_ACCESS | Quick Access (double / triple tap) |
 | `FE` | ASSIGNABLE_SETTING_WITH_LIMITATION | button assignment, variant |
 
 ### Table 2 function IDs
@@ -238,7 +350,7 @@ same layout unless a row says otherwise.
 
 | Item | Value |
 |---|---|
-| Confidence | **verified on XM5** (mos9527 "Battery Life", Gadgetbridge `BatterySingle`) |
+| Confidence | **confirmed on WH-1000XM5 fw 2.5.1** (T1 `20`, type `00`); also mos9527 "Battery Life", Gadgetbridge `BatterySingle` |
 | Gate | T1 `20` (type `00`), else T1 `28` (type `08`) |
 | GET | T1 `22 00` (or `22 08`) |
 | RET | `23 00 LL CC` (or `23 08 LL CC TT`) |
@@ -255,7 +367,7 @@ same layout unless a row says otherwise.
 
 | Item | Value |
 |---|---|
-| Confidence | **verified on XM5** (mos9527 "NC/AMB Settings", Gadgetbridge `AmbientSoundControl`), including ambient level and Focus on Voice |
+| Confidence | **confirmed on WH-1000XM5 fw 2.5.1**: the XM5 advertises T1 `6B`, so type `17`; GET `66 17` answers `67 17 ...`. Setters: **verified on XM5** (mos9527 "NC/AMB Settings", Gadgetbridge `AmbientSoundControl`), including ambient level and Focus on Voice |
 | Gate | T1 `6B` → inquired type `17`. T1 `6D` → type `19`. T1 `68` → type `15` (Gadgetbridge only) |
 | GET | T1 `66 17` |
 | RET | `67 17 VS TE MO AM LV` |
@@ -296,7 +408,7 @@ coordinator does not list that capability.
 
 | Item | Value |
 |---|---|
-| Confidence | presets: **verified on XM5** (Gadgetbridge `EqualizerWithCustomBands`; mos9527 notes "no way to choose presets" in its UI). Custom bands and Clear Bass: **verified on XM5** (mos9527 "Equalizer", Gadgetbridge) |
+| Confidence | reads: **confirmed on WH-1000XM5 fw 2.5.1** (capability with 6 bands, 21 steps, 12 presets; value reply with 6 band steps for preset `00`). Presets: **verified on XM5** (Gadgetbridge `EqualizerWithCustomBands`; mos9527 notes "no way to choose presets" in its UI). Custom bands and Clear Bass: **verified on XM5** (mos9527 "Equalizer", Gadgetbridge) |
 | Gate | T1 `50` PRESET_EQ |
 | GET capability | T1 `50 00 01` (inquired type PRESET_EQ, language English) |
 | RET capability | `51 00 BB SS NN (PID <string name>) x NN` |
@@ -316,6 +428,13 @@ coordinator does not list that capability.
 | `06` | `CB B1 B2 B3 B4 B5`: Clear Bass, then 400 Hz, 1 kHz, 2.5 kHz, 6.3 kHz, 16 kHz. Each value is `level + 10` (wire `00`..`14` = -10..+10) |
 | `0A` | 10-band EQ (other models), each value `level + 6`. Not used by the XM5 |
 
+The band steps describe the **active preset**, whatever its ID. The XM5
+fw 2.5.1 answers `57 00 00 06 0A 0A 0A 0A 0A 0A` for preset `00` (off): six
+steps, all level 0. mos9527 (`HandleEqEbbParamT1`) stores the band steps for
+every preset ID, not only for `A0`. So a reply for a non-custom preset
+carries that preset's curve; the stored custom curve cannot be read while
+another preset is active.
+
 Preset IDs (`EqPresetId`):
 
 | PID | Contract value | PID | Contract value |
@@ -334,7 +453,7 @@ names. After a SET, mos9527 sends `56 00` again to read the result.
 
 | Item | Value |
 |---|---|
-| Confidence | **in code, unverified on XM5** (Gadgetbridge marks DSEE as TODO for the XM5) |
+| Confidence | reads: **confirmed on WH-1000XM5 fw 2.5.1** (T1 `E2` advertised, not `ED`; `E1 01 02` = DSEE_HX_AI; status and value answer). SET: **in code, unverified on XM5** (Gadgetbridge marks DSEE as TODO for the XM5) |
 | Gate | T1 `E2` UPSCALING_AUTO_OFF |
 | GET capability | T1 `E0 01` → `E1 01 UT` |
 | GET status | T1 `E2 01` → `E3 01 EN` (NTFY `E5 01 EN`); `EN` `00` = available |
@@ -354,7 +473,7 @@ no implementation for it.
 
 | Item | Value |
 |---|---|
-| Confidence | on/off: **verified on XM5** (Gadgetbridge `SpeakToChatEnabled`; mos9527 marks it untested). Sensitivity and timeout: **verified on XM5** (Gadgetbridge `SpeakToChatConfig`) |
+| Confidence | reads: **confirmed on WH-1000XM5 fw 2.5.1**. On/off: **verified on XM5** (Gadgetbridge `SpeakToChatEnabled`; mos9527 marks it untested). Sensitivity and timeout: **verified on XM5** (Gadgetbridge `SpeakToChatConfig`) |
 | Gate | T1 `FC` SMART_TALKING_MODE_TYPE2 |
 | GET on/off | T1 `F6 0C` → `F7 0C OO PP` (NTFY `F9 0C OO PP`) |
 | SET on/off | T1 `F8 0C OO 01` |
@@ -372,7 +491,7 @@ no implementation for it.
 
 | Item | Value |
 |---|---|
-| Confidence | on/off: **verified on XM5** (Gadgetbridge `VoiceNotifications`). Volume: **in code, unverified on XM5**; mos9527 marks "Voice Guidance Volume ❌" for the XM5, so expect the gate to be absent |
+| Confidence | on/off read: **confirmed on WH-1000XM5 fw 2.5.1** (T2 `41`, type `01`; reply `47 01 00 01`, the last byte is the language). On/off SET: **verified on XM5** (Gadgetbridge `VoiceNotifications`). Volume: **not supported on WH-1000XM5 fw 2.5.1** (no T2 `42` or `43`; mos9527 also marks "Voice Guidance Volume ❌") |
 | Gate on/off | T2 `40` → type `00`; T2 `41` or `42` → type `01`; T2 `44` → type `02`; T2 `45` → type `03` |
 | Gate volume | T2 `42` or `43` |
 | GET on/off | T2 `46 01` → `47 01 VV` |
@@ -393,7 +512,7 @@ NTFY for voice guidance; send the GET again after a SET.
 
 | Item | Value |
 |---|---|
-| Confidence | **verified on XM5** (Gadgetbridge `AutomaticPowerOffWhenTakenOff`, which uses type `05`) |
+| Confidence | read: **confirmed on WH-1000XM5 fw 2.5.1** (T1 `25`, type `05`, `27 05 10 00`). SET: **verified on XM5** (Gadgetbridge `AutomaticPowerOffWhenTakenOff`, which uses type `05`) |
 | Gate | T1 `25` → type `05` (with "when taken off"); T1 `24` → type `04` |
 | GET | T1 `26 05` → `27 05 CU LA` (NTFY `29 05 CU LA`) |
 | SET | T1 `28 05 CU LA` |
@@ -423,7 +542,7 @@ steps through. The assignment chooses what the button does at all.
 
 | Item | Value |
 |---|---|
-| Confidence | **verified on XM5** (mos9527 "NC/AMB Button Setting") |
+| Confidence | read: **confirmed on WH-1000XM5 fw 2.5.1**. SET: **verified on XM5** (mos9527 "NC/AMB Button Setting") |
 | Gate | T1 `69` AMBIENT_SOUND_CONTROL_MODE_SELECT |
 | GET | T1 `66 30` → `67 30 FN` (NTFY `69 30 FN`) |
 | SET | T1 `68 30 FN` |
@@ -439,7 +558,7 @@ steps through. The assignment chooses what the button does at all.
 
 | Item | Value |
 |---|---|
-| Confidence | **in code, unverified on XM5** |
+| Confidence | **not supported on WH-1000XM5 fw 2.5.1**: it advertises neither T1 `F3` nor `FE`. The layout is **in code, unverified** for other models |
 | Gate | T1 `FE` → type `0E`; else T1 `F3` → type `03` |
 | GET capability | T1 `F0 03` → `F1 03 NN (key) x NN`. For type `0E`: `F1 0E LT NN (key) x NN` |
 | GET value | T1 `F6 03` → `F7 03 NN (preset) x NN` (NTFY `F9 03 ...`) |
@@ -470,7 +589,7 @@ send the full list; change only the NC/AMB key.
 
 | Item | Value |
 |---|---|
-| Confidence | **verified on XM5** (Gadgetbridge `PauseWhenTakenOff`) |
+| Confidence | read: **confirmed on WH-1000XM5 fw 2.5.1**. SET: **verified on XM5** (Gadgetbridge `PauseWhenTakenOff`) |
 | Gate | T1 `F1` |
 | GET | T1 `F6 01` → `F7 01 VV` (NTFY `F9 01 VV`) |
 | SET | T1 `F8 01 VV` |
@@ -480,8 +599,8 @@ send the full list; change only the NC/AMB key.
 
 | Item | Value |
 |---|---|
-| Confidence | **in code, unverified on XM5** |
-| Gate | table 2 present and (T2 `F0` or T1 `F6` or T1 `F1`) |
+| Confidence | **not answered by WH-1000XM5 fw 2.5.1**: it ACKs `F2 00` and sends no reply, three times in a row. It advertises T1 `F1` but not T2 `F0` or T1 `F6`. Other models: **in code, unverified** |
+| Gate | table 2 present and (T2 `F0` or T1 `F6`). mos9527 also accepts T1 `F1` alone; the XM5 capture shows that `F1` alone is not enough |
 | GET | T2 `F2 00` → `F3 00 WS` (NTFY `F5 00 WS`, rarely sent) |
 
 | `WS` | Meaning |
@@ -495,7 +614,7 @@ send the full list; change only the NC/AMB key.
 
 | Item | Value |
 |---|---|
-| Confidence | **verified on XM5** (mos9527 "Volume") |
+| Confidence | read: **confirmed on WH-1000XM5 fw 2.5.1** (T1 `A1`, `A7 20 12`). SET: **verified on XM5** (mos9527 "Volume") |
 | Gate | any of T1 `A1`..`A4` |
 | GET | T1 `A6 20` → `A7 20 VL` (NTFY `A9 20 VL`) |
 | SET | T1 `A8 20 VL` |
@@ -505,7 +624,7 @@ send the full list; change only the NC/AMB key.
 
 | Item | Value |
 |---|---|
-| Confidence | **in code, unverified on XM5** |
+| Confidence | read: **confirmed on WH-1000XM5 fw 2.5.1** (T1 `E1`, type `00`, `E7 00 00`). SET: **in code, unverified on XM5** |
 | Gate | T1 `E1` → type `00`; T1 `E3` → type `02` |
 | GET | T1 `E6 00` → `E7 00 PM` (NTFY `E9 00 PM`) |
 | SET | T1 `E8 00 PM` |
@@ -525,7 +644,7 @@ see 5.13.
 
 | Item | Value |
 |---|---|
-| Confidence | **in code, unverified on XM5** |
+| Confidence | **confirmed on WH-1000XM5 fw 2.5.1** (`13 02 10` = LDAC) |
 | Gate | T1 `12` CODEC_INDICATOR |
 | GET | T1 `12 02` → `13 02 CD` |
 | NTFY | `15 02 CD` (sent when the codec changes) |
@@ -549,7 +668,7 @@ number is not fixed; the capability reply names it.
 
 | Item | Value |
 |---|---|
-| Confidence | **in code, unverified on XM5** (mos9527 "Multipoint Control ?"; Gadgetbridge lists it as TODO for the XM5) |
+| Confidence | read: **confirmed on WH-1000XM5 fw 2.5.1** (slot `D2`, summary `"MULTIPOINT_SETTING_SUMMARY_LDAC_AVAILABLE"`, value `D7 D2 00 00`). SET and the alert: **in code, unverified on XM5** (mos9527 "Multipoint Control ?"; Gadgetbridge lists it as TODO for the XM5) |
 | Gate | T1 `Dn` (GENERAL_SETTING_n, n = 1..4) **and** the slot capability subject is `"MULTIPOINT_SETTING"` |
 | GET capability | T1 `D0 Dn 01` → `D1 Dn ST SF <string subject> <string summary>` |
 | GET value | T1 `D6 Dn` → `D7 Dn 00 VV` (NTFY `D9 Dn 00 VV`) |
@@ -579,7 +698,7 @@ drops the RFCOMM link; the daemon must reconnect.
 
 | Item | Value |
 |---|---|
-| Confidence | **in code, unverified on XM5** (mos9527 "Multipoint Control ?", not tested) |
+| Confidence | list read: **confirmed on WH-1000XM5 fw 2.5.1** (T2 `32`, type `02`, three entries, one connected). Switch: **in code, unverified on XM5** (mos9527 "Multipoint Control ?", not tested) |
 | Gate list | T2 `32` or `33` → inquired type `02`; else T2 `30` → type `00` |
 | Gate switch | T2 `31` SOURCE_SWITCH_CONTROL |
 
@@ -597,7 +716,7 @@ Device entry for type `00`: `ADDR[17] CS <string name>`.
 |---|---|
 | `ADDR` | Bluetooth address, 17 ASCII bytes |
 | `CS` | connection status: `00` = not connected; any other value = connected, the value is a connection slot number |
-| `COD` | Bluetooth class of device, 3 bytes big-endian |
+| `COD` | Bluetooth class of device, 3 bytes big-endian. The XM5 sends `FF FF FF` for devices that are not connected |
 | `PB` | slot number of the device that plays audio. A device is the active source when its `CS == PB` and `CS != 00` |
 
 Switch the playing source (active device):
@@ -623,7 +742,7 @@ Other operations in the same group (not in the contract yet):
 
 | Item | Value |
 |---|---|
-| Confidence | **in code, unverified on XM5** (mos9527 sends these during init for every V2 device; no XM5 capture is published) |
+| Confidence | **confirmed on WH-1000XM5 fw 2.5.1** (section 3.4) |
 | Gate | none |
 | Requests | init steps 3, 4, 5 in section 3.1 |
 
@@ -675,23 +794,27 @@ and `daemon/src/main.cpp` send today with the reference above.
 
 ## 8. Open questions for a real device
 
+### Confirmed on WH-1000XM5 fw 2.5.1
+
+Answered by the capture in section 3.4:
+
+| # | Question | Answer |
+|---|---|---|
+| 1 | Which NC/ASM function does the XM5 advertise: T1 `6B` (type `17`), `68` (type `15`) or `6D` (type `19`)? | T1 `6B`, type `17` |
+| 2 | Does the XM5 advertise T1 `E2` or `ED` for DSEE Extreme, and which `UpscalingType` does `E1 01` return? | T1 `E2`; `E1 01 02` = DSEE_HX_AI |
+| 3 | Which general setting slot carries `"MULTIPOINT_SETTING"`? | slot `D2`. Slot `D1` carries `"TOUCH_PANEL_SETTING"`. The alert after a toggle is still open (question 11) |
+| 4 | Does the XM5 advertise table 2 `30`, `32` or `33`, and `31`? | T2 `32` and `31`. With one connected source: its `CS = 01`, `PB = 01`. Two connected sources are not captured yet |
+| 5 | Does the XM5 advertise T1 `E1` or `E3` for connection quality? | T1 `E1` |
+| 6 | Does the XM5 advertise T1 `20` or `28` for the battery? | T1 `20` |
+| 9 | Does the XM5 advertise `F3` or `FE`? | neither. The XM5 has no button assignment in this protocol |
+| 10 | Does the XM5 answer the table 2 worn status `F2 00`? | no. It ACKs and sends no reply |
+
+### Still open
+
 Run `sony-ctl probe` (see the contract) on a real XM5 to answer these:
 
-1. Which NC/ASM function does the XM5 advertise: T1 `6B` (type `17`), `68`
-   (type `15`) or `6D` (type `19`)?
-2. Does the XM5 advertise T1 `E2` or `ED` for DSEE Extreme, and which
-   `UpscalingType` does `E1 01` return?
-3. Which general setting slot carries `"MULTIPOINT_SETTING"`, and what is the
-   exact alert (`99 00 MT AT`) after toggling it?
-4. Does the XM5 advertise table 2 `30`, `32` or `33`, and `31`? What does
-   `CS` / `PB` look like with two connected sources?
-5. Does the XM5 advertise T1 `E1` or `E3` for connection quality?
-6. Does the XM5 advertise T1 `20` or `28` for the battery?
 7. Does the XM5 accept ambient level 0, or only 1..20?
-8. Is the headset volume range 0..30 on the XM5?
-9. Does the XM5 advertise `F3` or `FE`, and which keys and presets does the
-   assignable capability list?
-10. Does the XM5 answer the table 2 worn status `F2 00`?
+8. Is the headset volume range 0..30 on the XM5? The capture shows 18.
 11. Does the XM5 ACK the multipoint write `D8 Dn 00 VV` before it sends the
     alert `99 00 MT 01`, or does it hold the ACK until the host answers? The
     daemon keeps rule 4 of section 1 (one unacknowledged data packet): the
@@ -701,3 +824,4 @@ Run `sony-ctl probe` (see the contract) on a real XM5 to answer these:
     holds the ACK, `sony-ctl multipoint` returns `ERR device timeout` after
     1.8 s, then the queued answer goes out and the toggle still applies. The
     `recent_frames` of `sony-ctl probe` show which order the XM5 uses.
+12. What do `CS` and `PB` look like with two connected sources?
