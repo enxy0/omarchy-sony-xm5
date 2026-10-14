@@ -51,8 +51,11 @@ Steps performed:
   3. Install sony-headphones-daemon and sony-ctl into ~/.local/bin (mode 0755).
   4. Copy daemon/sony-headphones.service to ~/.config/systemd/user/,
      reload systemd daemon, and enable the service unit.
-  5. Deploy plugin/ to ~/.local/share/omarchy/shell/plugins/io.github.androydified.omasony,
-     verify no symlinks exist, and validate via omarchy-plugin-validate if present.
+  5. Copy the plugin files (manifest.json and every *.qml and *.js file in the
+     repository root) to ~/.config/omarchy/plugins/<plugin-id>, validate via
+     omarchy-plugin-validate if present, and enable the plugin. <plugin-id> is
+     the "id" in manifest.json. A copy left in
+     ~/.local/share/omarchy/shell/plugins/<plugin-id> by an older setup is removed.
 HELP_EOF
 }
 
@@ -183,22 +186,43 @@ install_systemd_service() {
   success "Systemd user service installed and enabled."
 }
 
+plugin_id() {
+  sed -n 's/^[[:space:]]*"id":[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT_DIR/manifest.json" | head -n 1
+}
+
+plugin_files() {
+  (
+    cd "$ROOT_DIR"
+    shopt -s nullglob
+    printf '%s\n' manifest.json *.qml *.js
+  )
+}
+
 deploy_plugin() {
   info "Deploying Omarchy bar-widget plugin..."
-  local plugins_dir="$HOME/.local/share/omarchy/shell/plugins"
-  local plugin_dest="$plugins_dir/io.github.androydified.omasony"
-  local user_plugins_dir="$HOME/.config/omarchy/plugins"
-  local user_plugin_dest="$user_plugins_dir/io.github.androydified.omasony"
+  local id
+  id="$(plugin_id)"
+  if [[ -z "$id" ]]; then
+    error "Cannot read the plugin id from $ROOT_DIR/manifest.json"
+    exit 1
+  fi
+  local plugin_dest="$HOME/.config/omarchy/plugins/$id"
+  local stale_dest="$HOME/.local/share/omarchy/shell/plugins/$id"
 
-  mkdir -p "$plugin_dest" "$user_plugin_dest"
-  rm -rf "$plugin_dest"/* "$user_plugin_dest"/*
+  if [[ -d "$stale_dest" ]]; then
+    info "Removing the copy an older setup left in $stale_dest..."
+    rm -rf "$stale_dest"
+  fi
 
-  for file in manifest.json Panel.qml Service.qml Model.js SonyIcon.qml; do
-    if [[ -f "$ROOT_DIR/$file" ]]; then
-      cp "$ROOT_DIR/$file" "$plugin_dest/"
-      cp "$ROOT_DIR/$file" "$user_plugin_dest/"
-    fi
+  mkdir -p "$plugin_dest"
+  rm -rf "${plugin_dest:?}"/*
+
+  local files=()
+  mapfile -t files < <(plugin_files)
+  for file in "${files[@]}"; do
+    install -m 0644 "$ROOT_DIR/$file" "$plugin_dest/$file"
   done
+  info "Plugin files: ${files[*]}"
 
   # Validate plugin if validator is present
   local validator="/usr/share/omarchy/bin/omarchy-plugin-validate"
@@ -208,11 +232,11 @@ deploy_plugin() {
     success "Plugin validation passed."
   fi
 
-  success "Plugin deployed to $plugin_dest and $user_plugin_dest."
+  success "Plugin deployed to $plugin_dest."
 
   if command -v omarchy >/dev/null 2>&1; then
-    info "Enabling plugin io.github.androydified.omasony in Omarchy..."
-    omarchy plugin enable io.github.androydified.omasony 2>/dev/null || true
+    info "Enabling plugin $id in Omarchy..."
+    omarchy plugin enable "$id" 2>/dev/null || true
   fi
 }
 

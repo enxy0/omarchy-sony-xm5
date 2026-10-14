@@ -8,8 +8,8 @@ Files: `Panel.qml` (bar button, popup, cursor model, reusable inline
 components), `Service.qml` (status file watcher, optimistic values, command
 queue), `Model.js` (all logic: parsing, gating, labels, command building,
 pending values, queue, cursor movement), `SonyIcon.qml` (headphone glyph).
-`Panel.qml` keeps its helper components inline so the deploy list in `setup`
-stays unchanged.
+`setup` deploys `manifest.json` and every `*.qml` and `*.js` file in the
+repository root, so a new QML file there needs no change in `setup`.
 
 ## 1. Bar button
 

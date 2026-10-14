@@ -149,11 +149,12 @@ cd <repo-dir>
 4. Copies `daemon/sony-headphones.service` into `~/.config/systemd/user/`,
    runs `systemctl --user daemon-reload` and
    `systemctl --user enable sony-headphones.service`.
-5. Copies the plugin files (`manifest.json`, `Panel.qml`, `Service.qml`,
-   `Model.js`, `SonyIcon.qml`) into
-   `~/.local/share/omarchy/shell/plugins/<plugin-id>` and
-   `~/.config/omarchy/plugins/<plugin-id>`, and runs
-   `omarchy plugin enable <plugin-id>`.
+5. Copies the plugin files (`manifest.json` and every `*.qml` and `*.js`
+   file in the repository root) into `~/.config/omarchy/plugins/<plugin-id>`,
+   and runs `omarchy plugin enable <plugin-id>`. It does not write into
+   `~/.local/share/omarchy`: that tree belongs to Omarchy, and
+   `omarchy refresh` replaces it. If an older `setup` left a copy in
+   `~/.local/share/omarchy/shell/plugins/<plugin-id>`, `setup` removes it.
 
 `<plugin-id>` is the `id` value in `manifest.json`.
 
@@ -207,7 +208,6 @@ systemctl --user disable --now sony-headphones.service
 rm ~/.config/systemd/user/sony-headphones.service
 systemctl --user daemon-reload
 rm ~/.local/bin/sony-headphones-daemon ~/.local/bin/sony-ctl
-rm -r ~/.local/share/omarchy/shell/plugins/<plugin-id>
 rm -r ~/.config/omarchy/plugins/<plugin-id>
 rm -r ~/.local/state/sony-headphones
 ```
