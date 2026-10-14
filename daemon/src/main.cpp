@@ -35,6 +35,7 @@ struct DaemonOptions {
     bool showHelp{false};
     bool showVersion{false};
     bool mockMode{false};
+    std::string mockProfile{"xm5"};
     std::string preferredMac;
     std::string stateDir;
     std::string runtimeDir;
@@ -47,6 +48,7 @@ void printHelp(const char* progName) {
               << "  -h, --help               Display this help message and exit\n"
               << "  -v, --version            Display version information and exit\n"
               << "  -m, --mock               Run against a simulated headset (no Bluetooth)\n"
+              << "      --mock-profile <P>   Simulated headset: xm5 (default), minimal, multipoint\n"
               << "  -d, --device <MAC>       Target specific Bluetooth MAC address\n"
               << "      --state-dir <DIR>    Override directory for status.json\n"
               << "      --runtime-dir <DIR>  Override directory for IPC socket\n\n";
@@ -64,6 +66,16 @@ std::optional<DaemonOptions> parseCommandLine(int argc, char* argv[]) {
             return opts;
         } else if (arg == "-m" || arg == "--mock") {
             opts.mockMode = true;
+        } else if (arg == "--mock-profile") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --mock-profile requires a profile name\n";
+                return std::nullopt;
+            }
+            opts.mockProfile = argv[++i];
+            if (opts.mockProfile != "xm5" && opts.mockProfile != "minimal" && opts.mockProfile != "multipoint") {
+                std::cerr << "Error: Unknown mock profile '" << opts.mockProfile << "'\n";
+                return std::nullopt;
+            }
         } else if (arg == "-d" || arg == "--device") {
             if (i + 1 >= argc) {
                 std::cerr << "Error: --device requires a MAC address argument\n";
@@ -104,6 +116,17 @@ std::string resolveRuntimeDir(const std::string& overrideDir) {
     const char* xdgRun = std::getenv("XDG_RUNTIME_DIR");
     if (xdgRun && xdgRun[0] != '\0') return xdgRun;
     return "/tmp/run-" + std::to_string(::getuid());
+}
+
+std::shared_ptr<FakeHeadset> makeFakeHeadset(const std::string& profile) {
+    if (profile == "minimal") return std::make_shared<FakeHeadset>(FakeHeadsetProfile::minimal());
+    auto headset = std::make_shared<FakeHeadset>();
+    if (profile == "multipoint") {
+        headset->multipoint = true;
+        headset->devices = {{"F0:1D:BC:AA:00:01", "laptop", 1}, {"5C:E9:1E:BB:00:02", "Pixel 8", 2},
+                            {"3C:22:FB:CC:00:03", "", 0}};
+    }
+    return headset;
 }
 
 int64_t unixNow() {
@@ -181,7 +204,7 @@ int main(int argc, char* argv[]) {
     btConfig.autoReconnect = true;
     btConfig.mockMode = opts.mockMode;
     if (opts.mockMode) {
-        fakeHeadset = std::make_shared<FakeHeadset>();
+        fakeHeadset = makeFakeHeadset(opts.mockProfile);
         auto transport = std::make_unique<FakeHeadsetTransport>(fakeHeadset);
         fakeTransport = transport.get();
         btManager = std::make_unique<BluetoothManager>(btConfig, std::move(transport),
