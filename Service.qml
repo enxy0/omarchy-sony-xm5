@@ -80,17 +80,25 @@ Item {
     onTriggered: root.flushDebounced()
   }
 
-  // Validates and sends one change. Returns true when the command was queued.
-  function send(action, value) {
-    flushDebounced()
+  // Builds a command and shows its optimistic values. Returns the queue
+  // item, or null after showing the error.
+  function prepare(action, value) {
     var built = Model.buildCommand(action, value, status)
     if (built.error) {
       showError(built.error)
-      return false
+      return null
     }
     var id = _nextId++
     pending = Model.addPending(pending, built.pending, id)
-    enqueue({ args: built.args, id: id, action: action })
+    return { args: built.args, id: id, action: action }
+  }
+
+  // Validates and sends one change. Returns true when the command was queued.
+  function send(action, value) {
+    flushDebounced()
+    var item = prepare(action, value)
+    if (item === null) return false
+    enqueue(item)
     return true
   }
 
@@ -98,15 +106,12 @@ Item {
   // another action sends the waiting one first.
   function sendDebounced(action, value) {
     if (_debounced !== null && _debounced.action !== action) flushDebounced()
-    var built = Model.buildCommand(action, value, status)
-    if (built.error) {
-      showError(built.error)
-      return false
-    }
-    var id = _nextId++
-    if (_debounced !== null) pending = Model.dropPending(pending, _debounced.id)
-    pending = Model.addPending(pending, built.pending, id)
-    _debounced = { args: built.args, id: id, action: action }
+    var previous = _debounced
+    var item = prepare(action, value)
+    if (item === null) return false
+    // Fields the new step overwrote already carry its id.
+    if (previous !== null) pending = Model.dropPending(pending, previous.id)
+    _debounced = item
     debounceTimer.restart()
     settleTimer.restart()
     return true
@@ -135,6 +140,9 @@ Item {
     var item = queue[0]
     queue = queue.slice(1)
     runningCommand = item
+    _runTicks = 0
+    _idleTicks = 0
+    watchdog.restart()
     ctlProcess.command = [cliBinary].concat(item.args)
     ctlProcess.running = true
   }
@@ -144,15 +152,49 @@ Item {
     errorTimer.restart()
   }
 
-  function finishCommand(exitCode) {
+  // `didNotStart`: the watchdog found no process; the collectors hold
+  // output of an older run then, so ignore them.
+  function finishCommand(exitCode, didNotStart) {
     var item = runningCommand
+    if (item === null) return
     runningCommand = null
-    if (item && exitCode !== 0) {
+    watchdog.stop()
+    if (exitCode !== 0) {
       pending = Model.dropPending(pending, item.id)
-      showError(Model.commandErrorText(exitCode, ctlStderr.text, ctlStdout.text))
+      showError(didNotStart
+        ? Model.commandErrorText(127, "", "")
+        : Model.commandErrorText(exitCode, ctlStderr.text, ctlStdout.text))
     }
     settleTimer.restart()
-    dispatchNext()
+    // Start the next process outside the exited handler of this one.
+    Qt.callLater(root.dispatchNext)
+  }
+
+  // Watchdog. Without Quickshell sources at hand it is not certain that
+  // `exited` fires when the binary cannot start, so a command that is not
+  // running for 2 s without an exit is finished as "did not start". A
+  // process still running after 10 s (the CLI times out at 2 s) is stopped;
+  // its exit then finishes the command.
+  property int _runTicks: 0
+  property int _idleTicks: 0
+
+  Timer {
+    id: watchdog
+    interval: 1000
+    repeat: true
+    onTriggered: {
+      if (root.runningCommand === null) {
+        stop()
+        return
+      }
+      if (ctlProcess.running) {
+        root._runTicks++
+        if (root._runTicks >= 10) ctlProcess.running = false
+      } else {
+        root._idleTicks++
+        if (root._idleTicks >= 2) root.finishCommand(127, true)
+      }
+    }
   }
 
   Process {
@@ -160,15 +202,7 @@ Item {
     running: false
     stdout: StdioCollector { id: ctlStdout; waitForEnd: true }
     stderr: StdioCollector { id: ctlStderr; waitForEnd: true }
-    onExited: function(exitCode, exitStatus) { root.finishCommand(exitCode) }
-    // A binary that cannot start never exits; do not let it stall the queue.
-    onRunningChanged: {
-      if (running) return
-      var item = root.runningCommand
-      Qt.callLater(function() {
-        if (item !== null && root.runningCommand === item && !ctlProcess.running) root.finishCommand(127)
-      })
-    }
+    onExited: function(exitCode, exitStatus) { root.finishCommand(exitCode, false) }
   }
 
   // Reactive file watcher; no polling.
