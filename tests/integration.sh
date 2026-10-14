@@ -5,7 +5,7 @@
 # ==============================================================================
 # This script executes a complete, self-contained offline simulation validating
 # daemon state management, UNIX domain socket IPC, CLI command execution,
-# data model parsing, and panel reactivity across Tiers 1 through 4.
+# data model parsing, and panel reactivity across Tiers 1 through 5.
 # Zero physical Bluetooth hardware required.
 # ==============================================================================
 set -euo pipefail
@@ -728,6 +728,35 @@ else
 fi
 
 # ==============================================================================
+# TIER 5: MODEL.JS <-> REAL CLI <-> REAL DAEMON
+# ==============================================================================
+section_header "Tier 5: Model.js End-to-End Against sony-ctl and the Daemon"
+
+if [[ -z "$DAEMON_BIN" || "$CLI_BIN" != "$REPO_ROOT"/* ]] || ! command -v node >/dev/null 2>&1; then
+  printf "  ${YELLOW}Skipped: needs node and the built daemon and sony-ctl under %s/build${NC}\n" "$REPO_ROOT"
+else
+  set +e
+  e2e_out=$(DAEMON_BIN="$DAEMON_BIN" CLI_BIN="$CLI_BIN" SANDBOX_PARENT="$SANDBOX_DIR" \
+    node "$SCRIPT_DIR/e2e_model_cli.js" 2>&1)
+  e2e_code=$?
+  set -e
+  e2e_groups=0
+  while read -r _ gid verdict counts title; do
+    e2e_groups=$((e2e_groups + 1))
+    if [[ "$verdict" == "PASS" ]]; then
+      pass_test "T5.$gid" "$title ($counts checks)"
+    else
+      fail_test "T5.$gid" "$title ($counts checks)" "$(grep '✗' -A1 <<<"$e2e_out" | head -20)"
+    fi
+  done < <(grep '^GROUP ' <<<"$e2e_out")
+  if [[ $e2e_code -ne 0 && $e2e_groups -eq 0 ]]; then
+    fail_test "T5" "e2e_model_cli.js did not run" "$(tail -20 <<<"$e2e_out")"
+  elif [[ $e2e_code -eq 0 ]]; then
+    printf "           %s\n" "$(grep '^Commands run' <<<"$e2e_out")"
+  fi
+fi
+
+# ==============================================================================
 # SUMMARY REPORT
 # ==============================================================================
 section_header "Simulation Test Suite Summary"
@@ -738,7 +767,7 @@ echo "Tests Failed:         $FAILED_TESTS"
 
 if [[ $FAILED_TESTS -eq 0 ]]; then
   echo ""
-  printf "${GREEN}${BOLD}ALL TESTS PASSED (100%% Success Rate across Tiers 1-4)${NC}\n"
+  printf "${GREEN}${BOLD}ALL TESTS PASSED (100%% Success Rate across Tiers 1-5)${NC}\n"
   exit 0
 else
   echo ""
