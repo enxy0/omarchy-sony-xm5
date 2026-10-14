@@ -15,12 +15,25 @@ stays unchanged.
 
 | Item | Content |
 |---|---|
-| Icon | `SonyIcon`: dim when disconnected or in an error state, green while `battery_charging`, urgent below 20 % |
-| Text | `battery_level` as `80%`; `—` when unknown or disconnected; hidden when `supported.battery` is `false` |
-| Charging hint | a bolt glyph after the percentage while `battery_charging` is `true` |
+| Size | `BarIconButton`, as the first-party icon widgets (Audio, Bluetooth, Agents): `Style.bar.iconSlot` along the bar, the bar thickness across it. With the percentage: two icon slots, as Power, wider only when the text needs it |
+| Icon | `SonyIcon`, `Style.space(14)`: dim when disconnected or in an error state, green while `battery_charging`, urgent below 20 %. The tints work in both display modes |
+| Text | Only when the `showPercentage` setting is on and the bar is horizontal (Power does the same). `battery_level` as `80%` at `Style.bar.iconFont`; `—` when unknown or disconnected; hidden when `supported.battery` is `false` |
+| Charging hint | a bolt glyph after the percentage while `battery_charging` is `true`; only with the text |
 | Tooltip | line 1 `device_name`; line 2 noise mode name and codec (`Noise Cancelling · LDAC`); line 3 `Battery 80% (charging)`. Disconnected: `Sony headphones: disconnected`. Initializing: `Reading headset settings…`. Error states: the error text |
 | Left click | open or close the popup |
 | Right click | cycle the noise mode ANC → Ambient → Off (`noise`). Ignored unless the noise control is enabled (section 4) |
+
+### Display setting
+
+`showPercentage` (boolean, default `false`: icon only) is an inline field of
+the widget's entry in `~/.config/omarchy/shell.json`, the store Omarchy uses
+for every widget setting. `manifest.json` declares it in `barWidget.defaults`
+and `barWidget.schema`. Omarchy has no settings screen for bar widgets, so the
+user changes it with the popup toggle (section 2) or with
+`omarchy bar set io.github.androydified.omasony showPercentage true --json`.
+The popup writes through `bar.shell.updateEntryInline`, as Power and Clock do.
+`Model.showBarPercentage` also reads the strings `true`/`false`/`on`/`off`,
+because `omarchy bar set` without `--json` stores a string.
 
 ## 2. Popup layout
 
@@ -54,6 +67,7 @@ Sections use the existing style: `PanelSectionHeader` titles,
 │ HEADSET                        Vol 12    ▸    │  collapsible, closed
 │ MULTIPOINT                     Off       ▸    │  collapsible, closed
 │ ──────────────────────────────────────────── │
+│ Battery percentage in the bar         [off]   │  always shown
 │ WH-1000XM5 · firmware 2.3.1 · AC:80:…         │  info footer
 │ Limited: headset did not report its features  │  fallback only
 └──────────────────────────────────────────────┘
@@ -92,6 +106,7 @@ after a 400 ms pause.
 | Multipoint | Device rows: name (or address), `Playing` / `Connected` / `Not connected` marker | `devices` | none | `devices` |
 | Multipoint | Activate a connected, not active row: switch the audio source | `devices[].address` | `source <address>` | `source_switch` |
 | Hero | Codec and `On head` / `Off head` in the meta line | `codec`, `worn` | none | `codec`, `worn` |
+| Footer | Battery percentage in the bar toggle; shown in every state, also disconnected | widget setting `showPercentage` | none (writes shell.json) | none |
 | Info footer | `model_name`, `firmware_version`, `address`; fallback hint | identity, `supported_source` | none | none |
 
 A section is hidden when all of its controls are hidden.
@@ -157,8 +172,10 @@ Voice, Sound header, EQ grid, DSEE, connection priority, Custom EQ header,
 band rows, Speak-to-Chat header, toggle, sensitivity, timeout, Headset
 header, volume, voice guidance, guidance volume, auto power off, NC/AMB
 cycle, button function, pause when taken off, Multipoint header, toggle,
-device rows. Hidden controls have no target; disabled controls keep their
-target but ignore activation. The panel scrolls to keep the cursor visible.
+device rows, the bar percentage toggle. Hidden controls have no target;
+disabled controls keep their target but ignore activation. The bar
+percentage toggle is the only target while the headset is disconnected. The
+panel scrolls to keep the cursor visible.
 
 ## 7. Contract readings (safe choices)
 
@@ -182,4 +199,6 @@ target but ignore activation. The panel scrolls to keep the cursor visible.
 
 All per-control data (feature key, fields, action, cursor kind, section,
 v2-only flag) is one table, `Model.TARGETS`, in layout order
-`Model.TARGET_ORDER`.
+`Model.TARGET_ORDER`. Widget-setting targets are a second table,
+`Model.SETTING_TARGETS`; `Model.panelCursorSections` puts them after the
+status targets.

@@ -75,7 +75,12 @@ They can fail or be absent:
 
 ### Widget
 
-- The bar shows the battery level and a charging mark.
+- The bar shows a headphone icon, the same size as the built-in icon
+  widgets. The icon turns green while charging and red below 20 %. The
+  tooltip shows the battery level.
+- To show the battery percentage next to the icon, turn on "Battery
+  percentage in the bar" at the bottom of the panel, or run
+  `omarchy bar set io.github.androydified.omasony showPercentage true --json`.
 - Left click opens the panel. Right click cycles the noise mode
   (ANC, Ambient, Off).
 - Keyboard in the panel: `j`/`k` or arrows to move, `h`/`l` to change a
