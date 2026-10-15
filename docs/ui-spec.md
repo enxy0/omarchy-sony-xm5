@@ -210,7 +210,7 @@ same holds within schema 3 for any `supported` key a daemon does not write
   command finished.
 - One `sony-ctl` process runs at a time. A queued (not yet running) command
   with the same key is replaced by the newer one, which goes to the end of
-  the queue, so a slider wheel never builds a backlog. The key
+  the queue, so Shift+wheel on a slider never builds a backlog. The key
   (`Model.commandKey`) is the headset `id` plus the verb; for `quick-access`
   also the press and for `touch-function` also the side. So a WH-1000XM5
   volume change never replaces a queued WF-1000XM5 volume change.
@@ -274,9 +274,16 @@ disconnected. The panel scrolls to keep the cursor visible.
    file carries a value.
 7. The Custom EQ chip sends the full `eq custom b1..b5 cb` form with the
    known values; only when they are unknown it sends the bare preset form.
-8. The mouse wheel over a slider adjusts the slider, as in the first-party
-   Audio panel (`PanelSlider` has no switch for this). A release with an
-   unchanged value sends nothing.
+8. The plain mouse wheel over a slider scrolls the panel, as if the slider
+   was not there: about one Flickable wheel step per notch
+   (`wheelScrollLines * 24` px), clamped to the content; a touchpad follows
+   its pixel delta. The slider value does not change. Shift+wheel moves the
+   slider one step per notch, the stock `PanelSlider` wheel behavior; when
+   the system sends Shift+wheel as a horizontal scroll, x gives the
+   direction. `PanelSlider` always takes the wheel and has no switch for
+   this, so a `SliderWheel` layer inside each slider takes the wheel first
+   and does both actions itself. A release with an unchanged value sends
+   nothing.
 9. `touch_function_left_options` or `touch_function_right_options` is
    `null`: offer `ambient_sound_control`, `playback_control`, `none` (the
    list of the WF-1000XM5 fw 6.1.0); the daemon skips its list check while

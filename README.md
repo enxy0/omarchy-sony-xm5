@@ -303,6 +303,15 @@ Run the widget model tests (Node.js or Deno):
 node tests/model.test.js
 ```
 
+Run the slider wheel test. It sends real wheel, click and drag events to
+the stock Omarchy `PanelSlider` with the panel's wheel layer inside it. It
+needs `qmltestrunner` (`qt6-declarative`) and the Omarchy shell; without
+them it skips:
+
+```bash
+tests/slider_wheel.sh
+```
+
 Run the end-to-end suite. It needs `python3` and `jq`, and does not use
 Bluetooth:
 
