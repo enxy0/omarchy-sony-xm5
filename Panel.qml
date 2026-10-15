@@ -173,10 +173,11 @@ Panel {
     }
   }
 
-  // Wheel layer for a PanelSlider. Put it inside the slider: it is declared
-  // after the slider's own MouseArea, so it is on top and gets the wheel
-  // first. PanelSlider always takes the wheel and commits a step, and has no
-  // switch for this. A sibling layer with `wheel.accepted = false` does not
+  // Wheel layer for a slider row. Put it last in the row (the highlighted
+  // cursor surface) and set `slider`: declared after the slider, it is on
+  // top of the slider's own MouseArea and gets the wheel first over the
+  // whole row. PanelSlider always takes the wheel and commits a step, and
+  // has no switch for this. A layer with `wheel.accepted = false` does not
   // help: the slider then still gets the event. So this layer accepts every
   // wheel event and acts itself:
   // - plain wheel: scrolls the nearest Flickable ancestor, about one
@@ -190,7 +191,7 @@ Panel {
   component SliderWheel: MouseArea {
     id: wheelLayer
 
-    property PanelSlider slider: parent as PanelSlider
+    property PanelSlider slider: null
     property Flickable flickable: null
     property real targetY: 0
 
@@ -228,6 +229,7 @@ Panel {
 
     function stepSlider(direction) {
       var s = wheelLayer.slider
+      if (!s) return
       var delta = direction > 0 ? s.step : -s.step
       var next = Math.max(s.minimum, Math.min(s.maximum, s.liveValue + delta))
       if (s.integer) next = Math.round(next)
@@ -330,14 +332,14 @@ Panel {
         onReleased: function(v) {
           if (Math.round(v) !== Math.round(sliderRow.value)) sliderRow.committed(Math.round(v))
         }
-
-        SliderWheel {}
       }
     }
 
     HoverHandler {
       onHoveredChanged: sliderRow.hovered(hovered)
     }
+
+    SliderWheel { slider: rowSlider }
   }
 
   // Compact cursor row for an EQ band: label, slider, signed value.
@@ -383,8 +385,6 @@ Panel {
       onReleased: function(v) {
         if (Math.round(v) !== Math.round(bandRow.value)) bandRow.committed(Math.round(v))
       }
-
-      SliderWheel {}
     }
 
     Text {
@@ -405,6 +405,8 @@ Panel {
     HoverHandler {
       onHoveredChanged: bandRow.hovered(hovered)
     }
+
+    SliderWheel { slider: bandSlider }
   }
 
   // One paired source device. Activating a connected, idle device makes it

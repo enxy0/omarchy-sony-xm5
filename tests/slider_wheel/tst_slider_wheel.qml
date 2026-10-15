@@ -1,6 +1,6 @@
 // tst_slider_wheel.qml
-// Real wheel events against the stock Omarchy PanelSlider with the
-// SliderWheel layer from Panel.qml inside it (docs/ui-spec.md, rule 8).
+// Real wheel events against the stock Omarchy PanelSlider in a row with the
+// SliderWheel layer from Panel.qml on top (docs/ui-spec.md, rule 8).
 // Run through tests/slider_wheel.sh, which extracts SliderWheel.qml.
 import QtQuick
 import QtTest
@@ -32,21 +32,34 @@ Item {
 
       Item { width: 1; height: 150 }
 
-      PanelSlider {
-        id: slider
+      // A slider row as in Panel.qml: a label above the slider, the layer
+      // last in the row.
+      Rectangle {
+        id: row
         width: parent.width
-        value: 5
-        minimum: 0
-        maximum: 10
-        step: 1
-        integer: true
-        onReleased: function(v) {
-          root.releases += 1
-          root.lastReleased = v
-          slider.value = v
+        height: 30 + levelSlider.height
+
+        Text { id: label; height: 30; text: "Level" }
+
+        PanelSlider {
+          id: levelSlider
+          anchors.top: label.bottom
+          width: parent.width
+          value: 5
+          minimum: 0
+          maximum: 10
+          step: 1
+          integer: true
+          onReleased: function(v) {
+            root.releases += 1
+            root.lastReleased = v
+            levelSlider.value = v
+          }
         }
 
-        SliderWheel {}
+        HoverHandler { id: rowHover }
+
+        SliderWheel { slider: levelSlider }
       }
 
       Item { width: 1; height: 100 }
@@ -75,17 +88,17 @@ Item {
     function init() {
       flick.contentHeight = Qt.binding(function() { return column.implicitHeight })
       flick.contentY = 0
-      slider.value = 5
+      levelSlider.value = 5
       root.releases = 0
       root.lastReleased = NaN
     }
 
     function sliderPoint() {
-      return slider.mapToItem(root, slider.width / 2, slider.height / 2)
+      return levelSlider.mapToItem(root, levelSlider.width / 2, levelSlider.height / 2)
     }
 
     function wheelOnSlider(dx, dy, modifiers) {
-      var p = slider.mapToItem(root, slider.width / 2, slider.height / 2)
+      var p = levelSlider.mapToItem(root, levelSlider.width / 2, levelSlider.height / 2)
       mouseWheel(root, p.x, p.y, dx, dy, Qt.NoButton, modifiers)
     }
 
@@ -97,7 +110,7 @@ Item {
       verify(maxY() > 0)
       wheelOnSlider(0, -120, Qt.NoModifier)
       tryCompare(flick, "contentY", Math.min(notch, maxY()))
-      compare(slider.value, 5)
+      compare(levelSlider.value, 5)
       compare(root.releases, 0)
       // Wheel up comes back by the same step.
       wheelOnSlider(0, 120, Qt.NoModifier)
@@ -123,6 +136,34 @@ Item {
       compare(root.releases, 0)
     }
 
+    // The row label area: outside the slider, inside the highlighted row.
+    function wheelOnLabel(dx, dy, modifiers) {
+      var p = label.mapToItem(root, row.width / 2, label.height / 2)
+      mouseWheel(root, p.x, p.y, dx, dy, Qt.NoButton, modifiers)
+    }
+
+    function test_shiftWheelOnRowStepsValue() {
+      wheelOnLabel(0, 120, Qt.ShiftModifier)
+      compare(root.lastReleased, 6)
+      wheelOnLabel(-120, 0, Qt.ShiftModifier)
+      compare(root.lastReleased, 5)
+      compare(root.releases, 2)
+      wait(200)
+      compare(flick.contentY, 0)
+    }
+
+    function test_plainWheelOnRowScrollsPanel() {
+      wheelOnLabel(0, -120, Qt.NoModifier)
+      tryCompare(flick, "contentY", Math.min(notch, maxY()))
+      compare(root.releases, 0)
+    }
+
+    function test_rowHoverStillWorks() {
+      var p = label.mapToItem(root, row.width / 2, label.height / 2)
+      mouseMove(root, p.x, p.y)
+      tryVerify(function() { return rowHover.hovered })
+    }
+
     // Control: the stock slider without the layer takes the plain wheel.
     // This proves the harness delivers wheel events to PanelSlider.
     function test_bareSliderTakesPlainWheel() {
@@ -137,7 +178,7 @@ Item {
       wheelOnSlider(0, -120, Qt.NoModifier)
       wait(200)
       compare(flick.contentY, 0)
-      compare(slider.value, 5)
+      compare(levelSlider.value, 5)
       compare(root.releases, 0)
     }
 
@@ -160,33 +201,33 @@ Item {
     }
 
     function test_shiftWheelClampsAtBound() {
-      slider.value = 10
+      levelSlider.value = 10
       wheelOnSlider(0, 120, Qt.ShiftModifier)
       compare(root.lastReleased, 10)
     }
 
     function test_clickStillSetsValue() {
-      var p = slider.mapToItem(root, slider.width * 0.9, slider.height / 2)
+      var p = levelSlider.mapToItem(root, levelSlider.width * 0.9, levelSlider.height / 2)
       mouseClick(root, p.x, p.y)
       compare(root.releases, 1)
       verify(root.lastReleased >= 8)
     }
 
     function test_dragStillWorks() {
-      var a = slider.mapToItem(root, 2, slider.height / 2)
-      var b = slider.mapToItem(root, slider.width - 2, slider.height / 2)
+      var a = levelSlider.mapToItem(root, 2, levelSlider.height / 2)
+      var b = levelSlider.mapToItem(root, levelSlider.width - 2, levelSlider.height / 2)
       mousePress(root, a.x, a.y)
-      verify(slider.dragging)
+      verify(levelSlider.dragging)
       mouseMove(root, b.x, b.y)
       mouseRelease(root, b.x, b.y)
-      verify(!slider.dragging)
+      verify(!levelSlider.dragging)
       compare(root.lastReleased, 10)
     }
 
     function test_rightClickReachesSlider() {
       var spy = createTemporaryQmlObject(
         "import QtTest; SignalSpy { signalName: 'rightClicked' }", root)
-      spy.target = slider
+      spy.target = levelSlider
       var p = sliderPoint()
       mouseClick(root, p.x, p.y, Qt.RightButton)
       compare(spy.count, 1)
@@ -196,7 +237,7 @@ Item {
     function test_hoverReachesSlider() {
       var p = sliderPoint()
       mouseMove(root, p.x, p.y)
-      tryVerify(function() { return slider._hot })
+      tryVerify(function() { return levelSlider._hot })
     }
   }
 }

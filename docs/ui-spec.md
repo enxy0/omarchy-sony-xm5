@@ -274,16 +274,16 @@ disconnected. The panel scrolls to keep the cursor visible.
    file carries a value.
 7. The Custom EQ chip sends the full `eq custom b1..b5 cb` form with the
    known values; only when they are unknown it sends the bare preset form.
-8. The plain mouse wheel over a slider scrolls the panel, as if the slider
-   was not there: about one Flickable wheel step per notch
-   (`wheelScrollLines * 24` px), clamped to the content; a touchpad follows
-   its pixel delta. The slider value does not change. Shift+wheel moves the
-   slider one step per notch, the stock `PanelSlider` wheel behavior; when
-   the system sends Shift+wheel as a horizontal scroll, x gives the
-   direction. `PanelSlider` always takes the wheel and has no switch for
-   this, so a `SliderWheel` layer inside each slider takes the wheel first
-   and does both actions itself. A release with an unchanged value sends
-   nothing.
+8. The plain mouse wheel over a slider row (the whole highlighted row, the
+   slider included) scrolls the panel, as if the slider was not there:
+   about one Flickable wheel step per notch (`wheelScrollLines * 24` px),
+   clamped to the content; a touchpad follows its pixel delta. The slider
+   value does not change. Shift+wheel anywhere on the row moves the slider
+   one step per notch, the stock `PanelSlider` wheel behavior; when the
+   system sends Shift+wheel as a horizontal scroll, x gives the direction.
+   `PanelSlider` always takes the wheel and has no switch for this, so a
+   `SliderWheel` layer on top of each row takes the wheel first and does
+   both actions itself. A release with an unchanged value sends nothing.
 9. `touch_function_left_options` or `touch_function_right_options` is
    `null`: offer `ambient_sound_control`, `playback_control`, `none` (the
    list of the WF-1000XM5 fw 6.1.0); the daemon skips its list check while
