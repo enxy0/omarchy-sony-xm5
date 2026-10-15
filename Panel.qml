@@ -800,8 +800,29 @@ Panel {
     function cycleNoise(): string { sony.cycleNoiseMode(); return sony.status.noiseMode || "unknown" }
   }
 
-  implicitWidth: button.implicitWidth
-  implicitHeight: button.implicitHeight
+  // No connected headset: hide the bar button after a 3 s grace, as the
+  // wlmouse widget does (ui-spec 1). Error states keep the button.
+  readonly property bool noHeadset: Model.barNoHeadset(sony.status)
+  property bool graceExpired: false
+  onNoHeadsetChanged: {
+    if (noHeadset) graceTimer.restart()
+    else {
+      graceTimer.stop()
+      graceExpired = false
+    }
+  }
+  Component.onCompleted: if (noHeadset) graceTimer.start()
+
+  Timer {
+    id: graceTimer
+    interval: 3000
+    onTriggered: root.graceExpired = true
+  }
+
+  visible: !(noHeadset && graceExpired)
+  onVisibleChanged: if (!visible && opened) close()
+  implicitWidth: visible ? button.implicitWidth : 0
+  implicitHeight: visible ? button.implicitHeight : 0
 
   // ---- bar button ----------------------------------------------------------
 
@@ -845,7 +866,7 @@ Panel {
     anchorItem: button
     owner: root
     bar: root.bar
-    open: root.opened
+    open: root.opened && root.visible
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(380))
     contentHeight: panel.fittedContentHeight(panelColumn.implicitHeight, Style.space(640))
