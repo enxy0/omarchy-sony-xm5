@@ -173,8 +173,96 @@ Panel {
     }
   }
 
+  // Wheel layer for a PanelSlider. Put it inside the slider: it is declared
+  // after the slider's own MouseArea, so it is on top and gets the wheel
+  // first. PanelSlider always takes the wheel and commits a step, and has no
+  // switch for this. A sibling layer with `wheel.accepted = false` does not
+  // help: the slider then still gets the event. So this layer accepts every
+  // wheel event and acts itself:
+  // - plain wheel: scrolls the nearest Flickable ancestor, about one
+  //   Flickable wheel step per notch (wheelScrollLines * 24 px), clamped
+  //   to 0..contentHeight-height. The slider value does not change.
+  // - Shift+wheel: one slider step, the same path as the stock wheel
+  //   (liveValue, moved, released). Some systems send Shift+wheel as a
+  //   horizontal scroll, so x gives the direction when y is 0.
+  // It takes no buttons and no hover, so click, drag, right click and the
+  // pointer cursor still reach the slider.
+  component SliderWheel: MouseArea {
+    id: wheelLayer
+
+    property PanelSlider slider: parent as PanelSlider
+    property Flickable flickable: null
+    property real targetY: 0
+
+    anchors.fill: parent
+    acceptedButtons: Qt.NoButton
+    hoverEnabled: false
+
+    function findFlickable() {
+      for (var p = wheelLayer.parent; p; p = p.parent) {
+        if (p instanceof Flickable) return p
+      }
+      return null
+    }
+
+    function scrollBy(pixels, animate) {
+      var f = wheelLayer.flickable || wheelLayer.findFlickable()
+      if (!f) return
+      wheelLayer.flickable = f
+      var maxY = Math.max(0, f.contentHeight - f.height)
+      if (maxY <= 0) return
+      var from = scrollAnim.running ? wheelLayer.targetY : f.contentY
+      var to = Math.max(0, Math.min(maxY, from + pixels))
+      scrollAnim.stop()
+      f.cancelFlick()
+      wheelLayer.targetY = to
+      if (!animate) {
+        f.contentY = to
+        return
+      }
+      scrollAnim.target = f
+      scrollAnim.from = f.contentY
+      scrollAnim.to = to
+      scrollAnim.start()
+    }
+
+    function stepSlider(direction) {
+      var s = wheelLayer.slider
+      var delta = direction > 0 ? s.step : -s.step
+      var next = Math.max(s.minimum, Math.min(s.maximum, s.liveValue + delta))
+      if (s.integer) next = Math.round(next)
+      s.liveValue = next
+      s.moved(next)
+      s.released(next)
+    }
+
+    onWheel: function(wheel) {
+      wheel.accepted = true
+      var dy = wheel.angleDelta.y
+      var dx = wheel.angleDelta.x
+      if (wheel.modifiers & Qt.ShiftModifier) {
+        var direction = dy !== 0 ? dy : dx
+        if (direction !== 0) wheelLayer.stepSlider(direction)
+        return
+      }
+      // A touchpad sends pixel deltas inside a scroll phase: follow them 1:1.
+      // A mouse wheel can also carry pixel deltas, but with no phase; it uses
+      // the angle step. Flickable picks the path the same way.
+      if (wheel.phase !== Qt.NoScrollPhase && wheel.pixelDelta.y !== 0)
+        wheelLayer.scrollBy(-wheel.pixelDelta.y, false)
+      else if (dy !== 0) wheelLayer.scrollBy(-dy / 120 * Qt.styleHints.wheelScrollLines * 24, true)
+    }
+
+    NumberAnimation {
+      id: scrollAnim
+      property: "contentY"
+      duration: 100
+      easing.type: Easing.OutQuad
+    }
+  }
+
   // Cursor row: title and value on one line, a slider under it.
-  // Commits on release (drag) and per wheel notch.
+  // Commits on release (drag) and per Shift+wheel notch.
   component SliderRow: CursorSurface {
     id: sliderRow
 
@@ -238,10 +326,12 @@ Panel {
         step: 1
         integer: true
         opacity: sliderRow.dimmed ? 0.6 : 1
-        // Skip no-op commits: a wheel notch at a bound releases the same value.
+        // Skip no-op commits: a Shift+wheel notch at a bound releases the same value.
         onReleased: function(v) {
           if (Math.round(v) !== Math.round(sliderRow.value)) sliderRow.committed(Math.round(v))
         }
+
+        SliderWheel {}
       }
     }
 
@@ -293,6 +383,8 @@ Panel {
       onReleased: function(v) {
         if (Math.round(v) !== Math.round(bandRow.value)) bandRow.committed(Math.round(v))
       }
+
+      SliderWheel {}
     }
 
     Text {
