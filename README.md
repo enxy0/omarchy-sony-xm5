@@ -79,7 +79,8 @@ They can fail or be absent:
 
 - The bar shows a headphone icon, the same size as the built-in icon
   widgets. The icon turns green while charging and red below 20 %. The
-  tooltip shows the battery level.
+  tooltip shows the battery level. With no headset connected, the icon
+  hides after 3 seconds and comes back when a headset connects.
 - Left click opens the panel. Right click cycles the noise mode
   (ANC, Ambient, Off).
 - Keyboard in the panel: `j`/`k` or arrows to move, `h`/`l` to change a

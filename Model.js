@@ -1486,6 +1486,12 @@ function _tooltipHeadsetLine(h, isPrimary) {
   return line + (isPrimary ? " (bar)" : "");
 }
 
+// True when the daemon reports no connected headset. The bar button hides
+// after a grace (ui-spec 1). Error states keep the button so the user sees them.
+function barNoHeadset(status) {
+  return !!status && status.ok === true && status.connected !== true;
+}
+
 function barTooltip(status) {
   if (!status || status.ok !== true) {
     if (status && status.schemaTooNew) return "Sony headphones: update the widget\n" + status.lastError;

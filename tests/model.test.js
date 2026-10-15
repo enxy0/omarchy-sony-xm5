@@ -160,6 +160,7 @@ suite("Suite 4: Disconnected State", () => {
     check(`${f}: no cursor targets`, Model.cursorSections(r, { sound: true }), []);
     check(`${f}: tooltip`, Model.barTooltip(r), "Sony headphones: disconnected");
     check(`${f}: hero meta`, Model.heroMeta(r), "Disconnected");
+    check(`${f}: bar has no headset`, Model.barNoHeadset(r), true);
   }
   const v2 = Model.parseStatus(fixture("status_v2_disconnected.json"));
   check("v2 disconnected last_updated", v2.lastUpdated, 1760438400);
@@ -224,6 +225,9 @@ suite("Suite 6: v2 Full Fixture", () => {
   ].every(([k, v]) => Model.controlState(s, k, v) === "enabled"), true);
   check("All sections visible", ["noise", "sound", "customEq", "speakToChat", "headset", "multipoint"].map((n) => Model.sectionVisible(s, n)), [true, true, true, true, true, true]);
   check("Tooltip", Model.barTooltip(s), "WH-1000XM5\nAmbient Sound · LDAC\nBattery 80%");
+  check("Bar has a headset", Model.barNoHeadset(s), false);
+  check("Bar keeps the button without status", Model.barNoHeadset(null), false);
+  check("Bar keeps the button on a status error", Model.barNoHeadset({ ok: false, connected: false }), false);
   check("Hero meta", Model.heroMeta(s), "Connected · LDAC · On head");
   check("Footer", Model.footerLines(s), ["WH-1000XM5 · firmware 2.3.1 · AC:80:0A:12:34:56", "Old daemon (status schema 2)"]);
   check("Not reading", Model.isReading(s), false);
