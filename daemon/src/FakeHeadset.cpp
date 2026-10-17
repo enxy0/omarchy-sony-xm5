@@ -77,6 +77,7 @@ FakeHeadsetProfile FakeHeadsetProfile::wf1000xm5Capture() {
                 0xFF, 0x19, 0xF3, 0xE7, 0xD2, 0xFD, 0xB6, 0xB0, 0xB2, 0xB8, 0xB7, 0x34, 0xF4, 0xF5};
     p.table2 = {0x42, 0x53, 0x54, 0xF1, 0x60, 0x61, 0xF2, 0x63, 0xF8, 0x32, 0x31};
     p.multipointSlot = 0xD2;
+    p.ldacMultipointCaution = true;
     p.sidetoneSlot = 0xD1;
     p.firmware = "6.1.0";
     p.modelName = "WF-1000XM5";
@@ -395,7 +396,14 @@ void FakeHeadset::handle(Table table, const Bytes& p, Bytes& out, bool& ackFirst
         return;
     case 0x98:
         alertsAnswered.push_back(p);
-        if (pendingMultipoint_ && at(2) == 0x07 && at(3) == 0x01) {
+        if (pendingMultipoint_ && at(3) == 0x01 && at(2) == 0x07 && pendingMultipointValue_ &&
+            profile.ldacMultipointCaution) {
+            // The real WF-1000XM5 asks a second question before it turns
+            // multipoint on, and keeps the old value unless it is answered.
+            notify({0x99, 0x00, 0x70, 0x01});
+            return;
+        }
+        if (pendingMultipoint_ && at(3) == 0x01 && (at(2) == 0x07 || at(2) == 0x70)) {
             multipoint = pendingMultipointValue_;
             notify({0xD9, profile.multipointSlot, 0x00, static_cast<uint8_t>(multipoint ? 0x00 : 0x01)});
         }

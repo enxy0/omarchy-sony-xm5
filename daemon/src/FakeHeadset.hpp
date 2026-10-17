@@ -27,6 +27,8 @@ struct FakeHeadsetProfile {
     int dropFirstDataPackets{0};
     bool replyBeforeAck{false};
     uint8_t multipointSlot{0xD1};
+    // Turning multipoint on asks alert 70 (two devices with LDAC) after 07.
+    bool ldacMultipointCaution{false};
     uint8_t sidetoneSlot{0x00};
     std::string firmware{"2.3.1"};
     std::string modelName{"WH-1000XM5"};

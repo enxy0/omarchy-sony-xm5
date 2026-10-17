@@ -212,7 +212,7 @@ suite("Suite 6: v2 Full Fixture", () => {
   check("Sound", [s.dseeExtreme, s.connectionQuality, s.codec, s.volume], [true, "sound", "LDAC", 12]);
   check("Speak-to-Chat", [s.speakToChat, s.stcSensitivity, s.stcTimeout], [true, "auto", "standard"]);
   check("Voice guidance", [s.voiceGuidance, s.voiceGuidanceVolume], [true, 0]);
-  check("Power", [s.autoPowerOff, s.autoPowerOffOptions.length], ["when_taken_off", 7]);
+  check("Power", [s.autoPowerOff, s.autoPowerOffOptions.length], ["when_taken_off", 2]);
   check("Buttons", [s.ncAmbButton, s.buttonFunction, s.buttonFunctions], ["nc_ambient_off", "ambient_sound_control", ["ambient_sound_control", "google_assistant", "amazon_alexa", "quick_access"]]);
   check("Wearing", [s.earDetection, s.worn], [true, true]);
   check("Multipoint", [s.multipoint, s.devices], [false, [{ address: "F0:1D:BC:AA:00:01", name: "laptop", connected: true, active: true }]]);
@@ -242,7 +242,7 @@ suite("Suite 6: v2 Full Fixture", () => {
   const byId = Object.fromEntries(sec.map((x) => [x.id, x]));
   check("Noise preferred is current mode", byId.noise.preferred, 1);
   check("EQ grid", [byId.eqPreset.kind, byId.eqPreset.count, byId.eqPreset.columns, byId.eqPreset.preferred], ["grid", 10, 5, 9]);
-  check("Auto power off grid preferred", [byId.autoPowerOff.count, byId.autoPowerOff.preferred], [7, 6]);
+  check("Auto power off grid preferred", [byId.autoPowerOff.count, byId.autoPowerOff.preferred], [2, 1]);
   check("Button function grid", [byId.buttonFunction.count, byId.buttonFunction.preferred], [4, 0]);
 });
 
@@ -370,7 +370,8 @@ suite("Suite 12: Command Building", () => {
   check("voice-guidance", cmd("voiceGuidance", false).args, ["voice-guidance", "off"]);
   check("voice-guidance-volume", cmd("voiceGuidanceVolume", -2).args, ["voice-guidance-volume", "-2"]);
   check("voice-guidance-volume 3 refused", cmd("voiceGuidanceVolume", 3).error, "Value out of range");
-  check("auto-power-off", cmd("autoPowerOff", "60min").args, ["auto-power-off", "60min"]);
+  check("auto-power-off", cmd("autoPowerOff", "off").args, ["auto-power-off", "off"]);
+  check("auto-power-off timer not offered with wearing detection", cmd("autoPowerOff", "60min").error, "Not supported by this headset");
   check("auto-power-off not in list", cmd("autoPowerOff", "when_taken_off", Object.assign({}, s, { autoPowerOffOptions: ["off", "5min"] })).error, "Not supported by this headset");
   check("nc-amb-button", cmd("ncAmbButton", "nc_off").args, ["nc-amb-button", "nc_off"]);
   check("button-function", cmd("buttonFunction", "quick_access").args, ["button-function", "quick_access"]);
@@ -386,7 +387,7 @@ suite("Suite 12: Command Building", () => {
 
 suite("Suite 13: Option Lists", () => {
   const s = full();
-  check("auto power off list from status", Model.autoPowerOffOptions(s), ["off", "5min", "15min", "30min", "60min", "180min", "when_taken_off"]);
+  check("auto power off list from status", Model.autoPowerOffOptions(s), ["off", "when_taken_off"]);
   check("auto power off without list", Model.autoPowerOffOptions(Object.assign({}, s, { autoPowerOffOptions: null, autoPowerOff: "30min" })), ["off", "5min", "15min", "30min", "60min", "180min"]);
   check("auto power off without list keeps current when_taken_off", Model.autoPowerOffOptions(Object.assign({}, s, { autoPowerOffOptions: null })).includes("when_taken_off"), true);
   check("button functions without list", Model.buttonFunctionOptions(Object.assign({}, s, { buttonFunctions: null })), Model.BUTTON_FUNCTION_VALUES);
@@ -588,7 +589,7 @@ suite("Suite 23: Target Table", () => {
   check("Choices without tooltips", Model.targetChoices(s, "noise").map((c) => c.label + "|" + c.tooltip), ["ANC|", "Ambient|", "Off|"]);
   check("Header activation", Model.targetActivation(s, "speakToChatHeader", 0), { expand: "speakToChat" });
   check("Toggle activation flips", Model.targetActivation(s, "dsee", 0), { action: "dsee", value: false });
-  check("Chip activation", Model.targetActivation(s, "autoPowerOff", 2), { action: "autoPowerOff", value: "15min" });
+  check("Chip activation", Model.targetActivation(s, "autoPowerOff", 0), { action: "autoPowerOff", value: "off" });
   check("Chip activation out of range", Model.targetActivation(s, "autoPowerOff", 99), null);
   const mp = Model.parseStatus(fixture("status_v2_multipoint.json"));
   check("Device activation switches source", Model.targetActivation(mp, "devices", 0), { action: "source", value: "F0:1D:BC:AA:00:01" });

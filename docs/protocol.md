@@ -31,6 +31,10 @@ Each feature table has a **Confidence** value:
 - **in code, unverified on XM5**: the layout exists in mos9527 (or Gadgetbridge
   for other models), but no source confirms it on an XM5.
 
+Section 10 overrides these levels for setters: it lists every value this
+daemon wrote to a real WH-1000XM5 and WF-1000XM5 and read back from a fresh
+session after a Bluetooth reconnect.
+
 Section 9 uses the same three levels for the earbuds: **confirmed on
 WF-1000XM5 fw 6.1.0** (our capture, section 9.1), **verified on WF-1000XM5**
 (mos9527 `WF-1000XM5.md` or its WF-1000XM5 packet captures), and **in code,
@@ -525,7 +529,7 @@ NTFY for voice guidance; send the GET again after a SET.
 
 | Item | Value |
 |---|---|
-| Confidence | read: **confirmed on WH-1000XM5 fw 2.5.1** (T1 `25`, type `05`, `27 05 10 00`). SET: **verified on XM5** (Gadgetbridge `AutomaticPowerOffWhenTakenOff`, which uses type `05`) |
+| Confidence | read: **confirmed on WH-1000XM5 fw 2.5.1** (T1 `25`, type `05`, `27 05 10 00`). SET: `off` and `when_taken_off` **round trip on WH-1000XM5 fw 2.5.1 and WF-1000XM5 fw 6.1.0** (section 10); the timers are refused, see below |
 | Gate | T1 `25` → type `05` (with "when taken off"); T1 `24` → type `04` |
 | GET | T1 `26 05` → `27 05 CU LA` (NTFY `29 05 CU LA`) |
 | SET | T1 `28 05 CU LA` |
@@ -545,6 +549,12 @@ NTFY for voice guidance; send the GET again after a SET.
 For SET, send `LA = CU` when `CU` is a timer (`00`..`04`), else `LA = 00`.
 mos9527 always sends `LA = 00`; Gadgetbridge sends the pairs above. Both are
 reported to work.
+
+**Type `05` has no timers.** The WH-1000XM5 (fw 2.5.1) and the WF-1000XM5
+(fw 6.1.0) ACK a timer write such as `28 05 01 01` (30 min) and answer
+`29 05 10 00`: "when taken off" stays. Only `11` (off) and `10` (when taken
+off) are kept. The daemon therefore offers `off` and `when_taken_off` for
+type `05`, and the timers for type `04` only.
 
 ### 5.8 NC/AMB button: cycle and assignment
 
@@ -707,6 +717,13 @@ reconnect. The device asks first with a fixed message (needs init step 11):
 Gadgetbridge (other V2 models) sends `98 00 06 01` right after the general
 setting write without waiting for the alert. After the answer, the headset
 drops the RFCOMM link; the daemon must reconnect.
+
+One change can ask more than once. Turning multipoint **on** on the
+WF-1000XM5 (fw 6.1.0, LDAC in use) asks `99 00 07 01` and, after the answer,
+`99 00 70 01` (CAUTION_FOR_ENABLING_2_DEVICES_CONNECTION_WITH_LDAC). With
+`70` unanswered the earbuds keep multipoint off. The daemon answers every
+`AT = 01` alert while the window opened by the write lasts, and each answer
+extends the window. The WH-1000XM5 asks `07` only.
 
 ### 5.14 Paired devices, connected devices, switch source
 
@@ -1309,3 +1326,38 @@ The right earbud was out of the ear and not in the case, and it read level
 The daemon finds connected headsets by polling BlueZ: every 2 s it runs a
 blocking `GetManagedObjects` on the system bus (backend-contract.md 7,
 "Known limitation").
+
+## 10. Round trip on real hardware
+
+Each value was written with `sony-ctl`, the headset was disconnected and
+connected again with `bluetoothctl`, and the value was read from the new
+session's init. Then every setting was written back to its original value
+and checked the same way. Devices: WH-1000XM5 fw 2.5.1 and WF-1000XM5
+fw 6.1.0, both connected to the computer at the same time, LDAC in use.
+
+| Setting | Values written | WH-1000XM5 | WF-1000XM5 |
+|---|---|---|---|
+| Noise mode | `ambient`, `off` | kept | kept |
+| Ambient level | 12, 20 | kept | kept |
+| Focus on Voice | off/on | kept | kept |
+| EQ preset | `bright`, `off` | kept | kept |
+| Custom EQ and Clear Bass | `3 -2 0 4 -5`, CB 6 (WH); `2 0 -3 1 4`, CB -4 (WF); zeros | kept, preset reads `custom` | kept |
+| DSEE Extreme | on/off | kept | kept |
+| Speak-to-Chat | on/off; `high long`, `auto standard` | kept | kept |
+| Voice guidance | off/on | kept | kept |
+| Voice guidance volume | 2, 0 | not supported | kept |
+| Auto power off | `off`, `when_taken_off` | kept | kept |
+| Auto power off timers | `30min`, `5min` | refused (5.7) | refused (5.7) |
+| NC/AMB button | `nc_ambient`, `nc_ambient_off` | kept | not supported |
+| Pause when taken off | off/on | kept | kept |
+| Volume | 10 and back | kept | kept |
+| Connection quality | `connection`, `sound` | kept; the codec changed LDAC → AAC → LDAC | not supported |
+| Touch panel | off/on | kept | not supported |
+| Quick Access | `spotify` for double and triple, `off` | kept | not supported |
+| Touch function L/R | `ambient_sound_control` / `none`, `playback_control` | not supported | kept |
+| Sidetone | off/on | not supported | kept |
+| Multipoint | off/on | kept | off kept; on needed the second alert (5.13) |
+
+Not tested here: switching the audio source (needs a second connected
+device), the NC/AMB button function on models with an assignable button,
+and the paired device actions.

@@ -1020,7 +1020,7 @@ TEST(SetterVerbsSendProtocolBytes) {
         {"speak-to-chat-config low long", Table::T1, B({0xFC, 0x0C, 0x02, 0x02})},
         {"voice-guidance off", Table::T2, B({0x48, 0x01, 0x01})},
         {"voice-guidance-volume -1", Table::T2, B({0x48, 0x20, 0xFF, 0x00})},
-        {"auto-power-off 60min", Table::T1, B({0x28, 0x05, 0x02, 0x02})},
+        {"auto-power-off off", Table::T1, B({0x28, 0x05, 0x11, 0x00})},
         {"nc-amb-button ambient_off", Table::T1, B({0x68, 0x30, 0x04})},
         {"button-function google_assistant", Table::T1, B({0xF8, 0x03, 0x01, 0x31})},
         {"ear-detect off", Table::T1, B({0xF8, 0x01, 0x01})},
@@ -1048,7 +1048,7 @@ TEST(SetterVerbsSendProtocolBytes) {
     CHECK_EQ(j["speak_to_chat_timeout"].string, std::string("long"));
     CHECK(!j["voice_guidance"].boolean);
     CHECK_EQ(j["voice_guidance_volume"].number, -1.0);
-    CHECK_EQ(j["auto_power_off"].string, std::string("60min"));
+    CHECK_EQ(j["auto_power_off"].string, std::string("off"));
     CHECK_EQ(j["nc_amb_button"].string, std::string("ambient_off"));
     CHECK_EQ(j["button_function"].string, std::string("google_assistant"));
     CHECK(!j["ear_detection"].boolean);
@@ -1215,6 +1215,24 @@ TEST(MultipointConfirmsTheAlert) {
     h.advance(100);
     REQUIRE(h.fake.alertsAnswered.size() == 1);
     CHECK_EQ(h.fake.alertsAnswered[0], B({0x98, 0x00, 0x07, 0x01}));
+    CHECK(h.status()["multipoint"].boolean);
+}
+
+// The WF-1000XM5 (fw 6.1.0) asks 07 and then 70 (two devices with LDAC)
+// before it turns multipoint on; with 70 unanswered it keeps multipoint off.
+TEST(MultipointConfirmsEveryAlertOfTheChange) {
+    Harness h(wfProfile());
+    h.connect();
+    h.advance(200);
+    h.run("multipoint off");
+    h.advance(100);
+    REQUIRE(!h.status()["multipoint"].boolean);
+    h.fake.alertsAnswered.clear();
+    CHECK_EQ(h.run("multipoint on"), std::string("OK"));
+    h.advance(200);
+    REQUIRE(h.fake.alertsAnswered.size() == 2);
+    CHECK_EQ(h.fake.alertsAnswered[0], B({0x98, 0x00, 0x07, 0x01}));
+    CHECK_EQ(h.fake.alertsAnswered[1], B({0x98, 0x00, 0x70, 0x01}));
     CHECK(h.status()["multipoint"].boolean);
 }
 
