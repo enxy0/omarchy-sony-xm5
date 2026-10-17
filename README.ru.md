@@ -19,12 +19,23 @@ omarchy plugin add https://github.com/enxy0/omarchy-sony-xm5 --enable
 ```
 
 Потом нажмите на иконку наушников в баре и затем **Install**. Это соберёт и
-запустит небольшой фоновый сервис от вашего пользователя; sudo спросит пароль,
-только если не хватает пакетов для сборки.
+запустит небольшой фоновый сервис от вашего пользователя. Ему нужны BlueZ и
+D-Bus, они в Omarchy уже есть, а недостающие пакеты для сборки (`cmake`,
+`ninja`, `gcc`, `bluez-libs`) ставятся через pacman; только тогда sudo
+спросит пароль.
 
 Обновление: `omarchy plugin update io.github.enxy0.sonyxm5`, панель сама
-предложит **Update**, если сервис тоже нужно обновить. Удаление описано в
-[docs/install.md](docs/install.md) (на английском).
+предложит **Update**, если сервис тоже нужно обновить.
+
+Удаление:
+
+```bash
+~/.config/omarchy/plugins/io.github.enxy0.sonyxm5/setup --uninstall
+omarchy plugin remove io.github.enxy0.sonyxm5
+```
+
+Подробнее о setup, удалении и пакете Arch: [docs/install.md](docs/install.md)
+(на английском).
 
 ## Использование
 
