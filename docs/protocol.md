@@ -729,7 +729,7 @@ extends the window. The WH-1000XM5 asks `07` only.
 
 | Item | Value |
 |---|---|
-| Confidence | list read: **confirmed on WH-1000XM5 fw 2.5.1** (T2 `32`, type `02`, three entries, one connected). Switch: **in code, unverified on XM5** (mos9527 "Multipoint Control ?", not tested) |
+| Confidence | list read: **confirmed on WH-1000XM5 fw 2.5.1** (T2 `32`, type `02`, three entries, one connected). Switch: **works on WH-1000XM5 fw 2.5.1 and WF-1000XM5 fw 6.1.0** (section 10) |
 | Gate list | T2 `32` or `33` → inquired type `02`; else T2 `30` → type `00` |
 | Gate switch | T2 `31` SOURCE_SWITCH_CONTROL |
 
@@ -1357,7 +1357,11 @@ fw 6.1.0, both connected to the computer at the same time, LDAC in use.
 | Touch function L/R | `ambient_sound_control` / `none`, `playback_control` | not supported | kept |
 | Sidetone | off/on | not supported | kept |
 | Multipoint | off/on | kept | off kept; on needed the second alert (5.13) |
+| Audio source (5.14) | the phone, then the computer (WH); the computer, then the phone (WF) | `active` moved each time | `active` moved each time |
 
-Not tested here: switching the audio source (needs a second connected
-device), the NC/AMB button function on models with an assignable button,
-and the paired device actions.
+The source switch was checked with a phone connected to both headsets next
+to the computer; `active` was read from the device list about 4 s after
+each switch, without a reconnect.
+
+Not tested here: the NC/AMB button function on models with an assignable
+button, and the paired device actions (disconnect, unpair).
