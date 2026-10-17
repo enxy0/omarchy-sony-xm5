@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # tests/integration.sh — End-to-End Simulation & Verification Test Suite
-# Project: omarchy-sony (Sony WH-1000XM5 Plugin & Headless Daemon)
+# Project: omarchy-sony-xm5 (Sony WH-1000XM5 and WF-1000XM5 widget and daemon)
 # ==============================================================================
 # This script executes a complete, self-contained offline simulation validating
 # daemon state management, UNIX domain socket IPC, CLI command execution,
@@ -102,7 +102,7 @@ else
   DAEMON_TYPE="python mock daemon ($SCRIPT_DIR/mock_daemon.py)"
 fi
 
-echo -e "${BOLD}omarchy-sony End-to-End Simulation & Verification Test Suite${NC}"
+echo -e "${BOLD}omarchy-sony-xm5 End-to-End Simulation & Verification Test Suite${NC}"
 echo "Repository:  $REPO_ROOT"
 echo "Sandbox:     $SANDBOX_DIR"
 echo "CLI Driver:  $CLI_TYPE"

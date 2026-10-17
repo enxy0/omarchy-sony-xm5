@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Adversarial Stress Harness for Milestone 2 Iteration 2
-OMARCHY-SONY Empirical Challenger
+Adversarial stress harness for the daemon IPC server
 
 Tests:
 1. Rapid Status Queries & Concurrent Socket Reads (Compact JSON verification)

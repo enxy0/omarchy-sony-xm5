@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Empirical Stress Test Suite for IPC Server & Wire Protocol
-Omarchy-Sony Project - Milestone 2 Adversarial Review
+Stress tests for the daemon IPC server and wire protocol
 """
 
 import os

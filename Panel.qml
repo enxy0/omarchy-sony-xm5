@@ -17,8 +17,8 @@ import "Model.js" as Model
 
 Panel {
   id: root
-  moduleName: "io.github.androydified.omasony"
-  ipcTarget: "io.github.androydified.omasony"
+  moduleName: "io.github.enxy0.sonyxm5"
+  ipcTarget: "io.github.enxy0.sonyxm5"
   manageIpc: false
 
   // ---- inline components ---------------------------------------------------
