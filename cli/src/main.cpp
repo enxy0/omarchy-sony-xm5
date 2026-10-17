@@ -179,7 +179,7 @@ int main(int argc, char* argv[]) {
         return 0;
     }
     if (show_version) {
-        std::cout << "sony-ctl 0.2.0\n";
+        std::cout << "sony-ctl " << SONY_XM5_VERSION << "\n";
         return 0;
     }
     if (remaining.empty()) {

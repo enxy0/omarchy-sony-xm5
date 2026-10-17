@@ -834,7 +834,7 @@ Panel {
     bar: root.bar
     hasVisualContent: true
     slotSize: Style.bar.iconSlot
-    tooltipText: Model.barTooltip(root.barSt)
+    tooltipText: Model.barTooltip(root.barSt, sony.daemonState)
 
     readonly property color contentColor: button.active ? button.activeColor : button.foreground
 
@@ -1074,10 +1074,10 @@ Panel {
             font.pixelSize: Style.font.bodySmall
           }
 
-          // -- no controls: error, too new, disconnected ----------------------
+          // -- daemon not installed or older than the widget ------------------
           Column {
             width: parent.width
-            visible: !root.live
+            visible: sony.daemonNotice !== ""
             spacing: Style.space(6)
 
             PanelSeparator { foreground: root.foreground }
@@ -1086,7 +1086,71 @@ Panel {
               width: parent.width
               textFormat: Text.PlainText
               wrapMode: Text.WordWrap
-              text: Model.emptyStateText(root.st)
+              text: sony.daemonNotice
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Item {
+              width: parent.width
+              visible: sony.daemonCommand !== ""
+              implicitHeight: Math.max(commandText.implicitHeight, copyButton.implicitHeight)
+
+              Text {
+                id: commandText
+                anchors.left: parent.left
+                anchors.right: copyButton.left
+                anchors.rightMargin: Style.space(6)
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                wrapMode: Text.WrapAnywhere
+                text: sony.daemonCommand
+                color: root.foreground
+                font.family: "monospace"
+                font.pixelSize: Style.font.caption
+              }
+
+              Button {
+                id: copyButton
+                property bool copied: false
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                text: copied ? "Copied" : "Copy"
+                fontSize: Style.font.caption
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                bordered: true
+                horizontalPadding: Style.space(8)
+                verticalPadding: Style.space(6)
+                onClicked: {
+                  sony.copyText(sony.daemonCommand)
+                  copied = true
+                  copiedTimer.restart()
+                }
+
+                Timer {
+                  id: copiedTimer
+                  interval: 2000
+                  onTriggered: copyButton.copied = false
+                }
+              }
+            }
+          }
+
+          // -- no controls: error, too new, disconnected ----------------------
+          Column {
+            width: parent.width
+            visible: !root.live && sony.daemonState !== "missing"
+            spacing: Style.space(6)
+
+            PanelSeparator { foreground: root.foreground }
+
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              text: Model.emptyStateText(root.st, sony.daemonState)
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall

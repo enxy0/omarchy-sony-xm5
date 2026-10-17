@@ -38,6 +38,12 @@ __pycache__/
 .DS_Store
 .directory
 
+# makepkg
+/src/
+/pkg/
+/omarchy-sony-xm5/
+*.pkg.tar.*
+
 # Local states & sockets
 *.sock
 status.json

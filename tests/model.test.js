@@ -937,6 +937,46 @@ suite("Suite 30: v3 Defensive Reading", () => {
     .map((f) => [v3(f).ok, v3(f).schemaVersion, v3(f).headsets.length]), [[true, 3, 1], [true, 3, 1], [true, 3, 2], [true, 3, 1], [true, 3, 0]]);
 });
 
+suite("Suite 31: Daemon Install State", () => {
+  const ok = Model.parseStatus(fixture("status_v3_wh.json"));
+  const old = Model.parseStatus(fixture("status_v3_wh.json").replace(/\s*"daemon_version": "[^"]*",/, ""));
+  const none = Model.parseStatus("");
+  const local = { path: "/home/u/.local/bin/sony-ctl", version: "0.1.0" };
+  const packaged = { path: "/usr/bin/sony-ctl", version: "0.1.0" };
+  const missing = { path: null, version: null };
+  const dir = "/home/u/.config/omarchy/plugins/io.github.enxy0.sonyxm5";
+
+  check("daemon_version is read", [ok.daemonVersion, old.daemonVersion], ["0.1.0", null]);
+  check("States", [
+    Model.daemonState(ok, null, "0.1.0"),
+    Model.daemonState(none, missing, "0.1.0"),
+    Model.daemonState(ok, local, "0.1.0"),
+    Model.daemonState(ok, local, "0.2.0"),
+    Model.daemonState(old, local, "0.1.0"),
+    Model.daemonState(none, local, "0.1.0"),
+    Model.daemonState(ok, local, ""),
+  ], ["unknown", "missing", "ok", "outdated", "outdated", "ok", "ok"]);
+  check("Commands", [
+    Model.daemonCommand("missing", missing, dir),
+    Model.daemonCommand("outdated", local, dir),
+    Model.daemonCommand("outdated", packaged, dir),
+    Model.daemonCommand("ok", local, dir),
+  ], [dir + "/setup", dir + "/setup", "git pull && makepkg -si", ""]);
+  check("Notices", [
+    Model.daemonNotice("missing", none, missing, "0.1.0"),
+    Model.daemonNotice("outdated", ok, local, "0.2.0"),
+    Model.daemonNotice("outdated", old, packaged, "0.1.0"),
+    Model.daemonNotice("ok", ok, local, "0.1.0"),
+  ], [
+    "The sony-headphones daemon is not installed. Run this in a terminal:",
+    "The daemon is version 0.1.0, the widget is version 0.2.0. Update the daemon:",
+    "The daemon is an older version, the widget is version 0.1.0. Rebuild the package in your clone:",
+    "",
+  ]);
+  check("Missing daemon: tooltip and no empty-state text", [Model.barTooltip(none, "missing"), Model.emptyStateText(none, "missing")],
+    ["Sony headphones: the daemon is not installed", ""]);
+});
+
 console.log(`\nSummary: ${passed} passed, ${failed} failed`);
 if (failed > 0) {
   if (typeof Deno !== "undefined") Deno.exit(1);

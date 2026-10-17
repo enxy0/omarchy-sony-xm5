@@ -1,5 +1,6 @@
 {
   "schema_version": 3,
+  "daemon_version": "0.1.0",
   "connected": true,
   "last_updated": 1760438400,
   "primary": "AC:80:0A:12:34:56",

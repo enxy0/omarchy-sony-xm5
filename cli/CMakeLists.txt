@@ -1,8 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../manifest.json" SONY_XM5_MANIFEST)
+    string(JSON SONY_XM5_VERSION GET "${SONY_XM5_MANIFEST}" version)
+    add_compile_definitions(SONY_XM5_VERSION="${SONY_XM5_VERSION}")
+
     project(sony-ctl
-        VERSION 0.1.0
+        VERSION ${SONY_XM5_VERSION}
         DESCRIPTION "CLI for the Sony WH-1000XM5 and WF-1000XM5 daemon"
         LANGUAGES CXX
     )
