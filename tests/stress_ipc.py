@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Empirical Stress Test Suite for IPC Server & Wire Protocol
-Omarchy-Sony Project - Milestone 2 Adversarial Review
+Stress tests for the daemon IPC server and wire protocol
 """
 
 import os
@@ -307,7 +306,7 @@ def run_tests():
             
             # Verify first status is JSON
             json1 = json.loads(lines[0])
-            if json1.get("schema_version") != 1:
+            if json1.get("schema_version") != 3:
                 raise TestFailure(f"Invalid JSON in pipelined status response: {lines[0]}")
             
             # Verify intermediate OKs
@@ -316,8 +315,8 @@ def run_tests():
                     raise TestFailure(f"Expected OK at line {i}, got {lines[i]}")
             
             # Verify second status has updated values
-            json2 = json.loads(lines[8])
-            if json2.get("noise_mode") != "anc" or json2.get("ambient_level") != 12:
+            json2 = json.loads(lines[8])["headsets"][0]
+            if json2.get("noise_mode") != "ambient" or json2.get("ambient_sound_level") != 12:
                 raise TestFailure(f"Pipelined state updates not reflected in second status: {lines[8]}")
             
             if lines[9] != b"OK":
@@ -365,7 +364,7 @@ def run_tests():
                 resp += chunk
             
             parsed = json.loads(resp.decode("utf-8").strip())
-            if parsed.get("schema_version") != 1:
+            if parsed.get("schema_version") != 3:
                 raise TestFailure(f"Unexpected status response: {resp}")
 
     record_test("8. Partial writes & Byte-at-a-time streaming (10ms delay)", test_byte_at_a_time_streaming)

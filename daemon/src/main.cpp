@@ -1,55 +1,63 @@
+#include <algorithm>
+#include <cerrno>
+#include <chrono>
+#include <csignal>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
+#include <map>
+#include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
-#include <array>
-#include <optional>
-#include <chrono>
-#include <csignal>
-#include <cerrno>
-#include <cstring>
-#include <cstdlib>
-#include <unistd.h>
-#include <sys/stat.h>
-#include <sys/types.h>
+
 #include <sys/poll.h>
 #include <sys/signalfd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 #include "BluetoothManager.hpp"
-#include "MDRProtocol.hpp"
-#include "StateEngine.hpp"
+#include "FakeHeadset.hpp"
+#include "HeadsetSession.hpp"
 #include "IpcServer.hpp"
+#include "SessionManager.hpp"
+#include "StateEngine.hpp"
 
 namespace {
 
 using namespace omarchy::sony;
 using namespace omarchy::sony::protocol;
+using Clock = std::chrono::steady_clock;
 
-constexpr const char* DAEMON_VERSION = "0.1.0";
+constexpr auto kBluezPollInterval = std::chrono::seconds(2);
+constexpr uint32_t kMaxLinkAttempts = 6;
+constexpr uint32_t kSlowRetryMs = 60000;
+constexpr const char* kMockAdapter = "F0:1D:BC:AA:00:01";
 
 struct DaemonOptions {
     bool showHelp{false};
     bool showVersion{false};
     bool mockMode{false};
-    std::string preferredMac;
+    std::string mockProfile{"xm5"};
+    std::vector<std::string> devices;
     std::string stateDir;
     std::string runtimeDir;
 };
 
 void printHelp(const char* progName) {
     std::cout << "Usage: " << progName << " [OPTIONS]\n\n"
-              << "Headless background daemon managing Sony WH-1000XM5 headphones on Linux.\n\n"
+              << "Headless background daemon managing Sony WH-1000XM5 and WF-1000XM5 headsets on Linux.\n\n"
               << "Options:\n"
               << "  -h, --help               Display this help message and exit\n"
               << "  -v, --version            Display version information and exit\n"
-              << "  -m, --mock               Run in mock simulation mode (completely offline)\n"
-              << "  -d, --device <MAC>       Target specific Bluetooth MAC address\n"
+              << "  -m, --mock               Run against simulated headsets (no Bluetooth)\n"
+              << "      --mock-profile <P>   Simulated headsets: xm5 (default), minimal, multipoint, wf, both\n"
+              << "  -d, --device <MAC>       Manage only this Bluetooth address (repeat for more)\n"
               << "      --state-dir <DIR>    Override directory for status.json\n"
               << "      --runtime-dir <DIR>  Override directory for IPC socket\n\n";
-}
-
-void printVersion() {
-    std::cout << "sony-headphones-daemon " << DAEMON_VERSION << "\n";
 }
 
 std::optional<DaemonOptions> parseCommandLine(int argc, char* argv[]) {
@@ -64,27 +72,40 @@ std::optional<DaemonOptions> parseCommandLine(int argc, char* argv[]) {
             return opts;
         } else if (arg == "-m" || arg == "--mock") {
             opts.mockMode = true;
+        } else if (arg == "--mock-profile") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --mock-profile requires a profile name\n";
+                return std::nullopt;
+            }
+            opts.mockProfile = argv[++i];
+            const std::string_view p = opts.mockProfile;
+            if (p != "xm5" && p != "minimal" && p != "multipoint" && p != "wf" && p != "both") {
+                std::cerr << "Error: Unknown mock profile '" << opts.mockProfile << "'\n";
+                return std::nullopt;
+            }
         } else if (arg == "-d" || arg == "--device") {
-            if (i + 1 < argc) {
-                opts.preferredMac = argv[++i];
-            } else {
+            if (i + 1 >= argc) {
                 std::cerr << "Error: --device requires a MAC address argument\n";
                 return std::nullopt;
             }
+            auto mac = cmd::normalizeAddress(argv[++i]);
+            if (!mac) {
+                std::cerr << "Error: Invalid MAC address '" << argv[i] << "'\n";
+                return std::nullopt;
+            }
+            opts.devices.push_back(*mac);
         } else if (arg == "--state-dir") {
-            if (i + 1 < argc) {
-                opts.stateDir = argv[++i];
-            } else {
+            if (i + 1 >= argc) {
                 std::cerr << "Error: --state-dir requires a directory path\n";
                 return std::nullopt;
             }
+            opts.stateDir = argv[++i];
         } else if (arg == "--runtime-dir") {
-            if (i + 1 < argc) {
-                opts.runtimeDir = argv[++i];
-            } else {
+            if (i + 1 >= argc) {
                 std::cerr << "Error: --runtime-dir requires a directory path\n";
                 return std::nullopt;
             }
+            opts.runtimeDir = argv[++i];
         } else {
             std::cerr << "Error: Unrecognized option '" << arg << "'\n";
             return std::nullopt;
@@ -94,44 +115,90 @@ std::optional<DaemonOptions> parseCommandLine(int argc, char* argv[]) {
 }
 
 std::string resolveStateDir(const std::string& overrideDir) {
-    if (!overrideDir.empty()) {
-        return overrideDir;
-    }
+    if (!overrideDir.empty()) return overrideDir;
     const char* xdgState = std::getenv("XDG_STATE_HOME");
-    if (xdgState && xdgState[0] != '\0') {
-        return std::string(xdgState);
-    }
+    if (xdgState && xdgState[0] != '\0') return xdgState;
     const char* home = std::getenv("HOME");
-    if (home && home[0] != '\0') {
-        return std::string(home) + "/.local/state";
-    }
+    if (home && home[0] != '\0') return std::string(home) + "/.local/state";
     return "/tmp";
 }
 
 std::string resolveRuntimeDir(const std::string& overrideDir) {
-    if (!overrideDir.empty()) {
-        return overrideDir;
-    }
+    if (!overrideDir.empty()) return overrideDir;
     const char* xdgRun = std::getenv("XDG_RUNTIME_DIR");
-    if (xdgRun && xdgRun[0] != '\0') {
-        return std::string(xdgRun);
-    }
+    if (xdgRun && xdgRun[0] != '\0') return xdgRun;
     return "/tmp/run-" + std::to_string(::getuid());
 }
 
-} // anonymous namespace
+int64_t unixNow() {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
 
-// ---------------------------------------------------------------------------
-// Main Daemon Entry Point
-// ---------------------------------------------------------------------------
+struct FakeDevice {
+    BluetoothDeviceInfo info;
+    std::shared_ptr<FakeHeadset> headset;
+};
+
+BluetoothDeviceInfo fakeInfo(const std::string& mac, const std::string& name) {
+    BluetoothDeviceInfo info;
+    info.macAddress = mac;
+    info.name = name;
+    info.alias = name;
+    info.paired = true;
+    info.connected = true;
+    info.uuids.emplace_back(MDR_UUID_XM5_LOWER);
+    return info;
+}
+
+std::vector<FakeDevice> makeFakeDevices(const std::string& profile) {
+    const std::string wh = "AC:80:0A:12:34:56";
+    const std::string wf = "AC:80:0A:65:43:21";
+    if (profile == "minimal") {
+        return {{fakeInfo(wh, "WH-1000XM5"), std::make_shared<FakeHeadset>(FakeHeadsetProfile::minimal())}};
+    }
+    if (profile == "wf" || profile == "both") {
+        auto earbuds = std::make_shared<FakeHeadset>(FakeHeadsetProfile::wf1000xm5Capture());
+        earbuds->useFixtureValues();
+        if (profile == "wf") return {{fakeInfo(wf, "WF-1000XM5"), earbuds}};
+        earbuds->devices = {{kMockAdapter, "laptop", 1}};
+        earbuds->assignable = {0x35, 0x20};
+        auto headphones = std::make_shared<FakeHeadset>(FakeHeadsetProfile::wh1000xm5Capture());
+        headphones->useFixtureValues();
+        headphones->devices = {{kMockAdapter, "laptop", 1}, {"5C:E9:1E:BB:00:02", "phone", 2}};
+        headphones->playbackSlot = 2;
+        return {{fakeInfo(wh, "WH-1000XM5"), headphones}, {fakeInfo(wf, "WF-1000XM5"), earbuds}};
+    }
+    auto headset = std::make_shared<FakeHeadset>();
+    if (profile == "multipoint") {
+        headset->multipoint = true;
+        headset->devices = {{kMockAdapter, "laptop", 1}, {"5C:E9:1E:BB:00:02", "Pixel 8", 2},
+                            {"3C:22:FB:CC:00:03", "", 0}};
+    }
+    return {{fakeInfo(wh, "WH-1000XM5"), headset}};
+}
+
+// One managed headset: its RFCOMM link and, in mock mode, its simulated headset.
+struct Slot {
+    BluetoothDeviceInfo info;
+    std::unique_ptr<BluetoothManager> link;
+    std::shared_ptr<FakeHeadset> fake;
+    FakeHeadsetTransport* fakeTransport{nullptr};
+    HeadsetSession* session{nullptr};
+};
+
+void logLine(const char* tag, const std::string& id, const std::string& line) {
+    std::fprintf(stderr, "[%s %s] %s\n", tag, id.c_str(), line.c_str());
+    std::fflush(stderr);
+}
+
+} // namespace
+
 int main(int argc, char* argv[]) {
-    // Restrict default permissions on all newly created files and directories
     ::umask(0077);
 
     auto optsOpt = parseCommandLine(argc, argv);
-    if (!optsOpt) {
-        return 1;
-    }
+    if (!optsOpt) return 1;
     const auto& opts = *optsOpt;
 
     if (opts.showHelp) {
@@ -139,393 +206,283 @@ int main(int argc, char* argv[]) {
         return 0;
     }
     if (opts.showVersion) {
-        printVersion();
+        std::cout << "sony-headphones-daemon " << SONY_XM5_VERSION << "\n";
         return 0;
     }
 
-    // 1. Resolve paths
-    std::string stateDir = resolveStateDir(opts.stateDir);
-    std::string runtimeDir = resolveRuntimeDir(opts.runtimeDir);
+    const std::string stateDir = resolveStateDir(opts.stateDir);
+    const std::string runtimeDir = resolveRuntimeDir(opts.runtimeDir);
 
-    // 2. Setup Linux signalfd (ignoring SIGPIPE, blocking SIGINT/TERM/USR1/USR2)
     ::signal(SIGPIPE, SIG_IGN);
-
     sigset_t mask;
     sigemptyset(&mask);
     sigaddset(&mask, SIGINT);
     sigaddset(&mask, SIGTERM);
     sigaddset(&mask, SIGUSR1);
     sigaddset(&mask, SIGUSR2);
-
     if (::sigprocmask(SIG_BLOCK, &mask, nullptr) < 0) {
         std::cerr << "Fatal: Failed to mask signals: " << std::strerror(errno) << "\n";
         return 1;
     }
-
     int sigFd = ::signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
     if (sigFd < 0) {
         std::cerr << "Fatal: Failed to create signalfd: " << std::strerror(errno) << "\n";
         return 1;
     }
 
-    // 3. Initialize StateEngine
     StateEngine stateEngine(stateDir);
-    if (!stateEngine.initialize(opts.mockMode ? true : false)) {
-        std::cerr << "Fatal: Failed to initialize StateEngine at " << stateDir << "\n";
+    SessionManager::Hooks managerHooks;
+    managerHooks.write = [&stateEngine](const std::string& statusJson) { stateEngine.writeAtomic(statusJson); };
+    SessionManager manager(std::move(managerHooks));
+
+    if (!stateEngine.initialize(manager.statusJson(unixNow()))) {
+        std::cerr << "Fatal: Failed to initialize status file under " << stateDir << "\n";
         ::close(sigFd);
         return 1;
     }
+    manager.publish();
 
-    // In mock mode, ensure initial standard state
+    std::unique_ptr<IDeviceDiscovery> discovery;
+    std::map<std::string, std::shared_ptr<FakeHeadset>> fakes;
     if (opts.mockMode) {
-        stateEngine.setConnected(true, "WH-1000XM5");
-        stateEngine.setBattery(85, false);
-        stateEngine.updateNoiseMode("anc", 0, false);
-        stateEngine.updateEqPreset("off");
-        stateEngine.updateSpeakToChat(false);
-        stateEngine.updateDsee(true);
-        stateEngine.updateMultipoint(true);
-        stateEngine.updateEarDetection(true);
-        stateEngine.save();
-    }
-
-    // 4. Initialize BluetoothManager
-    BluetoothConfig btConfig;
-    btConfig.preferredMac = opts.preferredMac;
-    btConfig.autoReconnect = true;
-    btConfig.mockMode = opts.mockMode;
-
-    int mockPeerFd = -1;
-    std::unique_ptr<BluetoothManager> btManager;
-    if (opts.mockMode) {
-        btManager = BluetoothManager::createMock(btConfig, &mockPeerFd);
+        auto mock = std::make_unique<MockDeviceDiscovery>();
+        mock->adapterAddresses = {kMockAdapter};
+        for (auto& fake : makeFakeDevices(opts.mockProfile)) {
+            mock->devices.push_back(fake.info);
+            fakes[fake.info.macAddress] = fake.headset;
+        }
+        discovery = std::move(mock);
     } else {
-        btManager = BluetoothManager::createLinux(btConfig);
+        discovery = createBluezDiscovery();
     }
 
-    if (!btManager) {
-        std::cerr << "Fatal: Failed to create BluetoothManager\n";
-        stateEngine.cleanup();
-        ::close(sigFd);
-        return 1;
-    }
+    std::vector<BluetoothDeviceInfo> latestDevices;
+    std::map<std::string, std::unique_ptr<Slot>> slots;
 
-    // Protocol stream framer
-    StreamFramer streamFramer;
+    auto attach = [&](const BluetoothDeviceInfo& info, const std::string& id) {
+        auto slot = std::make_unique<Slot>();
+        Slot* s = slot.get();
+        s->info = info;
 
-    uint8_t txSeq = 0;
-    auto nextSeq = [&]() -> uint8_t {
-        uint8_t s = txSeq;
-        txSeq ^= 1;
-        return s;
-    };
-
-    BluetoothCallbacks callbacks;
-    callbacks.onConnected = [&]() {
-        txSeq = 0;
-        const auto& dev = btManager->getCurrentDevice();
-        std::string name = dev.name.empty() ? "WH-1000XM5" : dev.name;
-        stateEngine.setConnected(true, name);
-        if (dev.batteryLevel >= 0) {
-            stateEngine.setBattery(dev.batteryLevel, false);
-        }
-        stateEngine.save();
-        fprintf(stderr, "[DAEMON] Headset connected (%s, battery: %d%%)\n",
-                name.c_str(), dev.batteryLevel);
-        fflush(stderr);
-
-        if (!opts.mockMode) {
-            // Initial status query flurry with sequence toggling
-            btManager->sendPacket(serializeQueryBattery(nextSeq()));
-            btManager->sendPacket(serializeQueryNoiseMode(nextSeq()));
-            btManager->sendPacket(serializeQueryEq(nextSeq()));
-            btManager->sendPacket(serializeQueryDsee(nextSeq()));
-            btManager->sendPacket(serializeQuerySpeakToChat(nextSeq()));
-            btManager->sendPacket(serializeQueryEarDetection(nextSeq()));
-        }
-    };
-
-    callbacks.onDisconnected = [&](const std::string& reason) {
-        txSeq = 0;
-        streamFramer.reset();
-        stateEngine.setConnected(false);
-        stateEngine.save();
-        fprintf(stderr, "[DAEMON] Headset disconnected: %s\n", reason.c_str());
-        fflush(stderr);
-    };
-
-    callbacks.onDataReceived = [&](const uint8_t* data, size_t length) {
-        streamFramer.append(std::span<const uint8_t>(data, length));
-        while (auto frameOpt = streamFramer.nextFrame()) {
-            auto unpackedOpt = unpackFrame(*frameOpt);
-            if (!unpackedOpt) continue;
-
-            const auto& unpacked = *unpackedOpt;
-            if (unpacked.type == PacketType::DATA_MDR || unpacked.type == PacketType::DATA_MDR_NO2) {
-                // Reply with ACK packet
-                auto ack = serializeACK(unpacked.seq);
-                btManager->sendPacket(ack);
-
-                fprintf(stderr, "[DAEMON] RX payload (cmd=0x%02x, size=%zu): ",
-                        unpacked.payload.empty() ? 0 : unpacked.payload[0], unpacked.payload.size());
-                for (uint8_t b : unpacked.payload) {
-                    fprintf(stderr, "%02x ", b);
-                }
-                fprintf(stderr, "\n");
-                fflush(stderr);
-
-                // Update state from payload
-                bool changed = protocol::parseInboundPayload(unpacked.payload, stateEngine.getStateUnsafe());
-                if (changed) {
-                    stateEngine.save();
-                    fprintf(stderr, "[DAEMON] Updated state: mode=%s, ambient=%d, voice=%d\n",
-                            stateEngine.getState().noise_mode.c_str(),
-                            stateEngine.getState().ambient_sound_level,
-                            stateEngine.getState().voice_passthrough ? 1 : 0);
-                    fflush(stderr);
-                }
-            }
-        }
-    };
-
-    btManager->setCallbacks(std::move(callbacks));
-    btManager->start();
-
-    // 5. Initialize UNIX Domain Socket IPC Server
-    std::string socketPath = runtimeDir + "/sony-headphones.sock";
-    IpcServer ipcServer(socketPath);
-
-    IpcCallbacks ipcCb;
-    ipcCb.getStatusJson = [&]() {
-        return stateEngine.getStatusJson();
-    };
-    ipcCb.setNoiseMode = [&](NoiseMode mode, uint8_t ambientLevel, std::string& /*err*/) {
-        uint8_t finalLevel = ambientLevel;
-        if (mode == NoiseMode::AMBIENT && finalLevel == 0) {
-            int curLevel = stateEngine.getState().ambient_sound_level;
-            finalLevel = curLevel > 0 ? static_cast<uint8_t>(curLevel) : 20;
-        }
-        stateEngine.updateNoiseMode(noiseModeToString(mode), finalLevel, stateEngine.getState().voice_passthrough);
-        stateEngine.save();
-        if (btManager && btManager->getState() == ConnectionState::CONNECTED) {
-            uint8_t seq = nextSeq();
-            fprintf(stderr, "[DAEMON] Sending noise mode: %s (level %u, seq %u)\n",
-                    noiseModeToString(mode).c_str(), (unsigned)finalLevel, (unsigned)seq);
-            fflush(stderr);
-            btManager->sendPacket(serializeNoiseMode(mode, finalLevel, stateEngine.getState().voice_passthrough, seq));
+        BluetoothConfig config;
+        config.preferredMac = id;
+        config.autoReconnect = true;
+        if (opts.mockMode) {
+            config.mockMode = true;
+            s->fake = fakes[info.macAddress];
+            auto transport = std::make_unique<FakeHeadsetTransport>(s->fake);
+            s->fakeTransport = transport.get();
+            auto fakeDiscovery = std::make_unique<MockDeviceDiscovery>();
+            fakeDiscovery->devices = {info};
+            s->link = std::make_unique<BluetoothManager>(config, std::move(transport), std::move(fakeDiscovery),
+                                                         std::make_unique<MockSdpResolver>());
         } else {
-            fprintf(stderr, "[DAEMON] Warning: BT not connected, packet queued/skipped\n");
-            fflush(stderr);
+            config.maxReconnectAttempts = kMaxLinkAttempts;
+            config.slowRetryMs = kSlowRetryMs;
+            auto lookup = std::make_unique<LookupDiscovery>([&latestDevices](const std::string& mac) {
+                std::optional<BluetoothDeviceInfo> found;
+                for (const auto& dev : latestDevices) {
+                    if (cmd::normalizeAddress(dev.macAddress) == cmd::normalizeAddress(mac)) found = dev;
+                }
+                return found;
+            });
+            s->link = BluetoothManager::createLinuxLink(config, std::move(lookup));
         }
-        return true;
-    };
-    ipcCb.setAmbientLevel = [&](uint8_t level, std::string& /*err*/) {
-        stateEngine.updateAmbientLevel(level);
-        stateEngine.save();
-        if (btManager && btManager->getState() == ConnectionState::CONNECTED) {
-            uint8_t seq = nextSeq();
-            fprintf(stderr, "[DAEMON] Sending ambient level: %u (seq %u)\n", (unsigned)level, (unsigned)seq);
-            fflush(stderr);
-            btManager->sendPacket(serializeAmbientLevel(level, stateEngine.getState().voice_passthrough, seq));
-        }
-        return true;
-    };
-    ipcCb.setEqPreset = [&](EqPreset preset, std::string& /*err*/) {
-        stateEngine.updateEqPreset(eqPresetToString(preset));
-        stateEngine.save();
-        if (btManager && btManager->getState() == ConnectionState::CONNECTED) {
-            uint8_t seq = nextSeq();
-            fprintf(stderr, "[DAEMON] Sending EQ preset: %s (seq %u)\n", eqPresetToString(preset).c_str(), (unsigned)seq);
-            fflush(stderr);
-            btManager->sendPacket(serializeEqPreset(preset, seq));
-        }
-        return true;
-    };
-    ipcCb.setCustomEq = [&](const std::array<int, 5>& bands, int clearBass, std::string& /*err*/) {
-        stateEngine.updateCustomEq(bands, clearBass);
-        stateEngine.save();
-        if (btManager && btManager->getState() == ConnectionState::CONNECTED) {
-            uint8_t seq = nextSeq();
-            fprintf(stderr, "[DAEMON] Sending Custom EQ (seq %u)\n", (unsigned)seq);
-            fflush(stderr);
-            btManager->sendPacket(serializeCustomEq(bands, clearBass, seq));
-        }
-        return true;
-    };
-    ipcCb.setSpeakToChat = [&](bool enabled, std::string& /*err*/) {
-        stateEngine.updateSpeakToChat(enabled);
-        stateEngine.save();
-        if (btManager && btManager->getState() == ConnectionState::CONNECTED) {
-            uint8_t seq = nextSeq();
-            fprintf(stderr, "[DAEMON] Sending Speak-to-Chat: %s (seq %u)\n", enabled ? "on" : "off", (unsigned)seq);
-            fflush(stderr);
-            btManager->sendPacket(serializeSpeakToChat(enabled, seq));
-        }
-        return true;
-    };
-    ipcCb.setDsee = [&](bool enabled, std::string& /*err*/) {
-        stateEngine.updateDsee(enabled);
-        stateEngine.save();
-        if (btManager && btManager->getState() == ConnectionState::CONNECTED) {
-            uint8_t seq = nextSeq();
-            fprintf(stderr, "[DAEMON] Sending DSEE: %s (seq %u)\n", enabled ? "on" : "off", (unsigned)seq);
-            fflush(stderr);
-            btManager->sendPacket(serializeDsee(enabled, seq));
-        }
-        return true;
-    };
-    ipcCb.setMultipoint = [&](bool enabled, std::string& /*err*/) {
-        stateEngine.updateMultipoint(enabled);
-        stateEngine.save();
-        if (btManager && btManager->getState() == ConnectionState::CONNECTED) {
-            uint8_t seq = nextSeq();
-            fprintf(stderr, "[DAEMON] Sending Multipoint: %s (seq %u)\n", enabled ? "on" : "off", (unsigned)seq);
-            fflush(stderr);
-            btManager->sendPacket(serializeMultipoint(enabled, seq));
-        }
-        return true;
-    };
-    ipcCb.setEarDetection = [&](bool enabled, std::string& /*err*/) {
-        stateEngine.updateEarDetection(enabled);
-        stateEngine.save();
-        if (btManager && btManager->getState() == ConnectionState::CONNECTED) {
-            uint8_t seq = nextSeq();
-            fprintf(stderr, "[DAEMON] Sending Ear Detection: %s (seq %u)\n", enabled ? "on" : "off", (unsigned)seq);
-            fflush(stderr);
-            btManager->sendPacket(serializeEarDetection(enabled, seq));
-        }
-        return true;
-    };
-    ipcCb.sendPacket = [&](const std::vector<uint8_t>& packet) {
-        if (btManager && btManager->getState() == ConnectionState::CONNECTED) {
-            btManager->sendPacket(packet);
-        }
-        return true;
-    };
-    ipcCb.onTestSetBattery = [&](int level, bool charging) {
-        stateEngine.setBattery(level, charging);
-        stateEngine.save();
-    };
-    ipcCb.onTestDisconnect = [&]() {
-        stateEngine.setConnected(false);
-        stateEngine.save();
-    };
-    ipcCb.onTestReconnect = [&]() {
-        stateEngine.setConnected(true);
-        stateEngine.save();
+
+        HeadsetSession::Hooks hooks;
+        hooks.write = [s](const Bytes& bytes) {
+            return s->link->getState() == ConnectionState::CONNECTED && s->link->sendPacket(bytes);
+        };
+        hooks.dropLink = [s](const std::string& reason) { s->link->reconnect(reason); };
+        hooks.linkHealthy = [s] { s->link->markHealthy(); };
+        if (!opts.mockMode) hooks.log = [id](const std::string& line) { logLine("MDR", id, line); };
+        s->session = &manager.add(id, std::move(hooks));
+
+        BluetoothCallbacks callbacks;
+        callbacks.onConnected = [s, id]() {
+            logLine("DAEMON", id, "RFCOMM link open (" + s->info.alias + "); starting the MDR init sequence");
+            s->session->onTransportConnected(s->info.alias, s->info.name, id, Clock::now());
+        };
+        callbacks.onDisconnected = [s, id](const std::string& reason) {
+            logLine("DAEMON", id, "link closed: " + reason);
+            s->session->onTransportDisconnected(Clock::now());
+        };
+        callbacks.onDataReceived = [s](const uint8_t* data, size_t length) {
+            s->session->onBytes(std::span<const uint8_t>(data, length), Clock::now());
+        };
+        s->link->setCallbacks(std::move(callbacks));
+        logLine("DAEMON", id, "BlueZ reports " + (info.alias.empty() ? info.name : info.alias) + " connected");
+        slots[id] = std::move(slot);
+        s->link->start();
     };
 
+    auto detach = [&](const std::string& id, const std::string& reason) {
+        auto it = slots.find(id);
+        if (it == slots.end()) return;
+        std::unique_ptr<Slot> slot = std::move(it->second);
+        slots.erase(it);
+        logLine("DAEMON", id, reason);
+        slot->link->stop();
+        manager.remove(id, Clock::now());
+    };
+
+    auto pollBluez = [&]() {
+        BluezSnapshot snap = discovery->snapshot();
+        if (!snap.ok) return;
+        latestDevices = snap.devices;
+        manager.setAdapterAddresses(snap.adapterAddresses);
+        std::vector<std::string> keep;
+        for (const auto& dev : selectHeadsets(snap.devices, opts.devices)) {
+            auto id = cmd::normalizeAddress(dev.macAddress);
+            if (!id) continue;
+            keep.push_back(*id);
+            auto it = slots.find(*id);
+            if (it == slots.end()) attach(dev, *id);
+            else it->second->info = dev;
+        }
+        std::vector<std::string> gone;
+        for (const auto& [id, slot] : slots) {
+            if (std::find(keep.begin(), keep.end(), id) == keep.end()) gone.push_back(id);
+        }
+        for (const auto& id : gone) detach(id, "BlueZ reports the headset disconnected; closing its session");
+    };
+
+    auto dropLink = [&](Slot& slot) {
+        slot.link->disconnect();
+        slot.session->onTransportDisconnected(Clock::now());
+    };
+
+    IpcServer ipcServer(runtimeDir + "/sony-headphones.sock");
+    IpcCallbacks ipcCb;
+    ipcCb.execute = [&](const cmd::Command& command, IpcReply done) {
+        const bool testVerb = command.verb == cmd::Verb::TestSetBattery || command.verb == cmd::Verb::TestDisconnect ||
+                              command.verb == cmd::Verb::TestReconnect;
+        if (!testVerb) {
+            manager.execute(command, std::move(done), Clock::now());
+            return;
+        }
+        if (!opts.mockMode) {
+            done("ERR unknown command '" + command.name + "'");
+            return;
+        }
+        if (command.verb == cmd::Verb::TestReconnect && !command.selector) {
+            for (auto& [id, slot] : slots) slot->link->start();
+            done("OK");
+            return;
+        }
+        auto target = manager.resolve(command.selector, command.verb != cmd::Verb::TestReconnect);
+        auto it = target.session ? slots.find(target.id) : slots.end();
+        if (it == slots.end()) {
+            done(target.error.empty() ? "ERR not connected" : target.error);
+            return;
+        }
+        Slot& slot = *it->second;
+        if (command.verb == cmd::Verb::TestSetBattery) {
+            slot.fakeTransport->inject(slot.fake->pushBattery(command.numbers[0], command.numbers[1] != 0));
+        } else if (command.verb == cmd::Verb::TestDisconnect) {
+            dropLink(slot);
+        } else {
+            slot.link->start();
+        }
+        done("OK");
+    };
     ipcServer.setCallbacks(std::move(ipcCb));
 
     if (!ipcServer.start()) {
-        std::cerr << "Fatal: Failed to start IPC server at " << socketPath << "\n";
-        btManager->stop();
+        std::cerr << "Fatal: Failed to start IPC server at " << ipcServer.getSocketPath() << "\n";
         stateEngine.cleanup();
         ::close(sigFd);
         return 1;
     }
 
-    // 6. Signal daemon readiness
-    if (opts.mockMode) {
-        std::cout << "[MOCK_DAEMON] Ready PID=" << ::getpid() << std::endl;
-    } else {
-        std::cout << "[DAEMON] Ready PID=" << ::getpid() << std::endl;
-    }
+    pollBluez();
+    auto nextBluezPoll = Clock::now() + kBluezPollInterval;
 
-    // 7. Unified Event Loop
+    const auto startedAt = Clock::now();
+    bool readyAnnounced = false;
+    auto announceReady = [&]() {
+        if (readyAnnounced) return;
+        if (opts.mockMode && !manager.allInitComplete() && Clock::now() - startedAt < std::chrono::seconds(2)) {
+            return;
+        }
+        readyAnnounced = true;
+        std::cout << (opts.mockMode ? "[MOCK_DAEMON]" : "[DAEMON]") << " Ready PID=" << ::getpid() << std::endl;
+    };
+    announceReady();
+
     bool running = true;
-
     while (running) {
         std::vector<struct pollfd> pfds;
-
-        // Entry 0: Signal descriptor
         pfds.push_back({sigFd, POLLIN, 0});
 
-        // Entry 1 (Optional): Bluetooth transport descriptor
-        int btFd = btManager->getPollFd();
-        short btEvents = btManager->getPollEvents();
-        int btIndex = -1;
-        if (btFd >= 0 && btEvents != 0) {
-            btIndex = static_cast<int>(pfds.size());
-            pfds.push_back({btFd, btEvents, 0});
+        std::vector<std::pair<size_t, std::string>> linkFds;
+        for (const auto& [id, slot] : slots) {
+            int fd = slot->link->getPollFd();
+            short events = slot->link->getPollEvents();
+            if (fd >= 0 && events != 0) {
+                linkFds.emplace_back(pfds.size(), id);
+                pfds.push_back({fd, events, 0});
+            }
         }
-
-        // Entries 2+: IPC listen socket and connected client sockets
-        size_t ipcStartIndex = pfds.size();
+        size_t ipcStart = pfds.size();
         ipcServer.appendPollFds(pfds);
 
-        // Poll with 100ms timeout for periodic BluetoothManager tick
-        int pollRc = ::poll(pfds.data(), static_cast<nfds_t>(pfds.size()), 100);
+        int timeoutMs = 100;
+        if (auto deadline = manager.nextDeadline()) {
+            auto wait = std::chrono::duration_cast<std::chrono::milliseconds>(*deadline - Clock::now()).count();
+            timeoutMs = static_cast<int>(std::clamp<int64_t>(wait + 1, 0, 100));
+        }
+
+        int pollRc = ::poll(pfds.data(), static_cast<nfds_t>(pfds.size()), timeoutMs);
         if (pollRc < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
+            if (errno == EINTR) continue;
             std::cerr << "Event loop poll error: " << std::strerror(errno) << "\n";
             break;
         }
 
-        // Check Signal Descriptor
         if (pfds[0].revents & POLLIN) {
             struct signalfd_siginfo fdsi{};
-            ssize_t s = ::read(sigFd, &fdsi, sizeof(fdsi));
-            if (s == sizeof(fdsi)) {
+            if (::read(sigFd, &fdsi, sizeof(fdsi)) == sizeof(fdsi)) {
                 if (fdsi.ssi_signo == SIGINT || fdsi.ssi_signo == SIGTERM) {
                     running = false;
                     break;
-                } else if (fdsi.ssi_signo == SIGUSR1) {
-                    // Simulated disconnect
-                    stateEngine.setConnected(false);
-                    stateEngine.save();
-                    if (!opts.mockMode) {
-                        btManager->disconnect();
-                    }
+                }
+                if (fdsi.ssi_signo == SIGUSR1) {
+                    for (auto& [id, slot] : slots) dropLink(*slot);
                 } else if (fdsi.ssi_signo == SIGUSR2) {
-                    // Simulated reconnect
-                    stateEngine.setConnected(true);
-                    stateEngine.save();
-                    if (!opts.mockMode) {
-                        btManager->start();
-                    }
+                    for (auto& [id, slot] : slots) slot->link->start();
                 }
             }
         }
 
-        // Check Bluetooth Transport Descriptor
-        if (btIndex >= 0 && (pfds[btIndex].revents != 0)) {
-            btManager->handleSocketEvent(pfds[btIndex].revents);
+        for (const auto& [index, id] : linkFds) {
+            if (pfds[index].revents == 0) continue;
+            auto it = slots.find(id);
+            if (it != slots.end()) it->second->link->handleSocketEvent(pfds[index].revents);
         }
-
-        // Check IPC Descriptors
-        for (size_t i = ipcStartIndex; i < pfds.size(); ++i) {
+        for (size_t i = ipcStart; i < pfds.size(); ++i) {
             if (pfds[i].revents != 0) {
                 ipcServer.handleSocketEvent(pfds[i].fd, pfds[i].revents);
             }
         }
 
-        // Subsystem periodic tick (timeouts and reconnect backoff)
-        btManager->tick();
+        manager.tick(Clock::now());
+        for (auto& [id, slot] : slots) slot->link->tick();
+        if (Clock::now() >= nextBluezPoll) {
+            nextBluezPoll = Clock::now() + kBluezPollInterval;
+            pollBluez();
+        }
+        announceReady();
     }
 
-    // 8. Graceful Shutdown & Resource Cleanup
-    if (opts.mockMode) {
-        std::cout << "[MOCK_DAEMON] Shutdown cleanly\n";
-    } else {
-        std::cout << "[DAEMON] Shutdown cleanly\n";
-    }
+    std::cout << (opts.mockMode ? "[MOCK_DAEMON]" : "[DAEMON]") << " Shutdown cleanly\n";
     std::cout.flush();
 
-    btManager->stop();
+    std::vector<std::string> ids;
+    for (const auto& [id, slot] : slots) ids.push_back(id);
+    for (const auto& id : ids) detach(id, "daemon stopping; closing the session");
     ipcServer.stop();
     stateEngine.cleanup();
-
-    if (mockPeerFd >= 0) {
-        ::close(mockPeerFd);
-        mockPeerFd = -1;
-    }
-    if (sigFd >= 0) {
-        ::close(sigFd);
-        sigFd = -1;
-    }
-
+    ::close(sigFd);
     return 0;
 }

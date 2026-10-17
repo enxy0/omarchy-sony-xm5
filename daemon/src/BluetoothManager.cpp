@@ -34,6 +34,36 @@ std::string connectionStateToString(ConnectionState state) {
     }
 }
 
+std::vector<BluetoothDeviceInfo> selectHeadsets(const std::vector<BluetoothDeviceInfo>& devices,
+                                                const std::vector<std::string>& allowList) {
+    auto supportedName = [](const BluetoothDeviceInfo& dev) {
+        std::string name = dev.name;
+        std::transform(name.begin(), name.end(), name.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return name.find("wh-1000xm5") != std::string::npos || name.find("wf-1000xm5") != std::string::npos;
+    };
+    auto allowed = [&](const BluetoothDeviceInfo& dev) {
+        return std::any_of(allowList.begin(), allowList.end(), [&](const std::string& mac) {
+            return strcasecmp(mac.c_str(), dev.macAddress.c_str()) == 0;
+        });
+    };
+
+    std::vector<BluetoothDeviceInfo> out;
+    for (const auto& dev : devices) {
+        if (!dev.paired || !dev.connected || dev.macAddress.empty()) continue;
+        if (allowList.empty() ? supportedName(dev) : allowed(dev)) out.push_back(dev);
+    }
+    return out;
+}
+
+static std::optional<BluetoothDeviceInfo> findByMac(const std::vector<BluetoothDeviceInfo>& devices,
+                                                    const std::string& mac) {
+    for (const auto& dev : devices) {
+        if (strcasecmp(dev.macAddress.c_str(), mac.c_str()) == 0) return dev;
+    }
+    return std::nullopt;
+}
+
 static int parseUuidString(const char* szSrc, uint8_t* dst) {
     if (!szSrc || std::strlen(szSrc) != 36) return -1;
     unsigned int b[16];
@@ -161,21 +191,26 @@ public:
     DBusDeviceDiscovery() = default;
 
     std::vector<BluetoothDeviceInfo> getAvailableDevices() override {
-        std::vector<BluetoothDeviceInfo> devices;
+        return snapshot().devices;
+    }
+
+    BluezSnapshot snapshot() override {
+        BluezSnapshot snap;
+        auto& devices = snap.devices;
         DBusError error;
         dbus_error_init(&error);
 
         DBusConnection* conn = dbus_bus_get(DBUS_BUS_SYSTEM, &error);
         if (dbus_error_is_set(&error) || !conn) {
             dbus_error_free(&error);
-            return devices;
+            return snap;
         }
 
         DBusMessage* msg = dbus_message_new_method_call(
             "org.bluez", "/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects");
         if (!msg) {
             dbus_connection_unref(conn);
-            return devices;
+            return snap;
         }
 
         DBusMessage* reply = dbus_connection_send_with_reply_and_block(conn, msg, 2000, &error);
@@ -183,8 +218,9 @@ public:
         if (dbus_error_is_set(&error) || !reply) {
             dbus_error_free(&error);
             dbus_connection_unref(conn);
-            return devices;
+            return snap;
         }
+        snap.ok = true;
 
         DBusMessageIter rootIter, dictIter;
         if (dbus_message_iter_init(reply, &rootIter) &&
@@ -219,6 +255,13 @@ public:
                                 parseDeviceProperties(&propsIter, dev);
                             }
                             devices.push_back(dev);
+                        } else if (ifaceName && std::strcmp(ifaceName, "org.bluez.Adapter1") == 0) {
+                            if (dbus_message_iter_get_arg_type(&ifaceEntryIter) == DBUS_TYPE_ARRAY) {
+                                BluetoothDeviceInfo adapter;
+                                dbus_message_iter_recurse(&ifaceEntryIter, &propsIter);
+                                parseDeviceProperties(&propsIter, adapter);
+                                if (!adapter.macAddress.empty()) snap.adapterAddresses.push_back(adapter.macAddress);
+                            }
                         } else if (ifaceName && std::strcmp(ifaceName, "org.bluez.Battery1") == 0 && !devices.empty() && objPath && devices.back().path == objPath) {
                             if (dbus_message_iter_get_arg_type(&ifaceEntryIter) == DBUS_TYPE_ARRAY) {
                                 dbus_message_iter_recurse(&ifaceEntryIter, &propsIter);
@@ -234,62 +277,11 @@ public:
 
         dbus_message_unref(reply);
         dbus_connection_unref(conn);
-        return devices;
+        return snap;
     }
 
-    std::optional<BluetoothDeviceInfo> findSonyHeadphones(const std::string& preferredMac = "") override {
-        auto devices = getAvailableDevices();
-        if (devices.empty()) return std::nullopt;
-
-        // 1. Explicit MAC match if specified
-        if (!preferredMac.empty()) {
-            for (const auto& dev : devices) {
-                if (strcasecmp(dev.macAddress.c_str(), preferredMac.c_str()) == 0) {
-                    return dev;
-                }
-            }
-            return std::nullopt;
-        }
-
-        // 2. Filter paired devices matching XM5 UUID or Name
-        std::vector<BluetoothDeviceInfo> candidates;
-        for (const auto& dev : devices) {
-            if (!dev.paired) continue;
-
-            bool matchesUuid = false;
-            for (const auto& u : dev.uuids) {
-                if (strcasecmp(u.c_str(), MDR_UUID_XM5) == 0 ||
-                    strcasecmp(u.c_str(), MDR_UUID_XM5_LOWER) == 0 ||
-                    strcasecmp(u.c_str(), MDR_UUID_LEGACY) == 0) {
-                    matchesUuid = true;
-                    break;
-                }
-            }
-
-            bool matchesName = false;
-            std::string nameLower = dev.name;
-            std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), [](unsigned char c){
-                return static_cast<char>(std::tolower(c));
-            });
-            if (nameLower.find("wh-1000xm5") != std::string::npos ||
-                nameLower.find("wf-1000xm5") != std::string::npos ||
-                nameLower.find("wh-1000xm4") != std::string::npos) {
-                matchesName = true;
-            }
-
-            if (matchesUuid || matchesName) {
-                candidates.push_back(dev);
-            }
-        }
-
-        if (candidates.empty()) return std::nullopt;
-
-        // Prioritize device currently marked connected in BlueZ
-        for (const auto& dev : candidates) {
-            if (dev.connected) return dev;
-        }
-
-        return candidates.front();
+    std::optional<BluetoothDeviceInfo> findByAddress(const std::string& preferredMac = "") override {
+        return findByMac(getAvailableDevices(), preferredMac);
     }
 
 private:
@@ -520,10 +512,10 @@ int MockTransport::checkConnectResult() {
     return connected_ ? 0 : ECONNREFUSED;
 }
 
-std::optional<BluetoothDeviceInfo> MockDeviceDiscovery::findSonyHeadphones(const std::string& preferredMac) {
+std::optional<BluetoothDeviceInfo> MockDeviceDiscovery::findByAddress(const std::string& preferredMac) {
     if (devices.empty()) {
         BluetoothDeviceInfo dev;
-        dev.macAddress = "AA:BB:CC:DD:EE:FF";
+        dev.macAddress = preferredMac.empty() ? "AA:BB:CC:DD:EE:FF" : preferredMac;
         dev.name = "WH-1000XM5";
         dev.alias = "WH-1000XM5";
         dev.paired = true;
@@ -531,17 +523,12 @@ std::optional<BluetoothDeviceInfo> MockDeviceDiscovery::findSonyHeadphones(const
         dev.uuids.push_back(MDR_UUID_XM5_LOWER);
         return dev;
     }
+    if (preferredMac.empty()) return devices.front();
+    return findByMac(devices, preferredMac);
+}
 
-    if (!preferredMac.empty()) {
-        for (const auto& dev : devices) {
-            if (strcasecmp(dev.macAddress.c_str(), preferredMac.c_str()) == 0) {
-                return dev;
-            }
-        }
-        return std::nullopt;
-    }
-
-    return devices.front();
+std::unique_ptr<IDeviceDiscovery> createBluezDiscovery() {
+    return std::make_unique<DBusDeviceDiscovery>();
 }
 
 // ---------------------------------------------------------------------------
@@ -564,13 +551,11 @@ BluetoothManager::~BluetoothManager() {
     stop();
 }
 
-std::unique_ptr<BluetoothManager> BluetoothManager::createLinux(BluetoothConfig config) {
+std::unique_ptr<BluetoothManager> BluetoothManager::createLinuxLink(BluetoothConfig config,
+                                                                   std::unique_ptr<IDeviceDiscovery> discovery) {
     config.mockMode = false;
-    auto transport = std::make_unique<RfcommTransport>();
-    auto discovery = std::make_unique<DBusDeviceDiscovery>();
-    auto sdp = std::make_unique<BlueZSdpResolver>();
-    return std::make_unique<BluetoothManager>(
-        std::move(config), std::move(transport), std::move(discovery), std::move(sdp));
+    return std::make_unique<BluetoothManager>(std::move(config), std::make_unique<RfcommTransport>(),
+                                              std::move(discovery), std::make_unique<BlueZSdpResolver>());
 }
 
 std::unique_ptr<BluetoothManager> BluetoothManager::createMock(BluetoothConfig config, int* outPeerFd) {
@@ -605,6 +590,11 @@ void BluetoothManager::start() {
     attemptDiscovery();
 }
 
+void BluetoothManager::markHealthy() {
+    retryCount_ = 0;
+    currentBackoffMs_ = config_.initialBackoffMs;
+}
+
 void BluetoothManager::stop() {
     disconnect();
     setState(ConnectionState::DISCONNECTED);
@@ -618,6 +608,12 @@ void BluetoothManager::disconnect() {
     setState(ConnectionState::DISCONNECTED);
 }
 
+void BluetoothManager::reconnect(const std::string& reason) {
+    if (state_ == ConnectionState::CONNECTED || state_ == ConnectionState::CONNECTING) {
+        scheduleReconnect(reason);
+    }
+}
+
 void BluetoothManager::attemptDiscovery() {
     setState(ConnectionState::DISCOVERING);
     if (!discovery_) {
@@ -625,7 +621,7 @@ void BluetoothManager::attemptDiscovery() {
         return;
     }
 
-    auto devOpt = discovery_->findSonyHeadphones(config_.preferredMac);
+    auto devOpt = discovery_->findByAddress(config_.preferredMac);
     if (!devOpt.has_value()) {
         scheduleReconnect("No paired Sony headphones found");
         return;
@@ -670,8 +666,7 @@ void BluetoothManager::attemptConnect() {
         fprintf(stderr, "[BT] RFCOMM connected immediately\n");
         fflush(stderr);
         setState(ConnectionState::CONNECTED);
-        retryCount_ = 0;
-        currentBackoffMs_ = config_.initialBackoffMs;
+        if (config_.maxReconnectAttempts == 0) markHealthy();
         if (callbacks_.onConnected) {
             callbacks_.onConnected();
         }
@@ -727,8 +722,7 @@ void BluetoothManager::handleConnecting(short revents) {
             fprintf(stderr, "[BT] RFCOMM async connect succeeded\n");
             fflush(stderr);
             setState(ConnectionState::CONNECTED);
-            retryCount_ = 0;
-            currentBackoffMs_ = config_.initialBackoffMs;
+            if (config_.maxReconnectAttempts == 0) markHealthy();
             if (callbacks_.onConnected) {
                 callbacks_.onConnected();
             }
@@ -822,6 +816,23 @@ void BluetoothManager::scheduleReconnect(const std::string& reason) {
     }
 
     retryCount_++;
+    if (config_.maxReconnectAttempts > 0 && retryCount_ > config_.maxReconnectAttempts) {
+        if (config_.slowRetryMs == 0) {
+            fprintf(stderr, "[BT] %s: giving up after %u attempts; waiting for BlueZ to report a new connection\n",
+                    currentDevice_.macAddress.c_str(), config_.maxReconnectAttempts);
+            fflush(stderr);
+            setState(ConnectionState::DISCONNECTED);
+            return;
+        }
+        // One attempt per slow cycle until a handshake succeeds (markHealthy).
+        retryCount_ = config_.maxReconnectAttempts;
+        currentBackoffMs_ = config_.slowRetryMs;
+        nextReconnectTime_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(currentBackoffMs_);
+        fprintf(stderr, "[BT] %s: %u attempts failed; next attempt in %u ms\n",
+                currentDevice_.macAddress.c_str(), config_.maxReconnectAttempts, currentBackoffMs_);
+        fflush(stderr);
+        return;
+    }
     auto delay = static_cast<uint32_t>(config_.initialBackoffMs *
                  std::pow(config_.backoffMultiplier, std::min(retryCount_, 10u)));
     currentBackoffMs_ = std::min(delay, config_.maxBackoffMs);

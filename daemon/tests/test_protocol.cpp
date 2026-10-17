@@ -1,852 +1,1352 @@
-#include "MDRProtocol.hpp"
 #include "BluetoothManager.hpp"
-#include "StateEngine.hpp"
-#include "IpcServer.hpp"
+#include "HeadphoneState.hpp"
+#include "MDRProtocol.hpp"
+#include "TestUtil.hpp"
 
-#include <iostream>
-#include <fstream>
-#include <filesystem>
-#include <vector>
-#include <string>
-#include <cassert>
-#include <cstring>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <sys/stat.h>
-#include <sys/poll.h>
-#include <thread>
+#include <algorithm>
 #include <chrono>
-#include <atomic>
+#include <string>
+#include <thread>
 
-using namespace omarchy::sony;
 using namespace omarchy::sony::protocol;
+using testutil::Json;
 
-static int gFailedTests = 0;
-static int gTotalTests = 0;
+namespace {
 
-#define TEST_CASE(name) \
-    std::cout << "[ RUN      ] " << name << std::endl; \
-    gTotalTests++;
+Bytes B(std::initializer_list<uint8_t> bytes) { return Bytes(bytes); }
 
-#define TEST_ASSERT(cond, msg) \
-    do { \
-        if (!(cond)) { \
-            std::cerr << "[  FAILED  ] " << msg << " (" << __FILE__ << ":" << __LINE__ << ")" << std::endl; \
-            gFailedTests++; \
-            return; \
-        } \
-    } while (0)
-
-#define TEST_ASSERT_EQ(actual, expected, msg) \
-    do { \
-        if ((actual) != (expected)) { \
-            std::cerr << "[  FAILED  ] " << msg << " | Expected: " << (expected) \
-                      << ", Actual: " << (actual) << " (" << __FILE__ << ":" << __LINE__ << ")" << std::endl; \
-            gFailedTests++; \
-            return; \
-        } \
-    } while (0)
-
-#define TEST_PASS(name) \
-    std::cout << "[       OK ] " << name << std::endl;
-
-// ---------------------------------------------------------------------------
-// 1. Checksum Verification Tests
-// ---------------------------------------------------------------------------
-void testChecksumCalculation() {
-    TEST_CASE("ChecksumCalculation");
-
-    // Standard vector matching WF-1000XM5 physical capture
-    std::vector<uint8_t> data = {0x0C, 0x01, 0x00, 0x00, 0x00, 0x08, 0x01, 0x00, 0x03, 0x00, 0x30, 0x18, 0x00, 0x00};
-    uint8_t csum = calculateChecksum(data);
-    // 12 + 1 + 8 + 1 + 3 + 48 + 24 = 97 = 0x61
-    TEST_ASSERT_EQ(csum, 0x61, "Checksum must match physical capture modulo 256 sum");
-
-    // Test modulo 256 overflow
-    std::vector<uint8_t> overflowData = {0xFF, 0x02}; // 255 + 2 = 257 = 1 (mod 256)
-    TEST_ASSERT_EQ(calculateChecksum(overflowData), 0x01, "Checksum must wrap at 256");
-
-    // Empty vector
-    std::vector<uint8_t> emptyData;
-    TEST_ASSERT_EQ(calculateChecksum(emptyData), 0x00, "Empty checksum is 0");
-
-    TEST_PASS("ChecksumCalculation");
+Bytes withString(Bytes prefix, const std::string& text) {
+    prefix.push_back(static_cast<uint8_t>(text.size()));
+    prefix.insert(prefix.end(), text.begin(), text.end());
+    return prefix;
 }
 
-// ---------------------------------------------------------------------------
-// 2. Escaping & Delimiter Sentry Tests
-// ---------------------------------------------------------------------------
-void testEscapingAndUnescaping() {
-    TEST_CASE("EscapingAndUnescaping");
-
-    // Bytes containing delimiters 0x3C, 0x3D, 0x3E
-    std::vector<uint8_t> raw = {0x10, 0x3C, 0x20, 0x3D, 0x30, 0x3E, 0x40};
-    auto escaped = escapeBytes(raw);
-
-    // 0x3C -> 0x3D 0x2C
-    // 0x3D -> 0x3D 0x2D
-    // 0x3E -> 0x3D 0x2E
-    // Original 7 bytes with 3 escaped bytes should result in 7 + 3 = 10 bytes
-    TEST_ASSERT_EQ(escaped.size(), static_cast<size_t>(10), "Escaped length should account for sentry expansions");
-
-    auto unescaped = unescapeBytes(escaped);
-    TEST_ASSERT(unescaped == raw, "Roundtrip escape and unescape must reproduce original bytes");
-
-    // Edge case: Corrupt trailing escape sentry 0x3D at end of buffer
-    std::vector<uint8_t> corruptTrailing = {0x01, 0x3D};
-    auto corruptUnescape = unescapeBytes(corruptTrailing);
-    TEST_ASSERT(corruptUnescape.empty(), "Unescape must reject trailing dangling escape sentry");
-
-    // Edge case: Invalid escape sequence (0x3D followed by unexpected byte)
-    std::vector<uint8_t> corruptInvalid = {0x01, 0x3D, 0xAA, 0x02};
-    auto corruptInvalidUnescape = unescapeBytes(corruptInvalid);
-    TEST_ASSERT(corruptInvalidUnescape.empty(), "Unescape must reject invalid escape sequence");
-
-    TEST_PASS("EscapingAndUnescaping");
+bool apply(Table table, const Bytes& payload, HeadphoneState& state) {
+    InboundEvents ev;
+    return applyInbound(table, payload, state, ev);
 }
 
-// ---------------------------------------------------------------------------
-// 3. Packet Packing, Unpacking & Integrity Tests
-// ---------------------------------------------------------------------------
-void testPacketFraming() {
-    TEST_CASE("PacketFraming");
+bool apply1(const Bytes& payload, HeadphoneState& state) { return apply(Table::T1, payload, state); }
+bool apply2(const Bytes& payload, HeadphoneState& state) { return apply(Table::T2, payload, state); }
 
-    std::vector<uint8_t> payload = {0x68, 0x17, 0x01, 0x01, 0x00, 0x00, 0x00};
-    auto frame = packFrame(PacketType::DATA_MDR, 1, payload);
-
-    TEST_ASSERT(frame.size() >= 9, "Frame must be at least 9 bytes");
-    TEST_ASSERT_EQ(frame.front(), kStartMarker, "Frame must start with 0x3E");
-    TEST_ASSERT_EQ(frame.back(), kEndMarker, "Frame must end with 0x3C");
-
-    // Unpack valid frame
-    auto unpacked = unpackFrame(frame);
-    TEST_ASSERT(unpacked.has_value(), "Valid frame must unpack successfully");
-    TEST_ASSERT(unpacked->type == PacketType::DATA_MDR, "Packet type must match DATA_MDR");
-    TEST_ASSERT_EQ(unpacked->seq, 1, "Sequence number must match");
-    TEST_ASSERT(unpacked->payload == payload, "Unpacked payload must match original");
-
-    // Corrupted checksum test: tamper with one byte in the frame
-    std::vector<uint8_t> tampered = frame;
-    tampered[4] ^= 0xFF;
-    auto tamperedUnpack = unpackFrame(tampered);
-    TEST_ASSERT(!tamperedUnpack.has_value(), "Tampered frame must fail checksum verification");
-
-    // Missing start marker
-    std::vector<uint8_t> noStart = frame;
-    noStart[0] = 0x00;
-    TEST_ASSERT(!unpackFrame(noStart).has_value(), "Missing start marker must be rejected");
-
-    // Missing end marker
-    std::vector<uint8_t> noEnd = frame;
-    noEnd.back() = 0x00;
-    TEST_ASSERT(!unpackFrame(noEnd).has_value(), "Missing end marker must be rejected");
-
-    // Too short frame (< 9 bytes)
-    std::vector<uint8_t> tooShort = {0x3E, 0x0C, 0x3C};
-    TEST_ASSERT(!unpackFrame(tooShort).has_value(), "Short frame must be rejected");
-
-    TEST_PASS("PacketFraming");
+HeadphoneState withSupport(std::vector<uint8_t> t1, std::vector<uint8_t> t2 = {}, bool table2 = true) {
+    HeadphoneState s;
+    s.table2Supported = table2;
+    s.support1 = std::vector<SupportEntry>{};
+    for (uint8_t id : t1) s.support1->push_back({id, 1});
+    if (table2) {
+        s.support2 = std::vector<SupportEntry>{};
+        for (uint8_t id : t2) s.support2->push_back({id, 1});
+    }
+    selectVariants(s);
+    return s;
 }
 
-// ---------------------------------------------------------------------------
-// 4. StreamFramer Chunk Fragmentation & Coalescing Tests
-// ---------------------------------------------------------------------------
-void testStreamFramer() {
-    TEST_CASE("StreamFramer");
+Json parsed(const std::string& text) {
+    auto j = testutil::parseJson(text);
+    return j ? *j : Json{};
+}
 
+Json entryOf(const HeadphoneState& s) { return parsed(headsetJson(s)); }
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// Framing
+// ---------------------------------------------------------------------------
+
+TEST(ChecksumWrapsModulo256) {
+    CHECK_EQ(calculateChecksum(B({0xFF, 0x02})), uint8_t{0x01});
+    CHECK_EQ(calculateChecksum(Bytes{}), uint8_t{0x00});
+}
+
+TEST(BatteryGetFrameMatchesProtocolExample) {
+    CHECK_EQ(packFrame(PacketType::DATA_MDR, 0, req::getBattery(0x00)),
+             B({0x3E, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x02, 0x22, 0x00, 0x30, 0x3C}));
+}
+
+TEST(AckFrameMatchesProtocolExample) {
+    CHECK_EQ(serializeACK(0), B({0x3E, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x02, 0x3C}));
+    auto ack = unpackFrame(serializeACK(1));
+    REQUIRE(ack.has_value());
+    CHECK(ack->type == PacketType::ACK);
+    CHECK_EQ(ack->seq, uint8_t{0});
+    CHECK(ack->payload.empty());
+}
+
+TEST(EscapingRoundTripsMarkers) {
+    Bytes raw = B({0x10, 0x3C, 0x20, 0x3D, 0x30, 0x3E, 0x40});
+    Bytes escaped = escapeBytes(raw);
+    CHECK_EQ(escaped, B({0x10, 0x3D, 0x2C, 0x20, 0x3D, 0x2D, 0x30, 0x3D, 0x2E, 0x40}));
+    CHECK_EQ(unescapeBytes(escaped), raw);
+    CHECK(unescapeBytes(B({0x01, 0x3D})).empty());
+    CHECK(unescapeBytes(B({0x01, 0x3D, 0xAA})).empty());
+}
+
+TEST(SourceSwitchCommand3CIsEscapedOnTheWire) {
+    Bytes frame = packFrame(PacketType::DATA_MDR_NO2, 1, req::setSourceSwitch("F0:1D:BC:AA:00:01"));
+    CHECK_EQ(frame[7], uint8_t{0x3D});
+    CHECK_EQ(frame[8], uint8_t{0x2C});
+    CHECK(std::count(frame.begin() + 1, frame.end() - 1, kEndMarker) == 0);
+    auto back = unpackFrame(frame);
+    REQUIRE(back.has_value());
+    CHECK_EQ(back->payload, req::setSourceSwitch("F0:1D:BC:AA:00:01"));
+}
+
+TEST(UnpackRejectsDamagedFrames) {
+    Bytes frame = packFrame(PacketType::DATA_MDR, 1, B({0x68, 0x17, 0x01}));
+    auto ok = unpackFrame(frame);
+    REQUIRE(ok.has_value());
+    CHECK_EQ(ok->seq, uint8_t{1});
+    Bytes bad = frame;
+    bad[4] ^= 0xFF;
+    CHECK(!unpackFrame(bad).has_value());
+    CHECK(!unpackFrame(B({0x3E, 0x0C, 0x3C})).has_value());
+}
+
+TEST(StreamFramerSplitsAndJoins) {
     StreamFramer framer;
-    std::vector<uint8_t> payload1 = {0xAA, 0xBB, 0xCC};
-    std::vector<uint8_t> payload2 = {0x11, 0x22, 0x33, 0x44};
-
-    auto frame1 = packFrame(PacketType::DATA_MDR, 0, payload1);
-    auto frame2 = packFrame(PacketType::DATA_MDR, 1, payload2);
-
-    // Test 1: Fragmented feed - 1 byte at a time
-    for (size_t i = 0; i < frame1.size() - 1; ++i) {
-        uint8_t b = frame1[i];
-        framer.append(std::span<const uint8_t>(&b, 1));
-        auto pending = framer.nextFrame();
-        TEST_ASSERT(!pending.has_value(), "Frame must not complete before final delimiter");
+    Bytes f1 = packFrame(PacketType::DATA_MDR, 0, B({0xAA}));
+    Bytes f2 = packFrame(PacketType::DATA_MDR_NO2, 1, B({0xBB, 0xCC}));
+    for (size_t i = 0; i + 1 < f1.size(); ++i) {
+        framer.append(std::span<const uint8_t>(&f1[i], 1));
+        CHECK(!framer.nextFrame().has_value());
     }
+    framer.append(std::span<const uint8_t>(&f1.back(), 1));
+    CHECK_EQ(framer.nextFrame().value_or(Bytes{}), f1);
 
-    // Feed the last byte
-    uint8_t lastByte = frame1.back();
-    framer.append(std::span<const uint8_t>(&lastByte, 1));
-    auto extracted1 = framer.nextFrame();
-    TEST_ASSERT(extracted1.has_value(), "Frame 1 must complete on final byte");
-    TEST_ASSERT(*extracted1 == frame1, "Extracted frame must match frame 1 exactly");
-
-    // Test 2: Coalesced packets + leading garbage
-    std::vector<uint8_t> combined;
-    combined.push_back(0xFF); // Garbage preceding start
-    combined.push_back(0xDE);
-    combined.insert(combined.end(), frame1.begin(), frame1.end());
-    combined.insert(combined.end(), frame2.begin(), frame2.end());
-
-    framer.append(combined);
-    auto res1 = framer.nextFrame();
-    TEST_ASSERT(res1.has_value(), "First coalesced frame must be extracted");
-    TEST_ASSERT(*res1 == frame1, "First frame content must match");
-
-    auto res2 = framer.nextFrame();
-    TEST_ASSERT(res2.has_value(), "Second coalesced frame must be extracted");
-    TEST_ASSERT(*res2 == frame2, "Second frame content must match");
-
-    auto res3 = framer.nextFrame();
-    TEST_ASSERT(!res3.has_value(), "Framer must be empty after all frames extracted");
-
-    // Reset test
-    framer.append(frame1);
-    framer.reset();
-    TEST_ASSERT_EQ(framer.bufferedBytes(), static_cast<size_t>(0), "Framer buffer must be empty after reset");
-
-    TEST_PASS("StreamFramer");
+    Bytes joined = B({0xFF, 0x00});
+    joined.insert(joined.end(), f1.begin(), f1.end());
+    joined.insert(joined.end(), f2.begin(), f2.end());
+    framer.append(joined);
+    CHECK_EQ(framer.nextFrame().value_or(Bytes{}), f1);
+    CHECK_EQ(framer.nextFrame().value_or(Bytes{}), f2);
+    CHECK(!framer.nextFrame().has_value());
 }
 
 // ---------------------------------------------------------------------------
-// 5. Command Serializers Tests
+// Request builders (protocol.md sections 3 and 5)
 // ---------------------------------------------------------------------------
-void testCommandSerializers() {
-    TEST_CASE("CommandSerializers");
 
-    // Noise Mode: ANC
-    auto ancFrame = serializeNoiseMode(NoiseMode::ANC, 0, false, 0);
-    auto unpAnc = unpackFrame(ancFrame);
-    TEST_ASSERT(unpAnc.has_value(), "ANC frame must be valid");
-    TEST_ASSERT_EQ(unpAnc->payload[0], 0x68, "Opcode must be NCASM_SET_PARAM (0x68)");
-    TEST_ASSERT_EQ(unpAnc->payload[1], 0x17, "Type must be 0x17");
-    TEST_ASSERT_EQ(unpAnc->payload[3], 0x01, "totalEffect must be ON (1)");
-    TEST_ASSERT_EQ(unpAnc->payload[4], 0x00, "ncMode must be NC (0)");
+TEST(InitRequestsMatchProtocolTable) {
+    CHECK_EQ(req::getProtocolInfo(), B({0x00, 0x00}));
+    CHECK_EQ(req::getCapabilityInfo(), B({0x02, 0x00}));
+    CHECK_EQ(req::getDeviceInfo(0x02), B({0x04, 0x02}));
+    CHECK_EQ(req::getDeviceInfo(0x01), B({0x04, 0x01}));
+    CHECK_EQ(req::getDeviceInfo(0x03), B({0x04, 0x03}));
+    CHECK_EQ(req::getSupportFunction(), B({0x06, 0x00}));
+    CHECK_EQ(req::getGeneralSettingCapability(0xD2), B({0xD0, 0xD2, 0x01}));
+    CHECK_EQ(req::getGeneralSettingValue(0xD2), B({0xD6, 0xD2}));
+    CHECK_EQ(req::getUpscalingCapability(), B({0xE0, 0x01}));
+    CHECK_EQ(req::getAssignableCapability(0x0E), B({0xF0, 0x0E}));
+    CHECK_EQ(req::getAssignableCapability(0x03), B({0xF0, 0x03}));
+    CHECK_EQ(req::enableFixedMessageAlerts(), B({0x94, 0x00, 0x00}));
+    CHECK_EQ(req::getCodec(), B({0x12, 0x02}));
+    CHECK_EQ(req::getVolume(), B({0xA6, 0x20}));
+    CHECK_EQ(req::getNcAsm(0x17), B({0x66, 0x17}));
+    CHECK_EQ(req::getNcAsm(0x19), B({0x66, 0x19}));
+    CHECK_EQ(req::getPairingMode(0x02), B({0x32, 0x02}));
+    CHECK_EQ(req::getPairedDevices(0x00), B({0x36, 0x00}));
+    CHECK_EQ(req::getSourceSwitchAuto(), B({0x36, 0x01}));
+    CHECK_EQ(req::getSpeakToChat(), B({0xF6, 0x0C}));
+    CHECK_EQ(req::getSpeakToChatConfig(), B({0xFA, 0x0C}));
+    CHECK_EQ(req::getEqCapability(), B({0x50, 0x00, 0x01}));
+    CHECK_EQ(req::getEqStatus(), B({0x52, 0x00}));
+    CHECK_EQ(req::getEqValue(), B({0x56, 0x00}));
+    CHECK_EQ(req::getConnectionQuality(0x00), B({0xE6, 0x00}));
+    CHECK_EQ(req::getConnectionQuality(0x02), B({0xE6, 0x02}));
+    CHECK_EQ(req::getUpscalingStatus(), B({0xE2, 0x01}));
+    CHECK_EQ(req::getUpscaling(), B({0xE6, 0x01}));
+    CHECK_EQ(req::getAssignableValue(0x03), B({0xF6, 0x03}));
+    CHECK_EQ(req::getNcAmbButton(), B({0x66, 0x30}));
+    CHECK_EQ(req::getAutoPowerOff(0x05), B({0x26, 0x05}));
+    CHECK_EQ(req::getAutoPowerOff(0x04), B({0x26, 0x04}));
+    CHECK_EQ(req::getEarDetection(), B({0xF6, 0x01}));
+    CHECK_EQ(req::getWornStatus(), B({0xF2, 0x00}));
+    CHECK_EQ(req::getVoiceGuidance(0x01), B({0x46, 0x01}));
+    CHECK_EQ(req::getVoiceGuidanceVolume(), B({0x46, 0x20}));
+    CHECK_EQ(req::enableOperationLog(), B({0xC4, 0x01, 0x00}));
+    CHECK_EQ(req::getBattery(0x00), B({0x22, 0x00}));
+    CHECK_EQ(req::getBattery(0x08), B({0x22, 0x08}));
+    CHECK_EQ(req::getQuickAccessCapability(), B({0xF0, 0x0D}));
+    CHECK_EQ(req::getQuickAccess(), B({0xF6, 0x0D}));
+}
 
-    // Noise Mode: Ambient Level 15 with voice focus
-    auto ambFrame = serializeAmbientLevel(15, true, 1);
-    auto unpAmb = unpackFrame(ambFrame);
-    TEST_ASSERT(unpAmb.has_value(), "Ambient frame must be valid");
-    TEST_ASSERT_EQ(unpAmb->payload[3], 0x01, "totalEffect must be ON (1)");
-    TEST_ASSERT_EQ(unpAmb->payload[4], 0x01, "ncMode must be ASM (1)");
-    TEST_ASSERT_EQ(unpAmb->payload[5], 0x01, "voiceFocus must be enabled (1)");
-    TEST_ASSERT_EQ(unpAmb->payload[6], 15, "ambient level must be 15");
+TEST(EqQueryCarriesInquiredType) {
+    CHECK_EQ(req::getEqValue(), B({0x56, 0x00}));
+}
 
-    // Noise Mode: Level clamping (> 20 clamped to 20)
-    auto clampedAmb = serializeAmbientLevel(50, false, 0);
-    auto unpClampedAmb = unpackFrame(clampedAmb);
-    TEST_ASSERT(unpClampedAmb.has_value(), "Clamped ambient frame valid");
-    TEST_ASSERT_EQ(unpClampedAmb->payload[6], 20, "Ambient level must clamp to 20");
+TEST(NcAsmSetKeepsAmbientValues) {
+    NcAsmParams p;
+    p.type = 0x17;
+    p.totalEffect = 0x01;
+    p.mode = 0x00;
+    p.ambientMode = 0x01;
+    p.level = 14;
+    CHECK_EQ(req::setNcAsm(p), B({0x68, 0x17, 0x01, 0x01, 0x00, 0x01, 0x0E}));
+    p.type = 0x19;
+    p.autoAmbient = 0x01;
+    p.noiseAdaptive = 0x02;
+    CHECK_EQ(req::setNcAsm(p), B({0x68, 0x19, 0x01, 0x01, 0x00, 0x01, 0x0E, 0x01, 0x02}));
+    p.type = 0x15;
+    CHECK_EQ(req::setNcAsm(p).size(), size_t{7});
+}
 
-    // Noise Mode: Wind noise (Level 0)
-    auto windFrame = serializeAmbientLevel(0, false, 0);
-    auto unpWind = unpackFrame(windFrame);
-    TEST_ASSERT(unpWind.has_value(), "Wind frame must be valid");
-    TEST_ASSERT_EQ(unpWind->payload[4], 0x01, "ncMode must be ASM (1)");
-    TEST_ASSERT_EQ(unpWind->payload[6], 0x00, "ambient level must be 0");
-
-    // Noise Mode: Off
-    auto offFrame = serializeNoiseMode(NoiseMode::OFF, 0, false, 0);
-    auto unpOff = unpackFrame(offFrame);
-    TEST_ASSERT(unpOff.has_value(), "Off frame must be valid");
-    TEST_ASSERT_EQ(unpOff->payload[3], 0x00, "totalEffect must be OFF (0)");
-
-    // EQ Preset: Vocal
-    auto eqVocal = serializeEqPreset(EqPreset::VOCAL, 0);
-    auto unpVocal = unpackFrame(eqVocal);
-    TEST_ASSERT(unpVocal.has_value(), "EQ Preset frame must be valid");
-    TEST_ASSERT_EQ(unpVocal->payload[0], 0x58, "Opcode must be EQEBB_SET_PARAM (0x58)");
-    TEST_ASSERT_EQ(unpVocal->payload[2], static_cast<uint8_t>(EqPreset::VOCAL), "Preset must match Vocal (0x14)");
-
-    // Custom EQ: [-10, 0, 10, -5, 5] and clear bass 3
-    std::array<int, 5> bands = {-10, 0, 10, -5, 5};
-    auto eqCustom = serializeCustomEq(bands, 3, 1);
-    auto unpCustom = unpackFrame(eqCustom);
-    TEST_ASSERT(unpCustom.has_value(), "Custom EQ frame must be valid");
-    TEST_ASSERT_EQ(unpCustom->payload[2], static_cast<uint8_t>(EqPreset::CUSTOM), "Preset must be CUSTOM (0xA0)");
-    TEST_ASSERT_EQ(unpCustom->payload[3], 0x06, "6 steps must follow");
-    TEST_ASSERT_EQ(unpCustom->payload[4], 13, "Clear Bass 3 + 10 = 13");
-    TEST_ASSERT_EQ(unpCustom->payload[5], 0, "Band 0: -10 + 10 = 0");
-    TEST_ASSERT_EQ(unpCustom->payload[6], 10, "Band 1: 0 + 10 = 10");
-    TEST_ASSERT_EQ(unpCustom->payload[7], 20, "Band 2: 10 + 10 = 20");
-    TEST_ASSERT_EQ(unpCustom->payload[8], 5, "Band 3: -5 + 10 = 5");
-    TEST_ASSERT_EQ(unpCustom->payload[9], 15, "Band 4: 5 + 10 = 15");
-
-    // Custom EQ: Clamping test (out of bounds [-15, 15])
-    std::array<int, 5> outOfBoundsBands = {-15, -10, 0, 10, 15};
-    auto eqClamped = serializeCustomEq(outOfBoundsBands, 20, 0);
-    auto unpEqClamped = unpackFrame(eqClamped);
-    TEST_ASSERT(unpEqClamped.has_value(), "Clamped EQ frame valid");
-    TEST_ASSERT_EQ(unpEqClamped->payload[4], 20, "Clear Bass clamped to +10 -> 20");
-    TEST_ASSERT_EQ(unpEqClamped->payload[5], 0, "Band 0 clamped to -10 -> 0");
-    TEST_ASSERT_EQ(unpEqClamped->payload[9], 20, "Band 4 clamped to +10 -> 20");
-
-    // Feature Toggles
-    auto s2cOn = serializeSpeakToChat(true, 0);
-    auto unpS2c = unpackFrame(s2cOn);
-    TEST_ASSERT(unpS2c.has_value(), "Speak-to-Chat frame valid");
-    TEST_ASSERT_EQ(unpS2c->payload[2], 0x00, "Speak-to-Chat ON is wire byte 0x00");
-
-    auto dseeOn = serializeDsee(true, 0);
-    auto unpDsee = unpackFrame(dseeOn);
-    TEST_ASSERT(unpDsee.has_value(), "DSEE frame valid");
-    TEST_ASSERT_EQ(unpDsee->payload[2], 0x01, "DSEE ON is wire byte 0x01");
-
-    auto multiOff = serializeMultipoint(false, 0);
-    auto unpMulti = unpackFrame(multiOff);
-    TEST_ASSERT(unpMulti.has_value(), "Multipoint frame valid");
-    TEST_ASSERT_EQ(unpMulti->payload[3], 0x01, "Multipoint OFF is wire byte 0x01");
-
-    auto earOn = serializeEarDetection(true, 0);
-    auto unpEar = unpackFrame(earOn);
-    TEST_ASSERT(unpEar.has_value(), "Ear Detection frame valid");
-    TEST_ASSERT_EQ(unpEar->payload[2], 0x00, "Ear Detection ON is wire byte 0x00");
-
-    // ACK Packet
-    auto ackFrame = serializeACK(1);
-    auto unpAck = unpackFrame(ackFrame);
-    TEST_ASSERT(unpAck.has_value(), "ACK frame valid");
-    TEST_ASSERT(unpAck->type == PacketType::ACK, "Packet type must be ACK");
-    TEST_ASSERT_EQ(unpAck->seq, 0, "ACK sequence should toggle 1 - rx_seq");
-
-    TEST_PASS("CommandSerializers");
+TEST(SetterPayloadsMatchProtocol) {
+    CHECK_EQ(req::setEqPreset(0x10), B({0x58, 0x00, 0x10, 0x00}));
+    CHECK_EQ(req::setEqPreset(0xA1), B({0x58, 0x00, 0xA1, 0x00}));
+    CHECK_EQ(req::setEqCustom({-10, 0, 10, -5, 5}, 3), B({0x58, 0x00, 0xA0, 0x06, 13, 0, 10, 20, 5, 15}));
+    CHECK_EQ(req::setEqCustom({-15, 0, 0, 0, 15}, 20), B({0x58, 0x00, 0xA0, 0x06, 20, 0, 10, 10, 10, 20}));
+    CHECK_EQ(req::setUpscaling(true), B({0xE8, 0x01, 0x01}));
+    CHECK_EQ(req::setUpscaling(false), B({0xE8, 0x01, 0x00}));
+    CHECK_EQ(req::setSpeakToChat(true), B({0xF8, 0x0C, 0x00, 0x01}));
+    CHECK_EQ(req::setSpeakToChat(false), B({0xF8, 0x0C, 0x01, 0x01}));
+    CHECK_EQ(req::setSpeakToChatConfig(0x02, 0x03), B({0xFC, 0x0C, 0x02, 0x03}));
+    CHECK_EQ(req::setVoiceGuidance(0x01, true, 0x00), B({0x48, 0x01, 0x00}));
+    CHECK_EQ(req::setVoiceGuidance(0x01, false, 0x00), B({0x48, 0x01, 0x01}));
+    CHECK_EQ(req::setVoiceGuidance(0x02, true, 0x01), B({0x48, 0x02, 0x00, 0x01}));
+    CHECK_EQ(req::setVoiceGuidanceVolume(-2), B({0x48, 0x20, 0xFE, 0x00}));
+    CHECK_EQ(req::setVoiceGuidanceVolume(2), B({0x48, 0x20, 0x02, 0x00}));
+    CHECK_EQ(req::setAutoPowerOff(0x05, 0x01), B({0x28, 0x05, 0x01, 0x01}));
+    CHECK_EQ(req::setAutoPowerOff(0x05, 0x10), B({0x28, 0x05, 0x10, 0x00}));
+    CHECK_EQ(req::setAutoPowerOff(0x04, 0x11), B({0x28, 0x04, 0x11, 0x00}));
+    CHECK_EQ(req::setNcAmbButton(0x03), B({0x68, 0x30, 0x03}));
+    CHECK_EQ(req::setAssignableValue(0x03, {0x31, 0xFF}), B({0xF8, 0x03, 0x02, 0x31, 0xFF}));
+    CHECK_EQ(req::setEarDetection(true), B({0xF8, 0x01, 0x00}));
+    CHECK_EQ(req::setEarDetection(false), B({0xF8, 0x01, 0x01}));
+    CHECK_EQ(req::setVolume(30), B({0xA8, 0x20, 30}));
+    CHECK_EQ(req::setConnectionQuality(0x00, 0x01), B({0xE8, 0x00, 0x01}));
+    CHECK_EQ(req::setConnectionQuality(0x02, 0x00), B({0xE8, 0x02, 0x00}));
+    CHECK_EQ(req::setGeneralSettingBool(0xD3, true), B({0xD8, 0xD3, 0x00, 0x00}));
+    CHECK_EQ(req::setGeneralSettingBool(0xD1, false), B({0xD8, 0xD1, 0x00, 0x01}));
+    CHECK_EQ(req::answerAlert(0x07, true), B({0x98, 0x00, 0x07, 0x01}));
+    CHECK_EQ(req::setQuickAccess({0x00, 0x01}), B({0xF8, 0x0D, 0x02, 0x00, 0x01}));
+    CHECK_EQ(req::setQuickAccess({0x01, 0x00}), B({0xF8, 0x0D, 0x02, 0x01, 0x00}));
+    Bytes source = req::setSourceSwitch("5C:E9:1E:BB:00:02");
+    CHECK_EQ(Bytes(source.begin(), source.begin() + 2), B({0x3C, 0x01}));
+    CHECK_EQ(std::string(source.begin() + 2, source.end()), std::string("5C:E9:1E:BB:00:02"));
 }
 
 // ---------------------------------------------------------------------------
-// 6. Query Serializers Tests
+// Parsers (protocol.md section 5)
 // ---------------------------------------------------------------------------
-void testQuerySerializers() {
-    TEST_CASE("QuerySerializers");
 
-    // Query Battery
-    auto qBat = serializeQueryBattery(0);
-    auto unpBat = unpackFrame(qBat);
-    TEST_ASSERT(unpBat.has_value(), "Battery query valid");
-    TEST_ASSERT_EQ(unpBat->payload[0], 0x22, "POWER_GET_STATUS opcode");
-    TEST_ASSERT_EQ(unpBat->payload[1], 0x00, "BATTERY type");
+TEST(IdentityRepliesParse) {
+    HeadphoneState s;
+    CHECK(apply1(B({0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00}), s));
+    CHECK(s.protocolKnown);
+    CHECK_EQ(s.protocolVersion, uint32_t{4096});
+    CHECK(s.table1Supported);
+    CHECK(s.table2Supported);
+    CHECK(!apply1(B({0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00}), s));
 
-    // Query Noise Mode
-    auto qNc = serializeQueryNoiseMode(0);
-    auto unpNc = unpackFrame(qNc);
-    TEST_ASSERT(unpNc.has_value(), "Noise query valid");
-    TEST_ASSERT_EQ(unpNc->payload[0], 0x66, "NCASM_GET_PARAM opcode");
-    TEST_ASSERT_EQ(unpNc->payload[1], 0x17, "MODE_NC_ASM_... type");
-
-    // Query EQ
-    auto qEq = serializeQueryEq(0);
-    auto unpEq = unpackFrame(qEq);
-    TEST_ASSERT(unpEq.has_value(), "EQ query valid");
-    TEST_ASSERT_EQ(unpEq->payload[0], 0x56, "EQEBB_GET_PARAM opcode");
-
-    // Query DSEE
-    auto qDsee = serializeQueryDsee(0);
-    auto unpDsee = unpackFrame(qDsee);
-    TEST_ASSERT(unpDsee.has_value(), "DSEE query valid");
-    TEST_ASSERT_EQ(unpDsee->payload[0], 0xE6, "AUDIO_GET_PARAM opcode");
-
-    // Query Speak-to-Chat
-    auto qS2c = serializeQuerySpeakToChat(0);
-    auto unpS2c = unpackFrame(qS2c);
-    TEST_ASSERT(unpS2c.has_value(), "S2C query valid");
-    TEST_ASSERT_EQ(unpS2c->payload[0], 0xF6, "SYSTEM_GET_PARAM opcode");
-    TEST_ASSERT_EQ(unpS2c->payload[1], 0x0C, "SMART_TALKING_MODE_TYPE2");
-
-    // Query Ear Detection
-    auto qEar = serializeQueryEarDetection(0);
-    auto unpEar = unpackFrame(qEar);
-    TEST_ASSERT(unpEar.has_value(), "Ear query valid");
-    TEST_ASSERT_EQ(unpEar->payload[0], 0xF6, "SYSTEM_GET_PARAM opcode");
-    TEST_ASSERT_EQ(unpEar->payload[1], 0x01, "PLAYBACK_CONTROL_BY_WEARING");
-
-    // Query General Setting (Multipoint)
-    auto qGen = serializeQueryGeneralSetting(0);
-    auto unpGen = unpackFrame(qGen);
-    TEST_ASSERT(unpGen.has_value(), "General Setting query valid");
-    TEST_ASSERT_EQ(unpGen->payload[0], 0xD6, "GENERAL_SETTING_GET_PARAM opcode");
-    TEST_ASSERT_EQ(unpGen->payload[1], 0xD1, "GENERAL_SETTING1");
-
-    TEST_PASS("QuerySerializers");
+    CHECK(apply1(withString(B({0x03, 0x00, 0x05}), "ID-1"), s));
+    CHECK_EQ(s.capabilityCounter, std::optional<uint8_t>(0x05));
+    CHECK_EQ(s.uniqueId, std::optional<std::string>("ID-1"));
+    CHECK(apply1(withString(B({0x05, 0x02}), "2.3.1"), s));
+    CHECK(apply1(withString(B({0x05, 0x01}), "WH-1000XM5"), s));
+    CHECK(apply1(B({0x05, 0x03, 0x30, 0x01}), s));
+    CHECK_EQ(s.firmwareVersion, std::optional<std::string>("2.3.1"));
+    CHECK_EQ(s.modelName, std::optional<std::string>("WH-1000XM5"));
+    CHECK_EQ(s.series, std::optional<uint8_t>(0x30));
+    CHECK_EQ(s.color, std::optional<uint8_t>(0x01));
+    CHECK(!apply1(B({0x05, 0x02, 0x09, 'x'}), s));
 }
 
-// ---------------------------------------------------------------------------
-// 7. Inbound State Parser & Real Capture Tests
-// ---------------------------------------------------------------------------
-void testInboundStateParser() {
-    TEST_CASE("InboundStateParser");
-
-    HeadphoneState state;
-
-    // 1. Battery status notification: 85% charging
-    std::vector<uint8_t> batteryPayload = {0x25, 0x00, 85, 0x01};
-    TEST_ASSERT(parseInboundPayload(batteryPayload, state), "Battery payload must be parsed");
-    TEST_ASSERT_EQ(state.battery_level, 85, "Battery level must be 85");
-    TEST_ASSERT(state.battery_charging, "Battery charging must be true");
-    TEST_ASSERT(state.connected, "State must mark connected true");
-
-    // 2. Real Capture: Noise Cancelling Off
-    // Verbatim capture: 67 17 01 00 01 00 14 (totalEffect=0 -> Off)
-    std::vector<uint8_t> ncPayload = {0x67, 0x17, 0x01, 0x00, 0x01, 0x00, 0x14};
-    TEST_ASSERT(parseInboundPayload(ncPayload, state), "NC payload must be parsed");
-    TEST_ASSERT_EQ(state.noise_mode, std::string("off"), "Noise mode must be off");
-
-    // 3. Noise Cancelling ANC
-    std::vector<uint8_t> ancPayload = {0x69, 0x17, 0x01, 0x01, 0x00, 0x00, 0x00};
-    TEST_ASSERT(parseInboundPayload(ancPayload, state), "ANC payload must be parsed");
-    TEST_ASSERT_EQ(state.noise_mode, std::string("anc"), "Noise mode must be anc");
-    TEST_ASSERT_EQ(state.ambient_sound_level, 0, "Ambient level for ANC must be 0");
-
-    // 4. Ambient sound level 12 with voice passthrough
-    std::vector<uint8_t> ambPayload = {0x69, 0x17, 0x01, 0x01, 0x01, 0x01, 12};
-    TEST_ASSERT(parseInboundPayload(ambPayload, state), "Ambient payload must be parsed");
-    TEST_ASSERT_EQ(state.noise_mode, std::string("ambient"), "Noise mode must be ambient");
-    TEST_ASSERT_EQ(state.ambient_sound_level, 12, "Ambient level must be 12");
-    TEST_ASSERT(state.voice_passthrough, "Voice passthrough must be true");
-
-    // 5. Real Capture: Equalizer Preset Custom with 5 bands & Clear Bass
-    // Captured bytes: 57 00 a0 06 14 0b 0a 0d 09 0c
-    // Clear bass: 0x14 (20 - 10 = +10)
-    // Bands: 0x0B (1), 0x0A (0), 0x0D (3), 0x09 (-1), 0x0C (2)
-    std::vector<uint8_t> eqPayload = {0x57, 0x00, 0xA0, 0x06, 0x14, 0x0B, 0x0A, 0x0D, 0x09, 0x0C};
-    TEST_ASSERT(parseInboundPayload(eqPayload, state), "EQ payload must be parsed");
-    TEST_ASSERT_EQ(state.eq_preset, std::string("custom"), "Preset must be custom");
-    TEST_ASSERT_EQ(state.clear_bass, 10, "Clear bass must be 10");
-    TEST_ASSERT_EQ(state.eq_custom_bands[0], 1, "Band 0 must be 1");
-    TEST_ASSERT_EQ(state.eq_custom_bands[1], 0, "Band 1 must be 0");
-    TEST_ASSERT_EQ(state.eq_custom_bands[2], 3, "Band 2 must be 3");
-    TEST_ASSERT_EQ(state.eq_custom_bands[3], -1, "Band 3 must be -1");
-    TEST_ASSERT_EQ(state.eq_custom_bands[4], 2, "Band 4 must be 2");
-
-    // 6. Feature toggles
-    // DSEE Extreme ON
-    std::vector<uint8_t> dseePayload = {0xE7, 0x01, 0x01};
-    TEST_ASSERT(parseInboundPayload(dseePayload, state), "DSEE payload must be parsed");
-    TEST_ASSERT(state.dsee_extreme, "DSEE must be true");
-
-    // Speak-to-Chat ON (wire 0x00)
-    std::vector<uint8_t> s2cPayload = {0xF7, 0x0C, 0x00};
-    TEST_ASSERT(parseInboundPayload(s2cPayload, state), "S2C payload must be parsed");
-    TEST_ASSERT(state.speak_to_chat, "Speak-to-Chat must be true");
-
-    // Ear Detection ON (wire 0x00)
-    std::vector<uint8_t> earPayload = {0xF7, 0x01, 0x00};
-    TEST_ASSERT(parseInboundPayload(earPayload, state), "Ear detection payload must be parsed");
-    TEST_ASSERT(state.ear_detection, "Ear detection must be true");
-
-    // Multipoint ON (wire 0x00)
-    std::vector<uint8_t> multiPayload = {0xD7, 0xD1, 0x00, 0x00};
-    TEST_ASSERT(parseInboundPayload(multiPayload, state), "Multipoint payload must be parsed");
-    TEST_ASSERT(state.multipoint, "Multipoint must be true");
-
-    // Alternative compact packet format (0x10, 0x11, 0x12, 0x13, 0x14)
-    std::vector<uint8_t> compactBat = {0x10, 92, 0x00};
-    TEST_ASSERT(parseInboundPayload(compactBat, state), "Compact battery parsed");
-    TEST_ASSERT_EQ(state.battery_level, 92, "Compact battery level");
-    TEST_ASSERT(!state.battery_charging, "Compact battery not charging");
-
-    // Verify JSON Output conforms to contract
-    std::string json = state.toJson();
-    TEST_ASSERT(json.find("\"schema_version\":1") != std::string::npos, "JSON must contain schema_version: 1");
-    TEST_ASSERT(json.find("\"connected\":true") != std::string::npos, "JSON must contain connected: true");
-    TEST_ASSERT(json.find("\"battery_level\":92") != std::string::npos, "JSON must contain battery_level");
-    TEST_ASSERT(json.find("\"noise_mode\":\"ambient\"") != std::string::npos, "JSON must contain noise_mode");
-    TEST_ASSERT(json.find("\"eq_preset\":\"custom\"") != std::string::npos, "JSON must contain eq_preset");
-
-    // Verify disconnected JSON
-    HeadphoneState disc = HeadphoneState::makeDisconnected();
-    TEST_ASSERT_EQ(disc.toJson(), std::string("{\"schema_version\":1,\"connected\":false}"), "Disconnected JSON format");
-
-    TEST_PASS("InboundStateParser");
+TEST(SupportListsDispatchOnTable) {
+    HeadphoneState s;
+    CHECK(apply1(B({0x07, 0x00, 0x02, 0x20, 0x01, 0x6B, 0x01}), s));
+    CHECK(apply2(B({0x07, 0x00, 0x01, 0x32, 0x02}), s));
+    REQUIRE(s.support1.has_value());
+    REQUIRE(s.support2.has_value());
+    CHECK_EQ(s.support1->size(), size_t{2});
+    CHECK_EQ(s.support2->at(0).id, uint8_t{0x32});
+    CHECK_EQ(s.support2->at(0).priority, uint8_t{0x02});
+    CHECK(s.hasFunction(Table::T1, 0x6B));
+    CHECK(!s.hasFunction(Table::T2, 0x6B));
+    CHECK(s.hasFunction(Table::T2, 0x32));
 }
 
-// ---------------------------------------------------------------------------
-// 8. String & Enum Helpers Tests
-// ---------------------------------------------------------------------------
-void testStringAndEnumHelpers() {
-    TEST_CASE("StringAndEnumHelpers");
-
-    // Noise Mode string mapping
-    TEST_ASSERT_EQ(noiseModeToString(NoiseMode::OFF), std::string("off"), "Off mode string");
-    TEST_ASSERT_EQ(noiseModeToString(NoiseMode::ANC), std::string("anc"), "ANC mode string");
-    TEST_ASSERT_EQ(noiseModeToString(NoiseMode::AMBIENT), std::string("ambient"), "Ambient mode string");
-    TEST_ASSERT_EQ(noiseModeToString(NoiseMode::WIND), std::string("wind"), "Wind mode string");
-
-    TEST_ASSERT(stringToNoiseMode("anc") == NoiseMode::ANC, "StringToNoiseMode anc");
-    TEST_ASSERT(stringToNoiseMode("ambient") == NoiseMode::AMBIENT, "StringToNoiseMode ambient");
-    TEST_ASSERT(stringToNoiseMode("wind") == NoiseMode::WIND, "StringToNoiseMode wind");
-    TEST_ASSERT(stringToNoiseMode("off") == NoiseMode::OFF, "StringToNoiseMode off");
-    TEST_ASSERT(stringToNoiseMode("unknown") == NoiseMode::ANC, "StringToNoiseMode fallback to anc");
-
-    // EQ Preset string mapping
-    TEST_ASSERT_EQ(eqPresetToString(EqPreset::OFF), std::string("off"), "EQ off");
-    TEST_ASSERT_EQ(eqPresetToString(EqPreset::BRIGHT), std::string("bright"), "EQ bright");
-    TEST_ASSERT_EQ(eqPresetToString(EqPreset::EXCITED), std::string("excited"), "EQ excited");
-    TEST_ASSERT_EQ(eqPresetToString(EqPreset::MELLOW), std::string("mellow"), "EQ mellow");
-    TEST_ASSERT_EQ(eqPresetToString(EqPreset::RELAXED), std::string("relaxed"), "EQ relaxed");
-    TEST_ASSERT_EQ(eqPresetToString(EqPreset::VOCAL), std::string("vocal"), "EQ vocal");
-    TEST_ASSERT_EQ(eqPresetToString(EqPreset::TREBLE), std::string("treble"), "EQ treble");
-    TEST_ASSERT_EQ(eqPresetToString(EqPreset::BASS), std::string("bass"), "EQ bass");
-    TEST_ASSERT_EQ(eqPresetToString(EqPreset::SPEECH), std::string("speech"), "EQ speech");
-    TEST_ASSERT_EQ(eqPresetToString(EqPreset::CUSTOM), std::string("custom"), "EQ custom");
-
-    TEST_ASSERT(stringToEqPreset("vocal") == EqPreset::VOCAL, "StringToEqPreset vocal");
-    TEST_ASSERT(stringToEqPreset("custom") == EqPreset::CUSTOM, "StringToEqPreset custom");
-    TEST_ASSERT(stringToEqPreset("unknown") == EqPreset::OFF, "StringToEqPreset fallback to off");
-
-    TEST_PASS("StringAndEnumHelpers");
+TEST(BatteryParsesBothVariantsAndChargingStates) {
+    HeadphoneState s;
+    CHECK(apply1(B({0x23, 0x00, 85, 0x01}), s));
+    CHECK_EQ(s.batteryLevel, std::optional<int>(85));
+    CHECK_EQ(s.batteryCharging(), std::optional<bool>(true));
+    CHECK(apply1(B({0x25, 0x00, 100, 0x03}), s));
+    CHECK_EQ(s.batteryCharging(), std::optional<bool>(true));
+    CHECK(apply1(B({0x25, 0x00, 100, 0x02}), s));
+    CHECK(!s.batteryCharging().has_value());
+    CHECK(apply1(B({0x23, 0x08, 40, 0x00, 0x01}), s));
+    CHECK_EQ(s.batteryLevel, std::optional<int>(40));
+    CHECK_EQ(s.batteryCharging(), std::optional<bool>(false));
+    CHECK(apply1(B({0x23, 0x08, 41, 0x01, 0x00}), s));
+    CHECK_EQ(s.batteryCharging(), std::optional<bool>(true));
+    CHECK(!apply1(B({0x23, 0x08, 41, 0x01}), s));
 }
 
-// ---------------------------------------------------------------------------
-// 9. Mock Transport & BluetoothManager Lifecycle Tests
-// ---------------------------------------------------------------------------
-void testMockTransportAndBluetoothManager() {
-    TEST_CASE("MockTransportAndBluetoothManager");
+TEST(NcAsmParsesModesWithoutWind) {
+    HeadphoneState s;
+    CHECK(apply1(B({0x67, 0x17, 0x01, 0x00, 0x01, 0x00, 0x14}), s));
+    CHECK_EQ(s.noiseModeString(), std::optional<std::string>("off"));
+    CHECK_EQ(s.ambientLevelValue(), std::optional<int>(20));
+    CHECK(apply1(B({0x69, 0x17, 0x01, 0x01, 0x00, 0x00, 0x05}), s));
+    CHECK_EQ(s.noiseModeString(), std::optional<std::string>("anc"));
+    CHECK_EQ(s.ambientLevelValue(), std::optional<int>(5));
+    CHECK(apply1(B({0x69, 0x17, 0x01, 0x01, 0x01, 0x01, 0x0C}), s));
+    CHECK_EQ(s.noiseModeString(), std::optional<std::string>("ambient"));
+    CHECK_EQ(s.ncAmbientMode, std::optional<uint8_t>(0x01));
+    CHECK(apply1(B({0x69, 0x17, 0x01, 0x01, 0x01, 0x00, 0x00}), s));
+    CHECK_EQ(s.noiseModeString(), std::optional<std::string>("ambient"));
+    CHECK(!s.ambientLevelValue().has_value());
+    CHECK(apply1(B({0x67, 0x19, 0x01, 0x01, 0x00, 0x00, 0x0A, 0x01, 0x02}), s));
+    CHECK_EQ(s.ncAutoAmbient, std::optional<uint8_t>(0x01));
+    CHECK_EQ(s.ncNoiseAdaptive, std::optional<uint8_t>(0x02));
+    CHECK(!apply1(B({0x67, 0x19, 0x01, 0x01, 0x00, 0x00, 0x0A}), s));
+    CHECK(apply1(B({0x67, 0x15, 0x01, 0x01, 0x01, 0x00, 0x0B}), s));
+    CHECK_EQ(s.ambientLevelValue(), std::optional<int>(11));
+}
 
-    int peerFd = -1;
-    BluetoothConfig config;
-    config.initialBackoffMs = 50;
-    config.maxBackoffMs = 200;
-    auto manager = BluetoothManager::createMock(config, &peerFd);
-    TEST_ASSERT(manager != nullptr, "BluetoothManager must be created");
-    TEST_ASSERT(peerFd >= 0, "Mock peer socketpair fd must be valid");
+TEST(OldCompactCommandsNoLongerTouchState) {
+    HeadphoneState s;
+    CHECK(apply1(B({0x67, 0x17, 0x01, 0x01, 0x00, 0x00, 0x05}), s));
+    CHECK(!apply1(B({0x11, 0x02, 0x0A, 0x01}), s));
+    CHECK(!apply1(B({0x10, 0x50, 0x01}), s));
+    CHECK(!apply1(B({0x14, 0x01, 0x01, 0x01, 0x01}), s));
+    CHECK_EQ(s.noiseModeString(), std::optional<std::string>("anc"));
+    CHECK(!s.batteryLevel.has_value());
+}
 
-    bool connectedCalled = false;
-    bool disconnectedCalled = false;
-    std::vector<uint8_t> receivedBytes;
+TEST(EqParsesCapabilityStatusAndValues) {
+    HeadphoneState s;
+    Bytes full = B({0x51, 0x00, 0x06, 0x15, 0x03, 0x00});
+    full = withString(full, "Off");
+    full.push_back(0x10);
+    full = withString(full, "Bright");
+    full.push_back(0x77);
+    full = withString(full, "New");
+    CHECK(apply1(full, s));
+    REQUIRE(s.eqCapability.has_value());
+    CHECK_EQ(s.eqCapability->bands, uint8_t{6});
+    CHECK_EQ(s.eqCapability->steps, uint8_t{0x15});
+    CHECK_EQ(s.eqCapability->presets.size(), size_t{3});
+    CHECK_EQ(s.eqCapability->presets[1].name, std::string("Bright"));
+    auto names = s.eqPresetNames();
+    REQUIRE(names.has_value());
+    CHECK_EQ(names->size(), size_t{2});
 
-    BluetoothCallbacks callbacks;
-    callbacks.onConnected = [&]() { connectedCalled = true; };
-    callbacks.onDisconnected = [&](const std::string&) { disconnectedCalled = true; };
-    callbacks.onDataReceived = [&](const uint8_t* data, size_t len) {
-        receivedBytes.insert(receivedBytes.end(), data, data + len);
+    CHECK(apply1(B({0x53, 0x00, 0x00}), s));
+    CHECK_EQ(s.eqAvailable, std::optional<uint8_t>(0x00));
+
+    CHECK(apply1(B({0x57, 0x00, 0xA0, 0x06, 0x14, 0x0B, 0x0A, 0x0D, 0x09, 0x0C}), s));
+    CHECK_EQ(eqPresetName(*s.eqPresetIdValue), std::string("custom"));
+    CHECK_EQ(s.clearBass, std::optional<int>(10));
+    CHECK((s.eqCustomBands == std::optional<std::array<int, 5>>(std::array<int, 5>{1, 0, 3, -1, 2})));
+
+    CHECK(apply1(B({0x59, 0x00, 0x10, 0x06, 0x0B, 0x0C, 0x0A, 0x09, 0x0A, 0x0E}), s));
+    CHECK_EQ(eqPresetName(*s.eqPresetIdValue), std::string("bright"));
+    CHECK_EQ(s.clearBass, std::optional<int>(1));
+    CHECK((s.eqCustomBands == std::optional<std::array<int, 5>>(std::array<int, 5>{2, 0, -1, 0, 4})));
+
+    CHECK(apply1(B({0x59, 0x00, 0xA2, 0x00}), s));
+    CHECK_EQ(s.clearBass, std::optional<int>(1));
+    CHECK_EQ(eqPresetName(*s.eqPresetIdValue), std::string("user2"));
+    CHECK(apply1(B({0x59, 0x00, 0x42, 0x00}), s));
+    CHECK_EQ(eqPresetName(*s.eqPresetIdValue), std::string("unknown"));
+    CHECK(!apply1(B({0x57, 0x00, 0xA0, 0x06, 0x14}), s));
+}
+
+TEST(EqValueForPresetOffCarriesBandsFromXm5Capture) {
+    HeadphoneState s = withSupport({0x50});
+    s.connected = true;
+    CHECK(apply1(B({0x57, 0x00, 0x00, 0x06, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A}), s));
+    s.supported = deriveSupported(s);
+    Json j = entryOf(s);
+    CHECK_EQ(j["eq_preset"].string, std::string("off"));
+    CHECK(j["supported"]["eq_custom"].boolean);
+    REQUIRE(j["eq_custom_bands"].array.size() == 5);
+    for (const auto& band : j["eq_custom_bands"].array) CHECK_EQ(band.number, 0.0);
+    CHECK(!j.has("eq_bands"));
+    CHECK_EQ(j["clear_bass"].number, 0.0);
+}
+
+TEST(QuickAccessParsesXm5Capture) {
+    HeadphoneState s = withSupport({0xFD});
+    s.connected = true;
+    CHECK(apply1(B({0xF1, 0x0D, 0x01, 0x01, 0x02, 0x01, 0x00, 0x04, 0x00, 0x05, 0x01, 0x02,
+                    0x02, 0x00, 0x04, 0x00, 0x05, 0x01, 0x02}), s));
+    REQUIRE(s.quickAccessCapability.has_value());
+    CHECK_EQ(s.quickAccessCapability->key, uint8_t{0x01});
+    CHECK_EQ(s.quickAccessCapability->keyType, uint8_t{0x01});
+    REQUIRE(s.quickAccessCapability->actions.size() == 2);
+    CHECK_EQ(s.quickAccessCapability->actions[1].action, uint8_t{0x02});
+    CHECK_EQ(s.quickAccessCapability->actions[1].functions, B({0x00, 0x05, 0x01, 0x02}));
+    CHECK(!s.assignableCapability.has_value());
+
+    CHECK(apply1(B({0xF7, 0x0D, 0x02, 0x00, 0x00}), s));
+    CHECK(!s.assignableValue.has_value());
+    CHECK_EQ(s.quickAccessString(kActionDoubleTap), std::optional<std::string>("off"));
+    CHECK_EQ(s.quickAccessString(kActionTripleTap), std::optional<std::string>("off"));
+    CHECK(apply1(B({0xF9, 0x0D, 0x02, 0x05, 0x01}), s));
+    CHECK_EQ(s.quickAccessString(kActionDoubleTap), std::optional<std::string>("other"));
+    CHECK_EQ(s.quickAccessString(kActionTripleTap), std::optional<std::string>("spotify"));
+
+    s.supported = deriveSupported(s);
+    CHECK(s.supported->quick_access);
+    Json j = entryOf(s);
+    CHECK_EQ(j["quick_access_double_tap"].string, std::string("other"));
+    CHECK_EQ(j["quick_access_triple_tap"].string, std::string("spotify"));
+    const Json options = j["quick_access_double_tap_options"];
+    REQUIRE(options.array.size() == 2);
+    CHECK_EQ(options.array[0].string, std::string("off"));
+    CHECK_EQ(options.array[1].string, std::string("spotify"));
+    CHECK_EQ(j["quick_access_triple_tap_options"].array.size(), size_t{2});
+
+    CHECK(!apply1(B({0xF1, 0x0D, 0x01, 0x01, 0x02, 0x01, 0x00, 0x04, 0x00}), s));
+    CHECK(!apply1(B({0xF7, 0x0D, 0x02, 0x00}), s));
+}
+
+TEST(QuickAccessWithoutCapabilityUsesDoubleThenTriple) {
+    HeadphoneState s;
+    CHECK(apply1(B({0xF7, 0x0D, 0x02, 0x01, 0x00}), s));
+    CHECK_EQ(s.quickAccessIndex(kActionDoubleTap), std::optional<size_t>(0));
+    CHECK_EQ(s.quickAccessIndex(kActionTripleTap), std::optional<size_t>(1));
+    CHECK_EQ(s.quickAccessString(kActionDoubleTap), std::optional<std::string>("spotify"));
+    CHECK(!s.quickAccessOptions(kActionDoubleTap).has_value());
+    CHECK_EQ(quickAccessValue("spotify"), std::optional<uint8_t>(0x01));
+    CHECK_EQ(quickAccessValue("off"), std::optional<uint8_t>(0x00));
+    CHECK(!quickAccessValue("other").has_value());
+}
+
+TEST(TouchPanelSlotIsFoundBySubject) {
+    HeadphoneState s = withSupport({0xD1, 0xD2});
+    s.connected = true;
+    CHECK(apply1(B({0xD1, 0xD1, 0x00, 0x01, 0x13, 'T', 'O', 'U', 'C', 'H', '_', 'P', 'A', 'N', 'E', 'L', '_',
+                    'S', 'E', 'T', 'T', 'I', 'N', 'G', 0x00}), s));
+    CHECK(apply1(withString(withString(B({0xD1, 0xD2, 0x00, 0x01}), "MULTIPOINT_SETTING"),
+                            "MULTIPOINT_SETTING_SUMMARY_LDAC_AVAILABLE"), s));
+    selectVariants(s);
+    CHECK_EQ(s.variants.touchPanelSlot, std::optional<uint8_t>(0xD1));
+    CHECK_EQ(s.variants.multipointSlot, std::optional<uint8_t>(0xD2));
+    CHECK(apply1(B({0xD7, 0xD1, 0x00, 0x00}), s));
+    CHECK(apply1(B({0xD7, 0xD2, 0x00, 0x00}), s));
+    CHECK_EQ(s.touchPanelValue(), std::optional<bool>(true));
+    CHECK(apply1(B({0xD9, 0xD1, 0x00, 0x01}), s));
+    CHECK_EQ(s.touchPanelValue(), std::optional<bool>(false));
+    CHECK_EQ(s.multipointValue(), std::optional<bool>(true));
+    s.supported = deriveSupported(s);
+    CHECK(s.supported->touch_panel);
+    Json j = entryOf(s);
+    CHECK(!j["touch_panel"].boolean);
+    CHECK(!j["touch_panel"].isNull());
+    CHECK_EQ(req::setGeneralSettingBool(0xD1, false), B({0xD8, 0xD1, 0x00, 0x01}));
+}
+
+TEST(DseeAndConnectionQualityShareAudioCommands) {
+    HeadphoneState s;
+    CHECK(apply1(B({0xE1, 0x01, 0x02}), s));
+    CHECK_EQ(s.upscalingType, std::optional<uint8_t>(0x02));
+    CHECK(apply1(B({0xE3, 0x01, 0x00}), s));
+    CHECK_EQ(s.dseeAvailable, std::optional<uint8_t>(0x00));
+    CHECK(apply1(B({0xE7, 0x01, 0x01}), s));
+    CHECK_EQ(s.dsee, std::optional<bool>(true));
+    CHECK(apply1(B({0xE9, 0x01, 0x00}), s));
+    CHECK_EQ(s.dsee, std::optional<bool>(false));
+    CHECK(apply1(B({0xE7, 0x00, 0x01}), s));
+    CHECK_EQ(connectionQualityName(*s.connectionQuality), std::string("connection"));
+    CHECK(apply1(B({0xE9, 0x02, 0x02}), s));
+    CHECK_EQ(connectionQualityName(*s.connectionQuality), std::string("other"));
+    CHECK_EQ(s.dsee, std::optional<bool>(false));
+}
+
+TEST(SystemParamsParse) {
+    HeadphoneState s;
+    CHECK(apply1(B({0xF7, 0x0C, 0x00, 0x01}), s));
+    CHECK_EQ(s.speakToChat, std::optional<bool>(true));
+    CHECK(apply1(B({0xF9, 0x0C, 0x01, 0x01}), s));
+    CHECK_EQ(s.speakToChat, std::optional<bool>(false));
+    CHECK(apply1(B({0xFB, 0x0C, 0x01, 0x03}), s));
+    CHECK_EQ(speakToChatSensitivityName(*s.speakToChatSensitivity), std::optional<std::string>("high"));
+    CHECK_EQ(speakToChatTimeoutName(*s.speakToChatTimeout), std::optional<std::string>("off"));
+    CHECK(apply1(B({0xF7, 0x01, 0x01}), s));
+    CHECK_EQ(s.earDetection, std::optional<bool>(false));
+    CHECK(apply1(B({0xF9, 0x01, 0x00}), s));
+    CHECK_EQ(s.earDetection, std::optional<bool>(true));
+}
+
+TEST(AssignableParsesBothCapabilityTypes) {
+    HeadphoneState s;
+    // preset = PRESET NA NC (ACTION FUNCTION) x NA (ACTION DEFAULT NF (FUNCTION) x NF) x NC
+    Bytes cap03 = B({0xF1, 0x03, 0x02,
+                     0x02, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x20,
+                     0x04, 0x01, 0x00, 0x03,
+                     0x00, 0x00, 0x00,
+                     0x31, 0x01, 0x01, 0x01, 0x21, 0x01, 0x21, 0x02, 0x21, 0x22,
+                     0x36, 0x00, 0x00});
+    CHECK(apply1(cap03, s));
+    REQUIRE(s.assignableCapability.has_value());
+    CHECK_EQ(s.assignableCapability->keys.size(), size_t{2});
+    CHECK_EQ(s.ncAmbKeyIndex(), std::optional<uint8_t>(1));
+    CHECK_EQ(s.assignableCapability->keys[1].presets, B({0x00, 0x31, 0x36}));
+
+    CHECK(apply1(B({0xF7, 0x03, 0x02, 0x00, 0x36}), s));
+    CHECK_EQ(s.buttonFunctionString(), std::optional<std::string>("quick_access"));
+    auto opts = s.buttonFunctionOptions();
+    REQUIRE(opts.has_value());
+    CHECK_EQ(opts->size(), size_t{3});
+
+    HeadphoneState t;
+    CHECK(apply1(B({0xF1, 0x0E, 0x00, 0x01, 0x05, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x99, 0x00, 0x00}), t));
+    REQUIRE(t.assignableCapability.has_value());
+    CHECK_EQ(t.assignableCapability->type, uint8_t{0x0E});
+    CHECK(apply1(B({0xF9, 0x0E, 0x01, 0x99}), t));
+    CHECK_EQ(t.buttonFunctionString(), std::optional<std::string>("other"));
+    CHECK(!apply1(B({0xF1, 0x03, 0x01, 0x04, 0x01}), t));
+}
+
+TEST(AssignableParsesWf1000xm5Capture) {
+    // protocol.md 9.3, WF-1000XM5 fw 6.1.0: two touch sensor keys, the old
+    // parser rejected this reply.
+    const Bytes cap = B({
+        0xF1, 0x03, 0x02,
+        0x00, 0x00, 0x35, 0x03,
+        0x35, 0x04, 0x01, 0x01, 0x43, 0x02, 0x44, 0x22, 0x10, 0x03, 0x24, 0x00, 0x02, 0x04, 0x01, 0x02, 0x03, 0x04,
+        0x20, 0x04, 0x00, 0x00, 0x20, 0x01, 0x21, 0x02, 0x22, 0x03, 0x24,
+        0xFF, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x20, 0x03,
+        0x35, 0x04, 0x01, 0x01, 0x43, 0x02, 0x44, 0x22, 0x10, 0x03, 0x23, 0x00, 0x02, 0x04, 0x01, 0x02, 0x03, 0x04,
+        0x20, 0x04, 0x00, 0x00, 0x20, 0x01, 0x21, 0x02, 0x22, 0x03, 0x23,
+        0xFF, 0x01, 0x00, 0x00, 0x00});
+    HeadphoneState s = withSupport({0xF3});
+    s.connected = true;
+    CHECK(apply1(cap, s));
+    REQUIRE(s.assignableCapability.has_value());
+    REQUIRE(s.assignableCapability->keys.size() == 2);
+    CHECK_EQ(s.assignableCapability->keys[0].key, uint8_t{0x00});
+    CHECK_EQ(s.assignableCapability->keys[0].defaultPreset, uint8_t{0x35});
+    CHECK_EQ(s.assignableCapability->keys[0].presets, B({0x35, 0x20, 0xFF}));
+    CHECK_EQ(s.assignableCapability->keys[1].key, uint8_t{0x01});
+    CHECK_EQ(s.assignableCapability->keys[1].presets, B({0x35, 0x20, 0xFF}));
+    CHECK(!s.ncAmbKeyIndex().has_value());
+    CHECK(!apply1(Bytes(cap.begin(), cap.end() - 1), s));
+
+    CHECK(apply1(B({0xF7, 0x03, 0x02, 0x20, 0x20}), s));
+    CHECK_EQ(s.touchFunctionString(kKeyLeftSide), std::optional<std::string>("playback_control"));
+    CHECK(apply1(B({0xF9, 0x03, 0x02, 0x35, 0x20}), s));
+    CHECK_EQ(s.touchFunctionString(kKeyLeftSide), std::optional<std::string>("ambient_sound_control"));
+    CHECK_EQ(s.touchFunctionString(kKeyRightSide), std::optional<std::string>("playback_control"));
+    auto options = s.touchFunctionOptions(kKeyRightSide);
+    REQUIRE(options.has_value());
+    CHECK((*options == std::vector<std::string>{"ambient_sound_control", "playback_control", "none"}));
+    CHECK_EQ(s.touchPresetFor(kKeyLeftSide, "ambient_sound_control"), uint8_t{0x35});
+    CHECK_EQ(s.touchPresetFor(kKeyLeftSide, "none"), uint8_t{0xFF});
+    CHECK_EQ(req::setAssignableValue(0x03, {0x35, 0x20}), B({0xF8, 0x03, 0x02, 0x35, 0x20}));
+
+    s.supported = deriveSupported(s);
+    CHECK(s.supported->touch_function);
+    CHECK(!s.supported->button_function);
+    Json j = entryOf(s);
+    CHECK_EQ(j["touch_function_left"].string, std::string("ambient_sound_control"));
+    CHECK_EQ(j["touch_function_right_options"].array.size(), size_t{3});
+    CHECK(j["button_function"].isNull());
+
+    // Preset names and the "other" fallback; plain 00 is ambient sound control too.
+    CHECK(apply1(B({0xF9, 0x03, 0x02, 0x00, 0x77}), s));
+    CHECK_EQ(s.touchFunctionString(kKeyLeftSide), std::optional<std::string>("ambient_sound_control"));
+    CHECK_EQ(s.touchFunctionString(kKeyRightSide), std::optional<std::string>("other"));
+    CHECK_EQ(touchFunctionName(0x10), std::string("volume_control"));
+    CHECK_EQ(touchFunctionName(0x36), std::string("quick_access"));
+    CHECK_EQ(touchFunctionValue("ambient_sound_control"), std::optional<uint8_t>(0x35));
+    CHECK_EQ(touchFunctionValue("voice_recognition"), std::optional<uint8_t>(0x30));
+}
+
+TEST(EarbudBatteriesParse) {
+    HeadphoneState s;
+    // mos9527 WF-1000XM5 fw 6.1.0 capture (protocol.md 9.2).
+    CHECK(apply1(B({0x23, 0x09, 0x00, 0x00, 0x64, 0x00, 0x64, 0x64}), s));
+    CHECK_EQ(s.batteryLeft, std::optional<int>(0));
+    CHECK_EQ(chargingFromRaw(s.batteryLeftChargingRaw), std::optional<bool>(false));
+    CHECK_EQ(s.batteryRight, std::optional<int>(100));
+    CHECK(apply1(B({0x23, 0x0A, 0x35, 0x00, 0x1E}), s));
+    CHECK_EQ(s.batteryCase, std::optional<int>(53));
+    CHECK_EQ(chargingFromRaw(s.batteryCaseChargingRaw), std::optional<bool>(false));
+    // This project's WF-1000XM5 run: right earbud out of the ear reads 0 %.
+    CHECK(apply1(B({0x23, 0x09, 0x61, 0x00, 0x00, 0x00, 0x64, 0x64}), s));
+    CHECK_EQ(s.batteryLeft, std::optional<int>(97));
+    CHECK_EQ(s.batteryRight, std::optional<int>(0));
+    CHECK(apply1(B({0x23, 0x0A, 0x57, 0x00, 0x1E}), s));
+    CHECK_EQ(s.batteryCase, std::optional<int>(87));
+    // Notifications and the variants without thresholds.
+    CHECK(apply1(B({0x25, 0x09, 0x32, 0x01, 0x33, 0x03, 0x64, 0x64}), s));
+    CHECK_EQ(chargingFromRaw(s.batteryLeftChargingRaw), std::optional<bool>(true));
+    CHECK_EQ(chargingFromRaw(s.batteryRightChargingRaw), std::optional<bool>(true));
+    CHECK(apply1(B({0x25, 0x01, 0x10, 0x02, 0x11, 0x00}), s));
+    CHECK_EQ(s.batteryLeft, std::optional<int>(16));
+    CHECK(!chargingFromRaw(s.batteryLeftChargingRaw).has_value());
+    CHECK(apply1(B({0x25, 0x02, 0x40, 0x01}), s));
+    CHECK_EQ(s.batteryCase, std::optional<int>(64));
+    CHECK(!apply1(B({0x23, 0x09, 0x00, 0x00, 0x64, 0x00, 0x64}), s));
+    CHECK(!apply1(B({0x23, 0x0A, 0x35, 0x00}), s));
+    CHECK(!s.batteryLevel.has_value());
+
+    s = withSupport({0x29, 0x2A});
+    s.connected = true;
+    s.supported = deriveSupported(s);
+    CHECK(apply1(B({0x23, 0x09, 0x46, 0x00, 0x41, 0x01, 0x64, 0x64}), s));
+    CHECK(apply1(B({0x23, 0x0A, 0x35, 0x01, 0x1E}), s));
+    Json j = entryOf(s);
+    CHECK_EQ(j["battery_left"].number, 70.0);
+    CHECK(!j["battery_left_charging"].boolean);
+    CHECK_EQ(j["battery_right"].number, 65.0);
+    CHECK(j["battery_right_charging"].boolean);
+    CHECK_EQ(j["battery_case"].number, 53.0);
+    CHECK(j["battery_case_charging"].boolean);
+    CHECK(j["battery_level"].isNull());
+    CHECK_EQ(j["kind"].string, std::string("earbuds"));
+
+    // Level 0 with "not charging" is an earbud that is off or out of range
+    // (protocol.md 9.11): the level is unknown, the status stays.
+    CHECK(apply1(B({0x23, 0x09, 0x61, 0x00, 0x00, 0x00, 0x64, 0x64}), s));
+    j = entryOf(s);
+    CHECK_EQ(j["battery_left"].number, 97.0);
+    CHECK(j["battery_right"].isNull());
+    CHECK(!j["battery_right_charging"].isNull());
+    CHECK(!j["battery_right_charging"].boolean);
+    CHECK(apply1(B({0x23, 0x0A, 0x00, 0x00, 0x1E}), s));
+    CHECK_EQ(entryOf(s)["battery_case"].number, 0.0);
+    CHECK_EQ(earbudLevel(0, uint8_t{0x01}), std::optional<int>(0));
+    CHECK_EQ(earbudLevel(0, uint8_t{0x03}), std::optional<int>(0));
+    CHECK_EQ(earbudLevel(0, uint8_t{0x02}), std::optional<int>(0));
+    CHECK(!earbudLevel(0, uint8_t{0x00}).has_value());
+    CHECK_EQ(earbudLevel(1, uint8_t{0x00}), std::optional<int>(1));
+}
+
+TEST(WornStatusPerEarbud) {
+    HeadphoneState s = withSupport({0xF6}, {});
+    s.modelName = "WF-1000XM5";
+    s.supported = deriveSupported(s);
+    struct Case {
+        uint8_t ws;
+        std::optional<bool> worn, left, right;
     };
-    manager->setCallbacks(callbacks);
+    const Case cases[] = {
+        {0x00, true, true, true}, {0x01, std::nullopt, std::nullopt, std::nullopt},
+        {0x02, true, false, true}, {0x03, true, true, false}, {0x04, false, false, false},
+    };
+    for (const auto& c : cases) {
+        CHECK(apply2(B({0xF3, 0x00, c.ws}), s));
+        CHECK_EQ(s.worn(), c.worn);
+        CHECK_EQ(s.wornLeft(), c.left);
+        CHECK_EQ(s.wornRight(), c.right);
+    }
+    HeadphoneState wh = withSupport({}, {0xF0});
+    wh.modelName = "WH-1000XM5";
+    CHECK(apply2(B({0xF5, 0x00, 0x03}), wh));
+    CHECK_EQ(wh.worn(), std::optional<bool>(false));
+    CHECK(!wh.wornLeft().has_value());
+    CHECK(!wh.wornRight().has_value());
+}
 
-    // Initial state is DISCONNECTED
-    TEST_ASSERT(manager->getState() == ConnectionState::DISCONNECTED, "Initial state DISCONNECTED");
+TEST(SidetoneSlotIsFoundBySubject) {
+    HeadphoneState s = withSupport({0xD1, 0xD2});
+    s.connected = true;
+    // WF-1000XM5 fw 6.1.0 capture (protocol.md 9.1).
+    CHECK(apply1(withString(withString(B({0xD1, 0xD1, 0x00, 0x01}), "SIDETONE_SETTING"), "SIDETONE_SETTING_SUMMARY"), s));
+    CHECK(apply1(withString(withString(B({0xD1, 0xD2, 0x00, 0x01}), "MULTIPOINT_SETTING"),
+                            "MULTIPOINT_SETTING_SUMMARY_LDAC_AVAILABLE"), s));
+    selectVariants(s);
+    CHECK_EQ(s.variants.sidetoneSlot, std::optional<uint8_t>(0xD1));
+    CHECK_EQ(s.variants.multipointSlot, std::optional<uint8_t>(0xD2));
+    CHECK(!s.variants.touchPanelSlot.has_value());
+    CHECK(apply1(B({0xD7, 0xD1, 0x00, 0x00}), s));
+    CHECK_EQ(s.sidetoneValue(), std::optional<bool>(true));
+    CHECK(apply1(B({0xD9, 0xD1, 0x00, 0x01}), s));
+    CHECK_EQ(s.sidetoneValue(), std::optional<bool>(false));
+    s.supported = deriveSupported(s);
+    CHECK(s.supported->sidetone);
+    CHECK(!s.supported->touch_panel);
+    Json j = entryOf(s);
+    CHECK(!j["sidetone"].boolean);
+    CHECK(!j["sidetone"].isNull());
+    CHECK(j["touch_panel"].isNull());
+    CHECK_EQ(req::setGeneralSettingBool(0xD1, true), B({0xD8, 0xD1, 0x00, 0x00}));
+}
 
-    // Start -> discovery -> sdp -> connect
-    manager->start();
-    TEST_ASSERT(manager->getState() == ConnectionState::CONNECTED, "State must transition to CONNECTED in mock mode");
-    TEST_ASSERT(connectedCalled, "onConnected callback must be triggered");
+TEST(ConnectionModeRepliesAreKeptRaw) {
+    HeadphoneState s;
+    // This project's WF-1000XM5 run (protocol.md 9.5).
+    CHECK(apply1(B({0xE1, 0x05, 0x03, 0x00, 0x01, 0x02, 0x00}), s));
+    CHECK(apply1(B({0xE3, 0x05, 0x00, 0x00}), s));
+    REQUIRE(s.connectionModeCapability.has_value());
+    CHECK_EQ(hexBytes(*s.connectionModeCapability), std::string("E1 05 03 00 01 02 00"));
+    CHECK_EQ(hexBytes(*s.connectionModeStatus), std::string("E3 05 00 00"));
+    CHECK(apply1(B({0xE5, 0x05, 0x01, 0x00}), s));
+    CHECK_EQ(hexBytes(*s.connectionModeStatus), std::string("E5 05 01 00"));
+    CHECK(!s.upscalingType.has_value());
+    CHECK(!s.dseeAvailable.has_value());
+    Json probe = parsed(probeJson(s, {}));
+    CHECK_EQ(probe["connection_mode"]["capability"].string, std::string("E1 05 03 00 01 02 00"));
+    CHECK_EQ(probe["connection_mode"]["status"].string, std::string("E5 05 01 00"));
+}
 
-    // Verify polling fd
-    int pollFd = manager->getPollFd();
-    TEST_ASSERT(pollFd >= 0, "Poll fd must be valid when connected");
-    short pollEvents = manager->getPollEvents();
-    TEST_ASSERT(pollEvents & POLLIN, "Poll events must include POLLIN");
+TEST(SmallParamsParse) {
+    HeadphoneState s;
+    CHECK(apply1(B({0xA7, 0x20, 18}), s));
+    CHECK_EQ(s.volume, std::optional<int>(18));
+    CHECK(apply1(B({0x29, 0x05, 0x10, 0x00}), s));
+    CHECK_EQ(autoPowerOffName(*s.autoPowerOff), std::optional<std::string>("when_taken_off"));
+    CHECK(apply1(B({0x27, 0x04, 0x04, 0x04}), s));
+    CHECK_EQ(autoPowerOffName(*s.autoPowerOff), std::optional<std::string>("15min"));
+    CHECK(apply1(B({0x67, 0x30, 0x04}), s));
+    CHECK_EQ(ncAmbButtonName(*s.ncAmbButton), std::optional<std::string>("ambient_off"));
+    CHECK(apply1(B({0x13, 0x02, 0x10}), s));
+    CHECK_EQ(codecName(*s.codec), std::string("LDAC"));
+    CHECK(apply1(B({0x15, 0x02, 0x99}), s));
+    CHECK_EQ(codecName(*s.codec), std::string("OTHER"));
+    CHECK_EQ(codecName(0x00), std::string("NONE"));
+    CHECK_EQ(codecName(0x21), std::string("APTX_HD"));
+}
 
-    // Test sending packet from manager to peerFd
-    std::vector<uint8_t> testPacket = {0x3E, 0x0C, 0x01, 0x00, 0x00, 0x00, 0x01, 0x55, 0x63, 0x3C};
-    bool sendOk = manager->sendPacket(testPacket);
-    TEST_ASSERT(sendOk, "sendPacket must succeed");
+TEST(AutoPowerOffValuesMapBothWays) {
+    const std::pair<uint8_t, const char*> pairs[] = {
+        {0x00, "5min"}, {0x04, "15min"}, {0x01, "30min"}, {0x02, "60min"}, {0x03, "180min"},
+        {0x10, "when_taken_off"}, {0x11, "off"}};
+    for (const auto& [value, name] : pairs) {
+        CHECK_EQ(autoPowerOffName(value), std::optional<std::string>(name));
+        CHECK_EQ(autoPowerOffValue(name), std::optional<uint8_t>(value));
+    }
+}
 
-    // Read from peerFd and verify
-    uint8_t readBuf[128];
-    ssize_t nRead = ::recv(peerFd, readBuf, sizeof(readBuf), 0);
-    TEST_ASSERT_EQ(nRead, static_cast<ssize_t>(testPacket.size()), "Peer must receive exact packet bytes");
-    TEST_ASSERT(std::memcmp(readBuf, testPacket.data(), testPacket.size()) == 0, "Received bytes match sent packet");
+TEST(GeneralSettingsFindMultipointSlot) {
+    HeadphoneState s = withSupport({0xD1, 0xD2});
+    Bytes touch = withString(withString(B({0xD1, 0xD1, 0x00, 0x01}), "TOUCH_PANEL_SETTING"), "S");
+    Bytes multi = withString(withString(B({0xD1, 0xD2, 0x00, 0x01}), "MULTIPOINT_SETTING"), "SUMMARY");
+    CHECK(apply1(touch, s));
+    CHECK(s.multipointSlot() == nullptr);
+    CHECK(apply1(multi, s));
+    REQUIRE(s.multipointSlot() != nullptr);
+    CHECK_EQ(s.multipointSlot()->slot, uint8_t{0xD2});
+    CHECK(apply1(B({0xD7, 0xD2, 0x00, 0x00}), s));
+    CHECK_EQ(s.multipointValue(), std::optional<bool>(true));
+    CHECK(apply1(B({0xD9, 0xD2, 0x00, 0x01}), s));
+    CHECK_EQ(s.multipointValue(), std::optional<bool>(false));
+    CHECK(!apply1(B({0xD7, 0xD2, 0x01, 0x00}), s));
+    selectVariants(s);
+    CHECK_EQ(s.variants.multipointSlot, std::optional<uint8_t>(0xD2));
+}
 
-    // Test sending data from peerFd to manager
-    std::vector<uint8_t> inboundPacket = {0x3E, 0x0C, 0x00, 0x00, 0x00, 0x01, 0xAA, 0xB7, 0x3C};
-    ssize_t nSent = ::send(peerFd, inboundPacket.data(), inboundPacket.size(), 0);
-    TEST_ASSERT_EQ(nSent, static_cast<ssize_t>(inboundPacket.size()), "Peer sent bytes");
+TEST(MultipointNeedsBooleanSlotWithSubject) {
+    HeadphoneState s = withSupport({0xD1});
+    CHECK(apply1(withString(withString(B({0xD1, 0xD1, 0x01, 0x01}), "MULTIPOINT_SETTING"), ""), s));
+    CHECK(s.multipointSlot() == nullptr);
+    CHECK(!deriveSupported(s).multipoint);
+}
 
-    // Trigger handleSocketEvent with POLLIN
-    manager->handleSocketEvent(POLLIN);
-    TEST_ASSERT(receivedBytes == inboundPacket, "Manager onDataReceived must receive inbound bytes");
+TEST(PairedDevicesParseBothListTypes) {
+    HeadphoneState s;
+    Bytes list = B({0x37, 0x02, 0x02});
+    std::string a1 = "f0:1d:bc:aa:00:01";
+    list.insert(list.end(), a1.begin(), a1.end());
+    list.push_back(0x01);
+    list.insert(list.end(), {0x5A, 0x01, 0x0C});
+    list = withString(list, "laptop");
+    std::string a2 = "5C:E9:1E:BB:00:02";
+    list.insert(list.end(), a2.begin(), a2.end());
+    list.push_back(0x02);
+    list.insert(list.end(), {0x5A, 0x02, 0x0C});
+    list = withString(list, "Pixel 8");
+    list.push_back(0x02);
+    CHECK(apply2(list, s));
+    REQUIRE(s.devices.has_value());
+    CHECK_EQ(s.devices->size(), size_t{2});
+    CHECK_EQ(s.devices->at(0).address, std::string("F0:1D:BC:AA:00:01"));
+    CHECK_EQ(s.playbackSlot, uint8_t{2});
 
-    // Test remote disconnect simulation
-    // Closing peerFd causes POLLHUP/EOF on manager side
-    ::close(peerFd);
-    peerFd = -1;
+    Bytes plain = B({0x39, 0x00, 0x01});
+    plain.insert(plain.end(), a2.begin(), a2.end());
+    plain.push_back(0x00);
+    plain = withString(plain, "");
+    plain.push_back(0x00);
+    CHECK(apply2(plain, s));
+    CHECK_EQ(s.devices->size(), size_t{1});
+    CHECK_EQ(s.devices->at(0).name, std::string(""));
+    CHECK(!apply2(B({0x37, 0x00, 0x01, 'A'}), s));
+}
 
-    manager->handleSocketEvent(POLLHUP);
-    TEST_ASSERT(manager->getState() == ConnectionState::RECONNECT_BACKOFF, "State must transition to RECONNECT_BACKOFF on hangup");
-    TEST_ASSERT(disconnectedCalled, "onDisconnected callback must be triggered");
+TEST(Table2RepliesDoNotLeakIntoTable1State) {
+    HeadphoneState s;
+    CHECK(apply2(B({0xF3, 0x00, 0x04}), s));
+    CHECK_EQ(s.worn(), std::optional<bool>(false));
+    CHECK(!s.assignableValue.has_value());
+    CHECK(!apply2(B({0x23, 0x00, 50, 0x00}), s));
+    CHECK(!s.batteryLevel.has_value());
+    CHECK(apply2(B({0x47, 0x01, 0x00, 0x01}), s));
+    CHECK_EQ(s.voiceGuidance, std::optional<bool>(true));
+    CHECK_EQ(s.voiceGuidanceLanguage, std::optional<uint8_t>(0x01));
+    CHECK(apply2(B({0x47, 0x00, 0x01}), s));
+    CHECK_EQ(s.voiceGuidance, std::optional<bool>(false));
+    CHECK(apply2(B({0x47, 0x20, 0xFE}), s));
+    CHECK_EQ(s.voiceGuidanceVolume, std::optional<int>(-2));
+    CHECK(!s.volume.has_value());
+    CHECK(apply2(B({0xF5, 0x00, 0x00}), s));
+    CHECK_EQ(s.worn(), std::optional<bool>(true));
+    CHECK(apply2(B({0xF5, 0x00, 0x01}), s));
+    CHECK(!s.worn().has_value());
+    CHECK(apply2(B({0x37, 0x01, 0x01}), s));
+    CHECK_EQ(s.sourceSwitchAuto, std::optional<bool>(true));
+}
 
-    // Test backoff tick retry
-    std::this_thread::sleep_for(std::chrono::milliseconds(80));
-    manager->tick();
-    // After backoff timer expires, tick() should transition through discovery and reconnect
-    TEST_ASSERT(manager->getState() == ConnectionState::CONNECTED, "After backoff timer, tick must trigger reconnect to mock");
+TEST(EventsAreReported) {
+    HeadphoneState s;
+    InboundEvents ev;
+    CHECK(applyInbound(Table::T1, B({0x99, 0x00, 0x07, 0x01}), s, ev));
+    REQUIRE(ev.alert.has_value());
+    CHECK_EQ(ev.alert->messageType, uint8_t{0x07});
+    CHECK_EQ(ev.alert->actionType, uint8_t{0x01});
 
-    TEST_PASS("MockTransportAndBluetoothManager");
+    InboundEvents log;
+    Bytes line = B({0xC9, 0x01, 0x00});
+    std::string text = "{\"unitWear\":1}";
+    line.insert(line.end(), text.begin(), text.end());
+    CHECK(applyInbound(Table::T1, line, s, log));
+    CHECK(log.wearLogLine);
+
+    // WF-1000XM5 lines carry the side and an upper case U (protocol.md 9.4).
+    for (const char* text : {"lUnitWear", "rUnitWear", "lUnitRemove", "rUnitRemove", "UNITWEAR"}) {
+        InboundEvents wf;
+        CHECK(applyInbound(Table::T1, withString(B({0xC9, 0x01}), text), s, wf));
+        CHECK(wf.wearLogLine);
+    }
+    InboundEvents other;
+    CHECK(applyInbound(Table::T1, withString(B({0xC9, 0x01}), "unitWea"), s, other));
+    CHECK(!other.wearLogLine);
+
+    InboundEvents src;
+    Bytes result = B({0x3D, 0x01, 0x00});
+    std::string addr = "5c:e9:1e:bb:00:02";
+    result.insert(result.end(), addr.begin(), addr.end());
+    CHECK(applyInbound(Table::T2, result, s, src));
+    REQUIRE(src.sourceSwitch.has_value());
+    CHECK_EQ(src.sourceSwitch->address, std::string("5C:E9:1E:BB:00:02"));
 }
 
 // ---------------------------------------------------------------------------
-// 10. StateEngine Persistence & Permissions Tests
+// Variant selection and `supported`
 // ---------------------------------------------------------------------------
-void testStateEngine() {
-    TEST_CASE("StateEngine");
 
-    char tmpl[] = "/tmp/test_omasony_state_XXXXXX";
-    char* sandbox = ::mkdtemp(tmpl);
-    TEST_ASSERT(sandbox != nullptr, "mkdtemp must succeed");
-    std::filesystem::path sandboxPath(sandbox);
+TEST(VariantsFollowSupportList) {
+    auto a = withSupport({0x20, 0x6B, 0x25, 0xE1, 0xF3}, {0x32, 0x41});
+    CHECK_EQ(a.variants.batteryType, uint8_t{0x00});
+    CHECK_EQ(a.variants.ncAsmType, std::optional<uint8_t>(0x17));
+    CHECK_EQ(a.variants.autoPowerOffType, uint8_t{0x05});
+    CHECK_EQ(a.variants.connectionQualityType, uint8_t{0x00});
+    CHECK_EQ(a.variants.assignableType, uint8_t{0x03});
+    CHECK_EQ(a.variants.deviceListType, uint8_t{0x02});
+    CHECK_EQ(a.variants.voiceGuidanceType, uint8_t{0x01});
 
-    {
-        StateEngine engine(sandboxPath);
-        bool ok = engine.initialize(true);
-        TEST_ASSERT(ok, "StateEngine initialize must succeed");
+    auto b = withSupport({0x28, 0x6D, 0x24, 0xE3, 0xFE, 0xF3}, {0x30, 0x40});
+    CHECK_EQ(b.variants.batteryType, uint8_t{0x08});
+    CHECK_EQ(b.variants.ncAsmType, std::optional<uint8_t>(0x19));
+    CHECK_EQ(b.variants.autoPowerOffType, uint8_t{0x04});
+    CHECK_EQ(b.variants.connectionQualityType, uint8_t{0x02});
+    CHECK_EQ(b.variants.assignableType, uint8_t{0x0E});
+    CHECK_EQ(b.variants.deviceListType, uint8_t{0x00});
+    CHECK_EQ(b.variants.voiceGuidanceType, uint8_t{0x00});
 
-        struct stat st{};
-        int rc = ::stat(engine.getStateDirectory().c_str(), &st);
-        TEST_ASSERT_EQ(rc, 0, "State directory must exist");
-        TEST_ASSERT_EQ(static_cast<int>(st.st_mode & 0777), 0700, "State directory mode must be 0700");
+    auto c = withSupport({0x68}, {0x44});
+    CHECK_EQ(c.variants.ncAsmType, std::optional<uint8_t>(0x15));
+    CHECK_EQ(c.variants.voiceGuidanceType, uint8_t{0x02});
+    auto d = withSupport({0x67}, {0x45});
+    CHECK(!d.variants.ncAsmType.has_value());
+    CHECK_EQ(d.variants.voiceGuidanceType, uint8_t{0x03});
+    CHECK(!deriveSupported(d).noise_control);
+}
 
-        rc = ::stat(engine.getStateFilePath().c_str(), &st);
-        TEST_ASSERT_EQ(rc, 0, "status.json must exist");
-        TEST_ASSERT_EQ(static_cast<int>(st.st_mode & 0777), 0600, "status.json mode must be 0600");
+TEST(SupportedFollowsContractTable) {
+    auto s = withSupport({0x12, 0x20, 0x25, 0x50, 0x69, 0x6B, 0xA1, 0xE1, 0xE2, 0xF1, 0xFC}, {0x32, 0x31, 0x42});
+    Supported sup = deriveSupported(s);
+    CHECK(sup.battery);
+    CHECK(sup.noise_control);
+    CHECK(sup.eq_preset);
+    CHECK(!sup.eq_custom);
+    CHECK(sup.dsee);
+    CHECK(sup.speak_to_chat);
+    CHECK(sup.voice_guidance);
+    CHECK(sup.voice_guidance_volume);
+    CHECK(sup.auto_power_off);
+    CHECK(sup.nc_amb_button);
+    CHECK(!sup.button_function);
+    CHECK(sup.ear_detection);
+    CHECK(!sup.worn);
+    CHECK(sup.volume);
+    CHECK(sup.connection_quality);
+    CHECK(sup.codec);
+    CHECK(!sup.multipoint);
+    CHECK(sup.devices);
+    CHECK(sup.source_switch);
+    CHECK(!sup.touch_panel);
+    CHECK(!sup.quick_access);
 
-        // Verify JSON contents
-        std::ifstream ifs(engine.getStateFilePath());
-        std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-        TEST_ASSERT(content.find("\"schema_version\": 1") != std::string::npos, "Schema version must be 1");
-        TEST_ASSERT(content.find("\"connected\": true") != std::string::npos, "Connected must be true");
-        TEST_ASSERT(content.find("\"device_name\": \"WH-1000XM5\"") != std::string::npos, "Device name must match");
-        TEST_ASSERT(content.find("\"ambient_sound_level\"") != std::string::npos, "Must contain ambient_sound_level");
-        TEST_ASSERT(content.find("\"ambient_level\"") != std::string::npos, "Must contain ambient_level");
-        TEST_ASSERT(content.find("\"battery_charging\"") != std::string::npos, "Must contain battery_charging");
-        TEST_ASSERT(content.find("\"charging\"") != std::string::npos, "Must contain charging");
+    s.eqCapability = EqCapability{6, 21, {}};
+    CHECK(deriveSupported(s).eq_custom);
+    s.eqCapability = EqCapability{10, 13, {}};
+    CHECK(!deriveSupported(s).eq_custom);
+    s.eqCustomSeen = true;
+    CHECK(deriveSupported(s).eq_custom);
 
-        // Test state mutation
-        engine.setNoiseMode("ambient");
-        engine.setAmbientLevel(14);
-        engine.setEqPreset("vocal");
+    auto noTable2 = withSupport({0xF6}, {}, false);
+    CHECK(!deriveSupported(noTable2).worn);
+    CHECK(deriveSupported(withSupport({0xF6}, {})).worn);
+    CHECK(deriveSupported(withSupport({}, {0xF0})).worn);
+    CHECK(!deriveSupported(withSupport({0xF1}, {0x41})).worn);
+    auto quickAccess = withSupport({0xFD});
+    CHECK(!deriveSupported(quickAccess).quick_access);
+    quickAccess.quickAccessCapability = QuickAccessCapability{0x00, 0x00, {{0x01, 0x00, {}}, {0x02, 0x00, {}}}};
+    CHECK(!deriveSupported(quickAccess).quick_access);
+    quickAccess.quickAccessCapability->actions[1].functions = {0x00, 0x01};
+    CHECK(deriveSupported(quickAccess).quick_access);
+    auto sourceOnly = withSupport({}, {0x31});
+    CHECK(!deriveSupported(sourceOnly).source_switch);
+    auto volumeOnly = withSupport({}, {0x43});
+    CHECK(volumeOnly.variants.voiceGuidanceType == 0x01);
+    CHECK(deriveSupported(volumeOnly).voice_guidance_volume);
+    CHECK(!deriveSupported(volumeOnly).voice_guidance);
+}
 
-        std::string jsonNow = engine.getStatusJson();
-        TEST_ASSERT(jsonNow.find("\"noise_mode\":\"ambient\"") != std::string::npos, "Noise mode updated");
-        TEST_ASSERT(jsonNow.find("\"ambient_sound_level\":14") != std::string::npos, "Ambient level updated");
-        TEST_ASSERT(jsonNow.find("\"eq_preset\":\"vocal\"") != std::string::npos, "EQ preset updated");
-        TEST_ASSERT(jsonNow.find('\n') == std::string::npos, "getStatusJson must not contain newlines");
+TEST(EarbudFeaturesFollowContractTable) {
+    auto wf = withSupport({0x29, 0x2A, 0xF3, 0xD1, 0xFD, 0xF6, 0xE7}, {0x42, 0x32, 0x31});
+    Supported sup = deriveSupported(wf);
+    CHECK(!sup.battery);
+    CHECK(sup.battery_lr);
+    CHECK(sup.battery_case);
+    CHECK(sup.worn);
+    CHECK(!sup.touch_function);
+    CHECK(!sup.sidetone);
+    CHECK(!sup.quick_access);
+    CHECK(!sup.connection_quality);
+    CHECK_EQ(wf.variants.lrBatteryType, uint8_t{0x09});
+    CHECK_EQ(wf.variants.caseBatteryType, uint8_t{0x0A});
+    auto older = withSupport({0x21, 0x22});
+    CHECK(deriveSupported(older).battery_lr);
+    CHECK(deriveSupported(older).battery_case);
+    CHECK_EQ(older.variants.lrBatteryType, uint8_t{0x01});
+    CHECK_EQ(older.variants.caseBatteryType, uint8_t{0x02});
+    CHECK_EQ(req::getBattery(0x09), B({0x22, 0x09}));
+    CHECK_EQ(req::getBattery(0x0A), B({0x22, 0x0A}));
+    CHECK_EQ(req::getConnectionModeCapability(), B({0xE0, 0x05}));
+    CHECK_EQ(req::getConnectionModeStatus(), B({0xE2, 0x05}));
 
-        // Test concurrent readers (50 iterations)
-        std::atomic<bool> writerDone{false};
-        std::atomic<int> tornReads{0};
+    // One key only (the NC/AMB key) is not a touch sensor pair.
+    wf.assignableCapability = AssignableCapability{0x03, {{0x00, 0x00, 0x35, {0x35}}}};
+    CHECK(!deriveSupported(wf).touch_function);
+    wf.assignableCapability->keys.push_back({0x01, 0x00, 0x20, {0x20}});
+    CHECK(deriveSupported(wf).touch_function);
+    CHECK(!deriveSupported(wf).button_function);
+}
 
-        std::thread reader([&]() {
-            while (!writerDone.load()) {
-                std::ifstream rfs(engine.getStateFilePath());
-                std::string s((std::istreambuf_iterator<char>(rfs)), std::istreambuf_iterator<char>());
-                if (!s.empty()) {
-                    if (s.front() != '{' || s.back() != '\n') {
-                        tornReads++;
-                    }
-                }
+TEST(FallbackListMatchesContract) {
+    Supported wh;
+    wh.battery = wh.noise_control = wh.eq_preset = wh.eq_custom = true;
+    wh.speak_to_chat = wh.voice_guidance = wh.auto_power_off = true;
+    wh.nc_amb_button = wh.ear_detection = wh.volume = true;
+    CHECK(Supported::fallback("wh-1000xm5") == wh);
+    Supported wf;
+    wf.battery_lr = wf.battery_case = wf.noise_control = wf.eq_preset = wf.eq_custom = true;
+    wf.speak_to_chat = wf.voice_guidance = wf.voice_guidance_volume = wf.auto_power_off = true;
+    wf.ear_detection = wf.volume = true;
+    CHECK(Supported::fallback("wf-1000xm5") == wf);
+    CHECK(Supported::fallback("other") == Supported{});
+}
+
+// ---------------------------------------------------------------------------
+// status.json and probe
+// ---------------------------------------------------------------------------
+
+TEST(DisconnectedDocumentHasSixKeys) {
+    Json j = parsed(statusDocument({}, std::nullopt, 1760438400));
+    const std::vector<std::string> keys = {"schema_version", "daemon_version", "connected", "last_updated", "primary",
+                                           "headsets"};
+    CHECK(j.keyOrder == keys);
+    auto fixture = testutil::parseJson(testutil::readFile(SONY_FIXTURES_DIR "/status_v3_disconnected.json"));
+    REQUIRE(fixture.has_value());
+    CHECK_EQ(testutil::jsonDiff(j, *fixture, {"daemon_version"}), std::string(""));
+}
+
+TEST(HeadsetEntryHasEveryContractKeyInFixtureOrder) {
+    auto fixture = testutil::parseJson(testutil::readFile(SONY_FIXTURES_DIR "/status_v3_wf.json"));
+    REQUIRE(fixture.has_value());
+    const Json expected = (*fixture)["headsets"].array[0];
+    HeadphoneState s = withSupport({0x29});
+    s.connected = true;
+    s.address = "AC:80:0A:65:43:21";
+    s.supported = deriveSupported(s);
+    Json j = entryOf(s);
+    CHECK(j.keyOrder == expected.keyOrder);
+    CHECK(j["supported"].keyOrder == expected["supported"].keyOrder);
+    HeadphoneState initializing;
+    initializing.connected = true;
+    initializing.address = "AC:80:0A:65:43:21";
+    CHECK(entryOf(initializing).keyOrder == expected.keyOrder);
+}
+
+TEST(ModelKindAndNameFollowContract) {
+    HeadphoneState s;
+    s.bluezName = "Living room wf-1000xm5";
+    CHECK_EQ(std::string(s.model()), std::string("wf-1000xm5"));
+    CHECK_EQ(std::string(s.kind()), std::string("earbuds"));
+    CHECK_EQ(s.displayName(), std::string("WF-1000XM5"));
+    s.modelName = "wh-1000XM5";
+    CHECK_EQ(std::string(s.model()), std::string("wh-1000xm5"));
+    CHECK_EQ(std::string(s.kind()), std::string("headphones"));
+    CHECK_EQ(s.displayName(), std::string("WH-1000XM5"));
+    s.alias = "My XM5";
+    CHECK_EQ(s.displayName(), std::string("My XM5"));
+    s.alias.clear();
+    s.modelName = "WH-1000XM6";
+    CHECK_EQ(std::string(s.model()), std::string("other"));
+    CHECK_EQ(s.displayName(), std::string("Sony headset"));
+    CHECK_EQ(std::string(s.kind()), std::string("headphones"));
+    s.supported = Supported{};
+    s.supported->battery_lr = true;
+    CHECK_EQ(std::string(s.kind()), std::string("earbuds"));
+}
+
+namespace {
+
+HeadphoneState listed(const std::string& id, const std::string& model, int64_t since) {
+    HeadphoneState s;
+    s.connected = true;
+    s.address = id;
+    s.modelName = model;
+    s.connectedSince = since;
+    return s;
+}
+
+} // namespace
+
+TEST(HeadsetsAreOrderedByKindThenId) {
+    auto wf1 = listed("AC:80:0A:00:00:01", "WF-1000XM5", 1);
+    auto wh2 = listed("AC:80:0A:00:00:02", "WH-1000XM5", 2);
+    auto wh1 = listed("AC:80:0A:00:00:00", "WH-1000XM5", 3);
+    auto ordered = orderHeadsets({&wf1, &wh2, &wh1});
+    REQUIRE(ordered.size() == 3);
+    CHECK(ordered[0] == &wh1);
+    CHECK(ordered[1] == &wh2);
+    CHECK(ordered[2] == &wf1);
+}
+
+TEST(PrimaryPrefersHeadsetPlayingHere) {
+    const std::vector<std::string> adapters = {"F0:1D:BC:AA:00:01"};
+    auto wh = listed("AC:80:0A:12:34:56", "WH-1000XM5", 1760438430);
+    auto wf = listed("AC:80:0A:65:43:21", "WF-1000XM5", 1760438400);
+    CHECK_EQ(choosePrimary({}, adapters), std::optional<std::string>());
+    // Nobody plays here: the most recent connection.
+    CHECK_EQ(choosePrimary(orderHeadsets({&wh, &wf}), adapters), std::optional<std::string>("AC:80:0A:12:34:56"));
+    // Device lists: the WF plays from the adapter, the WH from a phone.
+    for (auto* s : {&wh, &wf}) {
+        s->support2 = std::vector<SupportEntry>{{0x32, 1}};
+        s->supported = deriveSupported(*s);
+    }
+    wh.devices = std::vector<PairedDevice>{{"F0:1D:BC:AA:00:01", "laptop", 1}, {"5C:E9:1E:BB:00:02", "phone", 2}};
+    wh.playbackSlot = 2;
+    wf.devices = std::vector<PairedDevice>{{"F0:1D:BC:AA:00:01", "laptop", 1}};
+    wf.playbackSlot = 1;
+    CHECK(!playsFromHere(wh, adapters));
+    CHECK(playsFromHere(wf, adapters));
+    CHECK_EQ(choosePrimary(orderHeadsets({&wh, &wf}), adapters), std::optional<std::string>("AC:80:0A:65:43:21"));
+    // Without a device list the codec decides.
+    HeadphoneState codecOnly = listed("AC:80:0A:00:00:09", "WH-1000XM5", 5);
+    codecOnly.support1 = std::vector<SupportEntry>{{0x12, 1}};
+    codecOnly.supported = deriveSupported(codecOnly);
+    CHECK(!playsFromHere(codecOnly, adapters));
+    codecOnly.codec = 0x00;
+    CHECK(!playsFromHere(codecOnly, adapters));
+    codecOnly.codec = 0x10;
+    CHECK(playsFromHere(codecOnly, adapters));
+    // Tie on connected_since: the first in list order.
+    wf.devices = std::vector<PairedDevice>{{"F0:1D:BC:AA:00:01", "laptop", 1}, {"5C:E9:1E:BB:00:02", "phone", 2}};
+    wf.playbackSlot = 2;
+    wf.connectedSince = wh.connectedSince;
+    CHECK_EQ(choosePrimary(orderHeadsets({&wf, &wh}), adapters), std::optional<std::string>("AC:80:0A:12:34:56"));
+    std::string doc = statusDocument(orderHeadsets({&wf, &wh}), choosePrimary(orderHeadsets({&wf, &wh}), adapters), 7);
+    Json j = parsed(doc);
+    CHECK(j["connected"].boolean);
+    CHECK_EQ(j["primary"].string, std::string("AC:80:0A:12:34:56"));
+    CHECK_EQ(j["headsets"].array.size(), size_t{2});
+}
+
+TEST(UnsupportedFeaturesAreNullEvenWhenKnown) {
+    HeadphoneState s = withSupport({0x20, 0x6B});
+    s.connected = true;
+    s.supported = deriveSupported(s);
+    s.dsee = true;
+    s.volume = 7;
+    s.codec = 0x10;
+    s.batteryLevel = 50;
+    s.batteryChargingRaw = 0x00;
+    Json j = entryOf(s);
+    CHECK(j["dsee_extreme"].isNull());
+    CHECK(j["volume"].isNull());
+    CHECK(j["codec"].isNull());
+    CHECK(!j.has("dsee"));
+    CHECK(!j.has("connected"));
+    CHECK_EQ(j["battery_level"].number, 50.0);
+    CHECK_EQ(j["supported_source"].string, std::string("device"));
+    CHECK(!j["supported"]["dsee"].boolean);
+}
+
+TEST(EmptyOptionListsAreNull) {
+    HeadphoneState s = withSupport({0x50, 0xF3});
+    s.connected = true;
+    s.eqCapability = EqCapability{6, 21, {{0x77, "New"}}};
+    s.assignableCapability = AssignableCapability{0x03, {{0x04, 0x01, 0x00, {0x99}}}};
+    s.supported = deriveSupported(s);
+    CHECK(!s.eqPresetNames().has_value());
+    CHECK(!s.buttonFunctionOptions().has_value());
+    Json j = entryOf(s);
+    CHECK(j["eq_presets"].isNull());
+    CHECK(j["button_functions"].isNull());
+    CHECK(j["supported"]["button_function"].boolean);
+}
+
+TEST(OutOfRangeValuesAreDropped) {
+    HeadphoneState s;
+    CHECK(apply1(B({0xA7, 0x20, 12}), s));
+    CHECK(apply1(B({0xA9, 0x20, 31}), s));
+    CHECK(!s.volume.has_value());
+    Bytes list = B({0x37, 0x00, 0x02});
+    std::string bad = "F0-1D-BC-AA-00-01";
+    list.insert(list.end(), bad.begin(), bad.end());
+    list.push_back(0x01);
+    list = withString(list, "bad");
+    std::string good = "5C:E9:1E:BB:00:02";
+    list.insert(list.end(), good.begin(), good.end());
+    list.push_back(0x01);
+    list = withString(list, "good");
+    list.push_back(0x01);
+    CHECK(apply2(list, s));
+    REQUIRE(s.devices.has_value());
+    REQUIRE(s.devices->size() == 1);
+    CHECK_EQ(s.devices->at(0).name, std::string("good"));
+}
+
+TEST(StatusEscapesDeviceStrings) {
+    HeadphoneState s;
+    s.connected = true;
+    s.alias = std::string("My \"XM5\"\n\xff");
+    Json j = entryOf(s);
+    CHECK_EQ(j["device_name"].string, std::string("My \"XM5\"\n\xEF\xBF\xBD"));
+    CHECK(j["supported"].isNull());
+    CHECK(j["supported_source"].isNull());
+}
+
+TEST(FunctionNamesComeFromMos9527Enums) {
+    CHECK_EQ(std::string(functionName(Table::T1, 0x6B)),
+             std::string("MODE_NC_ASM_NOISE_CANCELLING_DUAL_AMBIENT_SOUND_MODE_LEVEL_ADJUSTMENT"));
+    CHECK_EQ(std::string(functionName(Table::T2, 0x32)),
+             std::string("PAIRING_DEVICE_MANAGEMENT_WITH_BLUETOOTH_CLASS_OF_DEVICE_CLASSIC_BT"));
+    CHECK_EQ(std::string(functionName(Table::T1, 0x01)), std::string("UNKNOWN"));
+    CHECK_EQ(std::string(functionName(Table::T2, 0x12)), std::string("UNKNOWN"));
+}
+
+TEST(ProbeListsRawData) {
+    HeadphoneState s = withSupport({0x20, 0xD1, 0x6B}, {0x32});
+    s.connected = true;
+    s.protocolKnown = true;
+    s.protocolVersion = 4096;
+    s.table1Supported = s.table2Supported = true;
+    s.series = 0x30;
+    apply1(withString(withString(B({0xD1, 0xD1, 0x00, 0x01}), "MULTIPOINT_SETTING"), "SUM"), s);
+    apply1(B({0xD7, 0xD1, 0x00, 0x01}), s);
+    s.supported = deriveSupported(s);
+    std::vector<FrameRecord> frames{{true, PacketType::DATA_MDR, 0, B({0x06, 0x00})},
+                                    {false, PacketType::DATA_MDR, 1, B({0x07, 0x00, 0x01, 0x20, 0x01})}};
+    Json j = parsed(probeJson(s, frames));
+    CHECK_EQ(j["probe_version"].number, 1.0);
+    CHECK_EQ(j["protocol"]["version"].number, 4096.0);
+    CHECK_EQ(j["series"].string, std::string("0x30"));
+    CHECK(j["color"].isNull());
+    CHECK_EQ(j["nc_asm_type"].string, std::string("0x17"));
+    CHECK_EQ(j["support_table1"].array.size(), size_t{3});
+    CHECK_EQ(j["support_table1"].array[0]["name"].string, std::string("BATTERY_LEVEL_INDICATOR"));
+    CHECK_EQ(j["support_table2"].array[0]["id"].string, std::string("0x32"));
+    REQUIRE(j["general_settings"].array.size() == 1);
+    const Json gs = j["general_settings"].array[0];
+    CHECK_EQ(gs["slot"].string, std::string("0xD1"));
+    CHECK_EQ(gs["type"].string, std::string("boolean"));
+    CHECK_EQ(gs["format"].string, std::string("enum_name"));
+    CHECK_EQ(gs["subject"].string, std::string("MULTIPOINT_SETTING"));
+    CHECK(!gs["value"].boolean);
+    CHECK(j["eq_capability"].isNull());
+    CHECK(j["assignable"].isNull());
+    REQUIRE(j["recent_frames"].array.size() == 2);
+    CHECK_EQ(j["recent_frames"].array[1]["dir"].string, std::string("rx"));
+    CHECK_EQ(j["recent_frames"].array[1]["type"].string, std::string("0x0C"));
+    CHECK_EQ(j["recent_frames"].array[1]["payload"].string, std::string("07 00 01 20 01"));
+    const std::vector<std::string> keys = {"probe_version", "id", "model", "kind", "address", "protocol",
+                                           "model_name", "firmware_version", "series", "color", "unique_id",
+                                           "nc_asm_type", "support_table1", "support_table2", "general_settings",
+                                           "eq_capability", "assignable", "connection_mode", "recent_frames"};
+    CHECK(j["connection_mode"]["capability"].isNull());
+    CHECK(j["connection_mode"]["status"].isNull());
+    CHECK(j.keyOrder == keys);
+}
+
+// ---------------------------------------------------------------------------
+// Headset selection (BlueZ device list)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+BluetoothDeviceInfo btDevice(const std::string& mac, const std::string& name, bool connected,
+                             bool mdrUuid = true, bool paired = true) {
+    BluetoothDeviceInfo d;
+    d.macAddress = mac;
+    d.name = name;
+    d.alias = name.empty() ? mac : name;
+    d.paired = paired;
+    d.connected = connected;
+    if (mdrUuid) d.uuids.emplace_back(MDR_UUID_XM5_LOWER);
+    return d;
+}
+
+std::vector<std::string> pick(const std::vector<BluetoothDeviceInfo>& devices,
+                              const std::vector<std::string>& allowList = {}) {
+    std::vector<std::string> out;
+    for (const auto& dev : selectHeadsets(devices, allowList)) out.push_back(dev.macAddress);
+    return out;
+}
+
+using Macs = std::vector<std::string>;
+
+} // namespace
+
+TEST(SelectionTakesEveryConnectedWhAndWf) {
+    std::vector<BluetoothDeviceInfo> devices = {
+        btDevice("AA:BB:CC:DD:EE:02", "WF-1000XM5", true),
+        btDevice("AA:BB:CC:DD:EE:01", "WH-1000XM5", true),
+        btDevice("AA:BB:CC:DD:EE:03", "WH-1000XM4", true),
+        btDevice("AA:BB:CC:DD:EE:04", "Phone", true, false),
+    };
+    CHECK((pick(devices) == Macs{"AA:BB:CC:DD:EE:02", "AA:BB:CC:DD:EE:01"}));
+}
+
+TEST(SelectionNeverTakesADisconnectedHeadset) {
+    std::vector<BluetoothDeviceInfo> devices = {
+        btDevice("AA:BB:CC:DD:EE:01", "WH-1000XM5", false),
+        btDevice("AA:BB:CC:DD:EE:02", "WF-1000XM5", true, true, false),
+        btDevice("AA:BB:CC:DD:EE:06", "My wf-1000xm5", true, false),
+    };
+    CHECK((pick(devices) == Macs{"AA:BB:CC:DD:EE:06"}));
+    CHECK((pick(devices, {"AA:BB:CC:DD:EE:01"}) == Macs{}));
+}
+
+TEST(SelectionAllowListIgnoresNamesAndUuids) {
+    std::vector<BluetoothDeviceInfo> devices = {
+        btDevice("AA:BB:CC:DD:EE:02", "WF-1000XM5", true),
+        btDevice("AA:BB:CC:DD:EE:07", "", true),
+        btDevice("AA:BB:CC:DD:EE:08", "Speaker", true, false),
+    };
+    CHECK((pick(devices) == Macs{"AA:BB:CC:DD:EE:02"}));
+    CHECK((pick(devices, {"aa:bb:cc:dd:ee:07", "AA:BB:CC:DD:EE:08"}) == Macs{"AA:BB:CC:DD:EE:07", "AA:BB:CC:DD:EE:08"}));
+    CHECK((pick(devices, {"AA:BB:CC:DD:EE:09"}) == Macs{}));
+}
+
+namespace {
+
+// One RFCOMM link to a device whose MDR handshake answers only when told to.
+struct LinkProbe {
+    std::unique_ptr<BluetoothManager> link;
+    int connects{0};
+    bool answerHandshake{false};
+    std::chrono::steady_clock::time_point started{std::chrono::steady_clock::now()};
+
+    explicit LinkProbe(uint32_t slowRetryMs) {
+        BluetoothConfig config;
+        config.preferredMac = "AA:BB:CC:DD:EE:01";
+        config.initialBackoffMs = 1;
+        config.maxBackoffMs = 1;
+        config.maxReconnectAttempts = 3;
+        config.slowRetryMs = slowRetryMs;
+        auto discovery = std::make_unique<MockDeviceDiscovery>();
+        discovery->devices = {btDevice("AA:BB:CC:DD:EE:01", "WF-1000XM5", true)};
+        link = std::make_unique<BluetoothManager>(config, std::make_unique<MockTransport>(), std::move(discovery),
+                                                  std::make_unique<MockSdpResolver>());
+        BluetoothCallbacks callbacks;
+        callbacks.onConnected = [this] { ++connects; };
+        link->setCallbacks(std::move(callbacks));
+    }
+
+    // Runs the link until `ms` after the start. A connected link either
+    // answers the handshake (markHealthy) or drops it, as HeadsetSession does.
+    void runUntil(int ms) {
+        while (std::chrono::steady_clock::now() - started < std::chrono::milliseconds(ms)) {
+            link->tick();
+            if (link->getState() == ConnectionState::CONNECTED) {
+                if (answerHandshake) link->markHealthy();
+                else link->reconnect("MDR protocol handshake not answered");
             }
-        });
-
-        for (int i = 0; i < 50; ++i) {
-            engine.setAmbientLevel(i % 21);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        writerDone = true;
-        reader.join();
-        TEST_ASSERT_EQ(tornReads.load(), 0, "No torn reads under concurrent atomic writes");
-
-        // Test disconnect
-        engine.setConnected(false);
-        std::ifstream dis_fs(engine.getStateFilePath());
-        std::string disContent((std::istreambuf_iterator<char>(dis_fs)), std::istreambuf_iterator<char>());
-        TEST_ASSERT(disContent.find("\"connected\": false") != std::string::npos, "Disconnected payload persisted");
-        TEST_ASSERT(std::filesystem::exists(engine.getStateFilePath()), "File remains on disconnect");
-
-        // Test cleanup on shutdown
-        engine.cleanup();
-        TEST_ASSERT(!std::filesystem::exists(engine.getStateFilePath()), "File unlinked on clean shutdown");
     }
+};
 
-    std::error_code ec;
-    std::filesystem::remove_all(sandboxPath, ec);
+} // namespace
 
-    TEST_PASS("StateEngine");
+TEST(UnansweredHandshakeGivesUpAfterTheRetryBound) {
+    LinkProbe p(0);
+    p.link->start();
+    p.runUntil(150);
+    // The first attempt plus three retries; an open RFCOMM channel does not
+    // reset the count, only an answered handshake does.
+    CHECK_EQ(p.connects, 4);
+    CHECK(p.link->getState() == ConnectionState::DISCONNECTED);
+    p.runUntil(300);
+    CHECK_EQ(p.connects, 4);
+    p.link->start();
+    p.runUntil(450);
+    CHECK_EQ(p.connects, 8);
 }
 
-// ---------------------------------------------------------------------------
-// 11. IpcServer Wire Protocol & Socket Tests
-// ---------------------------------------------------------------------------
-void testIpcServer() {
-    TEST_CASE("IpcServer");
-
-    IpcServer server;
-
-    // Direct command execution checks
-    TEST_ASSERT_EQ(server.handleCommandLine("noise anc"), "OK\n", "noise anc valid");
-    TEST_ASSERT_EQ(server.handleCommandLine("noise wind"), "OK\n", "noise wind valid");
-    TEST_ASSERT(server.handleCommandLine("noise invalid").rfind("ERR invalid mode", 0) == 0, "invalid noise rejected");
-    TEST_ASSERT_EQ(server.handleCommandLine("ambient-level 16"), "OK\n", "ambient-level 16 valid");
-    TEST_ASSERT_EQ(server.handleCommandLine("ambient-level 0"), "OK\n", "ambient-level 0 valid");
-    TEST_ASSERT_EQ(server.handleCommandLine("ambient-level 20"), "OK\n", "ambient-level 20 valid");
-    TEST_ASSERT(server.handleCommandLine("ambient-level 25").rfind("ERR ambient level out of range", 0) == 0, "out of range ambient level rejected");
-    TEST_ASSERT(server.handleCommandLine("ambient-level abc").rfind("ERR invalid level", 0) == 0, "non-integer ambient level rejected");
-    TEST_ASSERT_EQ(server.handleCommandLine("eq vocal"), "OK\n", "eq vocal valid");
-    TEST_ASSERT(server.handleCommandLine("eq invalid").rfind("ERR unknown eq preset", 0) == 0, "unknown eq preset rejected");
-    TEST_ASSERT_EQ(server.handleCommandLine("eq custom 1 2 3 4 5 6"), "OK\n", "eq custom valid");
-    TEST_ASSERT(server.handleCommandLine("eq custom 1 2 3").rfind("ERR custom eq requires", 0) == 0, "short custom eq rejected");
-    TEST_ASSERT(server.handleCommandLine("eq custom 1 2 3 4 15 0").rfind("ERR custom eq band out of range", 0) == 0, "out of range custom eq band rejected");
-    TEST_ASSERT(server.handleCommandLine("eq custom 1 2 3 4 5 15").rfind("ERR clear bass out of range", 0) == 0, "out of range clear bass rejected");
-    TEST_ASSERT_EQ(server.handleCommandLine("speak-to-chat on"), "OK\n", "speak-to-chat on valid");
-    TEST_ASSERT_EQ(server.handleCommandLine("dsee off"), "OK\n", "dsee off valid");
-    TEST_ASSERT_EQ(server.handleCommandLine("multipoint on"), "OK\n", "multipoint on valid");
-    TEST_ASSERT_EQ(server.handleCommandLine("ear-detect off"), "OK\n", "ear-detect off valid");
-    TEST_ASSERT_EQ(server.handleCommandLine("ear-detection on"), "OK\n", "ear-detection on valid");
-    TEST_ASSERT(server.handleCommandLine("").rfind("ERR empty command", 0) == 0, "empty command rejected");
-    TEST_ASSERT(server.handleCommandLine("unknown_verb").rfind("ERR unknown command", 0) == 0, "unknown verb rejected");
-
-    // Socket Functional Test
-    char tmpl[] = "/tmp/test_omasony_ipc_XXXXXX";
-    char* sandbox = ::mkdtemp(tmpl);
-    TEST_ASSERT(sandbox != nullptr, "mkdtemp for socket test must succeed");
-    std::string sockPath = std::string(sandbox) + "/test.sock";
-
-    {
-        IpcServer sockServer(sockPath);
-        bool started = sockServer.start();
-        TEST_ASSERT(started, "IpcServer start must succeed");
-
-        struct stat st{};
-        int rc = ::stat(sockPath.c_str(), &st);
-        TEST_ASSERT_EQ(rc, 0, "Socket file must exist");
-        TEST_ASSERT_EQ(static_cast<int>(st.st_mode & 0777), 0700, "Socket file mode must be 0700");
-
-        // Connect client
-        int clientFd = ::socket(AF_UNIX, SOCK_STREAM, 0);
-        TEST_ASSERT(clientFd >= 0, "Client socket creation must succeed");
-
-        struct sockaddr_un addr{};
-        addr.sun_family = AF_UNIX;
-        std::strncpy(addr.sun_path, sockPath.c_str(), sizeof(addr.sun_path) - 1);
-
-        rc = ::connect(clientFd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
-        TEST_ASSERT_EQ(rc, 0, "Connect to socket must succeed");
-
-        // Server accepts client
-        sockServer.pollOnce(50);
-        TEST_ASSERT_EQ(sockServer.getClientCount(), 1UL, "Server must have 1 connected client");
-
-        // Test 1: Full command
-        std::string cmd1 = "noise ambient\n";
-        ::send(clientFd, cmd1.data(), cmd1.size(), 0);
-        sockServer.pollOnce(50);
-
-        char buf[256]{};
-        ssize_t n = ::recv(clientFd, buf, sizeof(buf) - 1, 0);
-        TEST_ASSERT_EQ(n, 3L, "Response must be 3 bytes ('OK\\n')");
-        TEST_ASSERT_EQ(std::string(buf), "OK\n", "Response string must be 'OK\\n'");
-
-        // Test 2: Chunked partial delivery ("ambient-" then "level 10\n")
-        std::string chunk1 = "ambient-";
-        ::send(clientFd, chunk1.data(), chunk1.size(), 0);
-        sockServer.pollOnce(10);
-
-        std::string chunk2 = "level 10\n";
-        ::send(clientFd, chunk2.data(), chunk2.size(), 0);
-        sockServer.pollOnce(50);
-
-        std::memset(buf, 0, sizeof(buf));
-        n = ::recv(clientFd, buf, sizeof(buf) - 1, 0);
-        TEST_ASSERT_EQ(n, 3L, "Response to chunked command must be 3 bytes");
-        TEST_ASSERT_EQ(std::string(buf), "OK\n", "Response to chunked command must be 'OK\\n'");
-
-        // Test 3: Pipelined multiple commands in single write
-        std::string pipelined = "dsee on\nspeak-to-chat off\n";
-        ::send(clientFd, pipelined.data(), pipelined.size(), 0);
-        sockServer.pollOnce(50);
-
-        std::memset(buf, 0, sizeof(buf));
-        n = ::recv(clientFd, buf, sizeof(buf) - 1, 0);
-        TEST_ASSERT_EQ(n, 6L, "Response to pipelined commands must be 6 bytes ('OK\\nOK\\n')");
-        TEST_ASSERT_EQ(std::string(buf), "OK\nOK\n", "Pipelined responses must be 'OK\\nOK\\n'");
-
-        ::close(clientFd);
-        sockServer.pollOnce(50);
-        TEST_ASSERT_EQ(sockServer.getClientCount(), 0UL, "Client count must be 0 after disconnect");
-
-        // Set callbacks for status queries
-        IpcCallbacks cbs;
-        protocol::HeadphoneState testState;
-        testState.connected = true;
-        testState.device_name = "WH-1000XM5";
-        testState.noise_mode = "anc";
-        testState.battery_level = 90;
-        cbs.getStatusJson = [&testState]() {
-            return testState.toJson();
-        };
-        sockServer.setCallbacks(cbs);
-
-        // Test 4: Compact single-line status output over socket
-        int clientFd2 = ::socket(AF_UNIX, SOCK_STREAM, 0);
-        TEST_ASSERT(clientFd2 >= 0, "Client 2 socket creation must succeed");
-        rc = ::connect(clientFd2, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
-        TEST_ASSERT_EQ(rc, 0, "Connect client 2 must succeed");
-        sockServer.pollOnce(50);
-        TEST_ASSERT_EQ(sockServer.getClientCount(), 1UL, "Server must have 1 client connected");
-
-        std::string statusCmd = "status\n";
-        ::send(clientFd2, statusCmd.data(), statusCmd.size(), 0);
-        sockServer.pollOnce(50);
-
-        char respBuf[4096]{};
-        n = ::recv(clientFd2, respBuf, sizeof(respBuf) - 1, 0);
-        TEST_ASSERT(n > 0, "Status response received from socket");
-        std::string statusResp(respBuf, static_cast<size_t>(n));
-        TEST_ASSERT(statusResp.back() == '\n', "Status response must terminate in newline");
-        TEST_ASSERT_EQ(statusResp.find('\n'), statusResp.size() - 1, "Status response must have no embedded newlines before the final newline");
-        TEST_ASSERT(statusResp.find("\"device_name\":\"WH-1000XM5\"") != std::string::npos, "Status response contains compact device_name");
-        TEST_ASSERT(statusResp.find("\"noise_mode\":\"anc\"") != std::string::npos, "Status response contains compact noise_mode");
-
-        ::close(clientFd2);
-        sockServer.pollOnce(50);
-        TEST_ASSERT_EQ(sockServer.getClientCount(), 0UL, "Client count must be 0 after disconnect");
-
-        // Test 5: Pipelined commands under abrupt client disconnect (UAF prevention check)
-        int clientFd3 = ::socket(AF_UNIX, SOCK_STREAM, 0);
-        TEST_ASSERT(clientFd3 >= 0, "Client 3 socket creation must succeed");
-        rc = ::connect(clientFd3, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
-        TEST_ASSERT_EQ(rc, 0, "Connect client 3 must succeed");
-        sockServer.pollOnce(50);
-        TEST_ASSERT_EQ(sockServer.getClientCount(), 1UL, "Server must have 1 client connected");
-
-        std::string pipeBurst = "status\nnoise anc\nstatus\nambient-level 5\nstatus\n";
-        ::send(clientFd3, pipeBurst.data(), pipeBurst.size(), 0);
-        ::shutdown(clientFd3, SHUT_RD);
-        ::close(clientFd3);
-
-        // Server processes pipelined read event on abruptly closed socket: must not crash or UAF
-        sockServer.pollOnce(50);
-        sockServer.pollOnce(50);
-        TEST_ASSERT_EQ(sockServer.getClientCount(), 0UL, "Server must cleanly handle abrupt disconnect during pipelining without crash");
-
-        sockServer.stop();
-        rc = ::stat(sockPath.c_str(), &st);
-        TEST_ASSERT_EQ(rc, -1, "Socket file must be unlinked after stop()");
-    }
-
-    std::error_code ec;
-    std::filesystem::remove_all(sandbox, ec);
-
-    TEST_PASS("IpcServer");
+TEST(SlowRetryAfterGiveUpUntilTheHandshakeAnswers) {
+    LinkProbe p(400);
+    p.link->start();
+    p.runUntil(200);
+    CHECK_EQ(p.connects, 4);
+    CHECK(p.link->getState() == ConnectionState::RECONNECT_BACKOFF);
+    // One attempt per slow cycle, each failure waits a full cycle again.
+    p.runUntil(600);
+    CHECK_EQ(p.connects, 5);
+    p.runUntil(1000);
+    CHECK_EQ(p.connects, 6);
+    p.answerHandshake = true;
+    p.runUntil(1400);
+    CHECK_EQ(p.connects, 7);
+    CHECK(p.link->getState() == ConnectionState::CONNECTED);
+    // A healthy link that drops gets the fast retries again.
+    p.answerHandshake = false;
+    p.link->reconnect("link dropped");
+    p.runUntil(1600);
+    CHECK_EQ(p.connects, 10);
+    CHECK(p.link->getState() == ConnectionState::RECONNECT_BACKOFF);
+    p.link->stop();
+    p.runUntil(2100);
+    CHECK_EQ(p.connects, 10);
 }
 
-// ---------------------------------------------------------------------------
-// Main Runner
-// ---------------------------------------------------------------------------
+TEST(MockDiscoveryReportsAdapters) {
+    MockDeviceDiscovery discovery;
+    discovery.devices = {btDevice("AA:BB:CC:DD:EE:02", "WF-1000XM5", true)};
+    discovery.adapterAddresses = {"F0:1D:BC:AA:00:01"};
+    auto snap = discovery.snapshot();
+    CHECK(snap.ok);
+    CHECK_EQ(snap.devices.size(), size_t{1});
+    CHECK((snap.adapterAddresses == Macs{"F0:1D:BC:AA:00:01"}));
+    auto found = discovery.findByAddress("aa:bb:cc:dd:ee:02");
+    REQUIRE(found.has_value());
+    CHECK_EQ(found->macAddress, std::string("AA:BB:CC:DD:EE:02"));
+    CHECK(!discovery.findByAddress("AA:BB:CC:DD:EE:09").has_value());
+}
+
 int main() {
-    std::cout << "========================================\n";
-    std::cout << "  omarchy-sony: Protocol & Mock Tests   \n";
-    std::cout << "========================================\n";
-
-    testChecksumCalculation();
-    testEscapingAndUnescaping();
-    testPacketFraming();
-    testStreamFramer();
-    testCommandSerializers();
-    testQuerySerializers();
-    testInboundStateParser();
-    testStringAndEnumHelpers();
-    testMockTransportAndBluetoothManager();
-    testStateEngine();
-    testIpcServer();
-
-    std::cout << "========================================\n";
-    std::cout << "Summary: " << (gTotalTests - gFailedTests) << "/" << gTotalTests
-              << " test cases passed (" << gFailedTests << " failed)\n";
-    std::cout << "========================================\n";
-
-    return (gFailedTests == 0) ? 0 : 1;
+    return testutil::runAll("ProtocolTest");
 }

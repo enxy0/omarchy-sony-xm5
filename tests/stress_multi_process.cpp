@@ -21,7 +21,7 @@ int main() {
     // Initialize StateEngine in parent
     {
         StateEngine engine(sandbox);
-        if (!engine.initialize(true)) {
+        if (!engine.initialize("{\"schema_version\":3,\"connected\":false,\"last_updated\":0,\"primary\":null,\"headsets\":[]}")) {
             std::cerr << "Init failed\n";
             return 1;
         }
@@ -36,8 +36,8 @@ int main() {
             // Child process
             StateEngine childEngine(sandbox);
             for (int i = 0; i < 200; ++i) {
-                childEngine.setBatteryLevel((c * 25 + i) % 101);
-                childEngine.setAmbientLevel(i % 21);
+                childEngine.writeAtomic("{\"schema_version\":2,\"connected\":true,\"last_updated\":" +
+                                        std::to_string(c * 1000 + i) + "}");
                 usleep(500);
             }
             _exit(0);

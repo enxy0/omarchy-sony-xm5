@@ -1,187 +1,259 @@
 #!/usr/bin/env python3
 """
-tests/mock_sony_ctl.py — Mock / Reference Implementation of sony-ctl CLI
-Conforms to PROJECT.md § sony-ctl CLI specification:
-Subcommands:
-    status
-    noise <anc|ambient|wind|off>
-    ambient-level <0-20>
-    eq <preset>
-    eq custom <b1> <b2> <b3> <b4> <b5> <cb>
-    speak-to-chat <on|off>
-    dsee <on|off>
-    multipoint <on|off>
-    ear-detect <on|off>
+tests/mock_sony_ctl.py: reference implementation of the sony-ctl CLI.
+
+Follows docs/backend-contract.md (schema version 3), section 1 (exit codes)
+and section 4 (verbs). The CLI checks argument syntax before it connects,
+with the same rules as the daemon, then sends one line and prints one reply.
+`--headset <selector>` sends `@<selector> ` before the verb (contract 2.5).
+
+Usage: sony-ctl [-s <socket>] [-H|--headset <selector>] <verb> [args...]
 
 Exit codes:
-    0: Success
-    1: Error (invalid arguments, command rejected, protocol error)
-    2: Daemon offline (socket does not exist or connection refused)
+    0: the daemon replied OK or a JSON object (printed to stdout)
+    1: bad arguments, the daemon replied ERR, or socket I/O failed
+    2: cannot connect to the daemon socket
 """
 
 import os
-import sys
+import re
 import socket
-import argparse
+import sys
 
-def get_default_socket_path():
-    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/tmp/run-{os.getuid()}")
+SOCKET_TIMEOUT_S = 2.0
+
+ADDRESS_RE = re.compile(r"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")
+
+EQ_PRESETS = [
+    "off", "bright", "excited", "mellow", "relaxed", "vocal", "treble",
+    "bass", "speech", "custom", "user1", "user2", "user3", "user4", "user5",
+]
+AUTO_POWER_OFF = ["off", "5min", "15min", "30min", "60min", "180min", "when_taken_off"]
+NC_AMB_BUTTON = ["nc_ambient_off", "nc_ambient", "nc_off", "ambient_off"]
+BUTTON_FUNCTION = [
+    "ambient_sound_control", "voice_recognition", "google_assistant",
+    "amazon_alexa", "quick_access", "none",
+]
+QUICK_ACCESS_PRESSES = ["double", "triple"]
+QUICK_ACCESS = ["off", "spotify"]
+TOUCH_SIDES = ["left", "right"]
+TOUCH_FUNCTION = [
+    "ambient_sound_control", "playback_control", "volume_control",
+    "voice_recognition", "google_assistant", "amazon_alexa", "quick_access", "none",
+]
+ON_OFF = ["on", "off"]
+
+# verb -> usage text (contract 4.3 "Verb and syntax" cell).
+USAGE = {
+    "status": "status",
+    "probe": "probe",
+    "noise": "noise anc|ambient|off",
+    "ambient-level": "ambient-level <n>",
+    "focus-voice": "focus-voice on|off",
+    "eq": "eq <preset> | eq custom [<b1> <b2> <b3> <b4> <b5> <clear_bass>]",
+    "dsee": "dsee on|off",
+    "speak-to-chat": "speak-to-chat on|off",
+    "speak-to-chat-config": "speak-to-chat-config <sensitivity> <timeout>",
+    "voice-guidance": "voice-guidance on|off",
+    "voice-guidance-volume": "voice-guidance-volume <n>",
+    "auto-power-off": "auto-power-off <value>",
+    "nc-amb-button": "nc-amb-button <value>",
+    "button-function": "button-function <value>",
+    "ear-detect": "ear-detect on|off",
+    "volume": "volume <n>",
+    "connection-quality": "connection-quality sound|connection",
+    "multipoint": "multipoint on|off",
+    "source": "source <address>",
+    "touch-panel": "touch-panel on|off",
+    "touch-function": "touch-function left|right <value>",
+    "sidetone": "sidetone on|off",
+    "quick-access": "quick-access double|triple <value>",
+}
+ALIASES = {"ear-detection": "ear-detect"}
+READ_VERBS = ("status", "probe")
+
+
+class UsageError(Exception):
+    pass
+
+
+def default_socket_path():
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/run-{os.getuid()}"
     return os.path.join(runtime_dir, "sony-headphones.sock")
 
-def send_command(socket_path, command_str):
-    if not os.path.exists(socket_path):
-        sys.stderr.write(f"Error: Daemon socket does not exist at {socket_path}\n")
-        return 2, ""
 
+def parse_int(text, low, high, what):
+    try:
+        value = int(text)
+    except (TypeError, ValueError):
+        raise UsageError(f"'{what}' requires an integer between {low} and {high}")
+    if not low <= value <= high:
+        raise UsageError(f"'{what}' requires an integer between {low} and {high}")
+    return value
+
+
+def need_args(verb, args, count):
+    if len(args) != count:
+        raise UsageError(f"usage: {USAGE[verb]}")
+
+
+def choice(verb, value, options):
+    value = value.lower()
+    if value not in options:
+        raise UsageError(f"usage: {USAGE[verb]}")
+    return value
+
+
+def build_request(verb, args):
+    """Checks the arguments of one verb and returns the request line."""
+    if verb in READ_VERBS:
+        need_args(verb, args, 0)
+        return verb
+
+    if verb == "eq":
+        if args and args[0].lower() == "custom":
+            # Bare `eq custom` is the preset form (contract 3.3).
+            if len(args) == 1:
+                return "eq custom"
+            if len(args) != 7:
+                raise UsageError(f"usage: {USAGE[verb]}")
+            values = [parse_int(a, -10, 10, "eq custom") for a in args[1:]]
+            return "eq custom " + " ".join(str(v) for v in values)
+        need_args(verb, args, 1)
+        return f"eq {choice(verb, args[0], EQ_PRESETS)}"
+
+    if verb == "speak-to-chat-config":
+        need_args(verb, args, 2)
+        sensitivity = choice(verb, args[0], ["auto", "high", "low"])
+        timeout = choice(verb, args[1], ["short", "standard", "long", "off"])
+        return f"{verb} {sensitivity} {timeout}"
+
+    if verb == "quick-access":
+        need_args(verb, args, 2)
+        press = choice(verb, args[0], QUICK_ACCESS_PRESSES)
+        value = choice(verb, args[1], QUICK_ACCESS)
+        return f"{verb} {press} {value}"
+
+    if verb == "touch-function":
+        need_args(verb, args, 2)
+        side = choice(verb, args[0], TOUCH_SIDES)
+        value = choice(verb, args[1], TOUCH_FUNCTION)
+        return f"{verb} {side} {value}"
+
+    need_args(verb, args, 1)
+    arg = args[0]
+    if verb == "noise":
+        return f"noise {choice(verb, arg, ['anc', 'ambient', 'off'])}"
+    if verb == "ambient-level":
+        return f"ambient-level {parse_int(arg, 1, 20, verb)}"
+    if verb == "voice-guidance-volume":
+        return f"{verb} {parse_int(arg, -2, 2, verb)}"
+    if verb == "volume":
+        return f"volume {parse_int(arg, 0, 30, verb)}"
+    if verb in ("focus-voice", "dsee", "speak-to-chat", "voice-guidance", "ear-detect", "multipoint", "touch-panel", "sidetone"):
+        return f"{verb} {choice(verb, arg, ON_OFF)}"
+    if verb == "auto-power-off":
+        return f"{verb} {choice(verb, arg, AUTO_POWER_OFF)}"
+    if verb == "nc-amb-button":
+        return f"{verb} {choice(verb, arg, NC_AMB_BUTTON)}"
+    if verb == "button-function":
+        return f"{verb} {choice(verb, arg, BUTTON_FUNCTION)}"
+    if verb == "connection-quality":
+        return f"{verb} {choice(verb, arg, ['sound', 'connection'])}"
+    if verb == "source":
+        if not ADDRESS_RE.match(arg):
+            raise UsageError(f"usage: {USAGE[verb]}")
+        return f"source {arg.upper()}"
+    raise UsageError(f"Unknown subcommand '{verb}'")
+
+
+def send_request(socket_path, line):
+    """Returns (exit_code, reply)."""
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.settimeout(1.5)
+    sock.settimeout(SOCKET_TIMEOUT_S)
     try:
         sock.connect(socket_path)
-    except (ConnectionRefusedError, FileNotFoundError, OSError) as e:
-        sys.stderr.write(f"Error: Cannot connect to daemon socket ({e})\n")
+    except OSError as e:
         sock.close()
+        sys.stderr.write(f"Error: Cannot connect to daemon socket ({e})\n")
         return 2, ""
 
     try:
-        if not command_str.endswith("\n"):
-            command_str += "\n"
-        sock.sendall(command_str.encode("utf-8"))
-        
-        response = b""
-        while True:
-            chunk = sock.recv(4096)
+        sock.sendall((line + "\n").encode("utf-8"))
+        reply = b""
+        while b"\n" not in reply:
+            chunk = sock.recv(65536)
             if not chunk:
                 break
-            response += chunk
-            if b"\n" in response:
-                break
-        sock.close()
-        return 0, response.decode("utf-8", errors="replace").strip()
-    except Exception as e:
+            reply += chunk
+    except OSError as e:
         sys.stderr.write(f"Error: Socket communication failed ({e})\n")
-        sock.close()
         return 1, ""
+    finally:
+        sock.close()
+    return 0, reply.decode("utf-8", errors="replace").strip()
 
-def main():
-    parser = argparse.ArgumentParser(description="sony-ctl CLI", add_help=False)
-    parser.add_argument("-s", "--socket", default=None, help="Override socket path")
-    parser.add_argument("-h", "--help", action="store_true", help="Show help")
-    
-    args, remaining = parser.parse_known_args()
 
-    if args.help or not remaining:
-        print("Usage: sony-ctl [-s <socket>] <subcommand> [args...]")
-        print("Subcommands: status, noise, ambient-level, eq, speak-to-chat, dsee, multipoint, ear-detect")
-        sys.exit(0 if args.help else 1)
+def print_usage(stream):
+    stream.write("Usage: sony-ctl [-s <socket>] [-H|--headset <address|model>] <verb> [args...]\n")
+    stream.write("Verbs:\n")
+    for usage in USAGE.values():
+        stream.write(f"  {usage}\n")
 
-    socket_path = args.socket or get_default_socket_path()
-    subcmd = remaining[0].lower()
 
-    if subcmd == "status":
-        code, resp = send_command(socket_path, "status")
-        if code != 0:
-            sys.exit(code)
-        print(resp)
-        sys.exit(0)
+def main(argv):
+    socket_path = None
+    headset = None
+    args = list(argv)
+    while args and args[0].startswith("-"):
+        flag = args.pop(0)
+        if flag in ("-h", "--help"):
+            print_usage(sys.stdout)
+            return 0
+        if flag in ("-s", "--socket") and args:
+            socket_path = args.pop(0)
+            continue
+        if flag in ("-H", "--headset") and args:
+            headset = args.pop(0)
+            # A selector is one token: an address or a model (contract 2.5).
+            if not headset or any(c.isspace() for c in headset):
+                sys.stderr.write("Error: --headset needs an address or a model\n")
+                return 1
+            continue
+        sys.stderr.write(f"Error: Unknown option '{flag}'\n")
+        return 1
 
-    elif subcmd == "noise":
-        if len(remaining) < 2:
-            sys.stderr.write("Error: 'noise' requires a mode: anc, ambient, wind, off\n")
-            sys.exit(1)
-        mode = remaining[1].lower()
-        if mode not in ["anc", "ambient", "wind", "off"]:
-            sys.stderr.write(f"Error: Invalid noise mode '{mode}'\n")
-            sys.exit(1)
-        code, resp = send_command(socket_path, f"noise {mode}")
-        if code != 0:
-            sys.exit(code)
-        if resp.startswith("OK"):
-            print("OK")
-            sys.exit(0)
-        else:
-            sys.stderr.write(f"Error from daemon: {resp}\n")
-            sys.exit(1)
+    if not args:
+        print_usage(sys.stderr)
+        return 1
 
-    elif subcmd == "ambient-level":
-        if len(remaining) < 2:
-            sys.stderr.write("Error: 'ambient-level' requires an integer level between 0 and 20\n")
-            sys.exit(1)
-        try:
-            level = int(remaining[1])
-            if not (0 <= level <= 20):
-                sys.stderr.write(f"Error: Level {level} out of range [0, 20]\n")
-                sys.exit(1)
-        except ValueError:
-            sys.stderr.write(f"Error: Invalid integer '{remaining[1]}'\n")
-            sys.exit(1)
-        code, resp = send_command(socket_path, f"ambient-level {level}")
-        if code != 0:
-            sys.exit(code)
-        if resp.startswith("OK"):
-            print("OK")
-            sys.exit(0)
-        else:
-            sys.stderr.write(f"Error from daemon: {resp}\n")
-            sys.exit(1)
+    verb = args[0].lower()
+    verb = ALIASES.get(verb, verb)
+    if verb not in USAGE:
+        sys.stderr.write(f"Error: Unknown subcommand '{args[0]}'\n")
+        return 1
 
-    elif subcmd == "eq":
-        if len(remaining) < 2:
-            sys.stderr.write("Error: 'eq' requires a preset or 'custom' with 6 parameters\n")
-            sys.exit(1)
-        if remaining[1].lower() == "custom":
-            if len(remaining) < 8:
-                sys.stderr.write("Error: 'eq custom' requires 5 bands and clear bass (6 integers between -10 and 10)\n")
-                sys.exit(1)
-            try:
-                bands = [int(x) for x in remaining[2:7]]
-                cb = int(remaining[7])
-                for b in bands:
-                    if not (-10 <= b <= 10):
-                        sys.stderr.write("Error: Band values must be between -10 and 10\n")
-                        sys.exit(1)
-                if not (-10 <= cb <= 10):
-                    sys.stderr.write("Error: Clear Bass must be between -10 and 10\n")
-                    sys.exit(1)
-            except ValueError:
-                sys.stderr.write("Error: EQ parameters must be valid integers\n")
-                sys.exit(1)
-            cmd = f"eq custom " + " ".join(str(x) for x in bands) + f" {cb}"
-        else:
-            preset = remaining[1].lower()
-            valid_presets = ["off", "bright", "excited", "mellow", "relaxed", "vocal", "treble", "bass", "speech"]
-            if preset not in valid_presets:
-                sys.stderr.write(f"Error: Unknown EQ preset '{preset}'\n")
-                sys.exit(1)
-            cmd = f"eq {preset}"
-        code, resp = send_command(socket_path, cmd)
-        if code != 0:
-            sys.exit(code)
-        if resp.startswith("OK"):
-            print("OK")
-            sys.exit(0)
-        else:
-            sys.stderr.write(f"Error from daemon: {resp}\n")
-            sys.exit(1)
+    if headset is not None and verb == "status":
+        sys.stderr.write("Error: 'status' does not take --headset\n")
+        return 1
 
-    elif subcmd in ["speak-to-chat", "dsee", "multipoint", "ear-detect", "ear-detection"]:
-        if len(remaining) < 2 or remaining[1].lower() not in ["on", "off"]:
-            sys.stderr.write(f"Error: '{subcmd}' requires 'on' or 'off'\n")
-            sys.exit(1)
-        val = remaining[1].lower()
-        cmd_verb = "ear-detect" if "ear" in subcmd else subcmd
-        code, resp = send_command(socket_path, f"{cmd_verb} {val}")
-        if code != 0:
-            sys.exit(code)
-        if resp.startswith("OK"):
-            print("OK")
-            sys.exit(0)
-        else:
-            sys.stderr.write(f"Error from daemon: {resp}\n")
-            sys.exit(1)
+    try:
+        line = build_request(verb, args[1:])
+    except UsageError as e:
+        sys.stderr.write(f"Error: {e}\n")
+        return 1
+    if headset is not None:
+        line = f"@{headset} {line}"
 
-    else:
-        sys.stderr.write(f"Error: Unknown subcommand '{subcmd}'\n")
-        sys.exit(1)
+    code, reply = send_request(socket_path or default_socket_path(), line)
+    if code != 0:
+        return code
+    if reply == "OK" or reply.startswith("{"):
+        print(reply)
+        return 0
+    sys.stderr.write(f"Error from daemon: {reply or 'empty reply'}\n")
+    return 1
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main(sys.argv[1:]))

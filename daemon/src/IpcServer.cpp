@@ -1,75 +1,17 @@
 #include "IpcServer.hpp"
 
 #include <sys/socket.h>
-#include <sys/un.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <cerrno>
-#include <cstring>
 #include <cstdlib>
-#include <algorithm>
-#include <sstream>
+#include <cstring>
 #include <filesystem>
-#include <iostream>
+#include <memory>
 
 namespace omarchy::sony {
-
-namespace {
-
-// Helper: Trim trailing whitespace and newlines
-std::string trim(const std::string& str) {
-    size_t start = 0;
-    while (start < str.size() && (str[start] == ' ' || str[start] == '\t' || str[start] == '\r' || str[start] == '\n')) {
-        start++;
-    }
-    if (start == str.size()) return "";
-    size_t end = str.size();
-    while (end > start && (str[end - 1] == ' ' || str[end - 1] == '\t' || str[end - 1] == '\r' || str[end - 1] == '\n')) {
-        end--;
-    }
-    return str.substr(start, end - start);
-}
-
-// Helper: Convert string to lowercase
-std::string toLower(std::string_view sv) {
-    std::string out;
-    out.reserve(sv.size());
-    for (char c : sv) {
-        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-    }
-    return out;
-}
-
-// Helper: Split line into whitespace-separated tokens
-std::vector<std::string> tokenize(const std::string& line) {
-    std::vector<std::string> tokens;
-    std::istringstream iss(line);
-    std::string token;
-    while (iss >> token) {
-        tokens.push_back(token);
-    }
-    return tokens;
-}
-
-// Helper: Safely parse integer with full string consumption check
-bool parseInt(const std::string& str, int& outVal) {
-    if (str.empty()) return false;
-    char* end = nullptr;
-    errno = 0;
-    long val = std::strtol(str.c_str(), &end, 10);
-    if (errno != 0 || end == str.c_str() || *end != '\0') {
-        return false;
-    }
-    outVal = static_cast<int>(val);
-    return true;
-}
-
-} // namespace
-
-// ---------------------------------------------------------------------------
-// Path Resolution
-// ---------------------------------------------------------------------------
 
 std::string IpcServer::resolveSocketPath(const std::string& overridePath) {
     if (!overridePath.empty()) {
@@ -84,14 +26,8 @@ std::string IpcServer::resolveSocketPath(const std::string& overridePath) {
     if (xdgRuntime != nullptr && *xdgRuntime != '\0') {
         return std::string(xdgRuntime) + "/sony-headphones.sock";
     }
-
-    // Fallback: /tmp/sony-headphones-$UID.sock
-    return "/tmp/sony-headphones-" + std::to_string(::getuid()) + ".sock";
+    return "/tmp/run-" + std::to_string(::getuid()) + "/sony-headphones.sock";
 }
-
-// ---------------------------------------------------------------------------
-// Construction & Lifecycle
-// ---------------------------------------------------------------------------
 
 IpcServer::IpcServer(std::string socketPath)
     : socketPathConfig_(std::move(socketPath)) {
@@ -102,49 +38,14 @@ IpcServer::~IpcServer() {
     stop();
 }
 
-IpcServer::IpcServer(IpcServer&& other) noexcept
-    : socketPathConfig_(std::move(other.socketPathConfig_)),
-      actualSocketPath_(std::move(other.actualSocketPath_)),
-      listenFd_(other.listenFd_),
-      running_(other.running_),
-      seq_(other.seq_),
-      maxLineLength_(other.maxLineLength_),
-      customHandler_(std::move(other.customHandler_)),
-      callbacks_(std::move(other.callbacks_)),
-      clients_(std::move(other.clients_)) {
-    other.listenFd_ = -1;
-    other.running_ = false;
-}
-
-IpcServer& IpcServer::operator=(IpcServer&& other) noexcept {
-    if (this != &other) {
-        stop();
-        socketPathConfig_ = std::move(other.socketPathConfig_);
-        actualSocketPath_ = std::move(other.actualSocketPath_);
-        listenFd_ = other.listenFd_;
-        running_ = other.running_;
-        seq_ = other.seq_;
-        maxLineLength_ = other.maxLineLength_;
-        customHandler_ = std::move(other.customHandler_);
-        callbacks_ = std::move(other.callbacks_);
-        clients_ = std::move(other.clients_);
-
-        other.listenFd_ = -1;
-        other.running_ = false;
-    }
-    return *this;
-}
-
 bool IpcServer::start() {
     if (running_) {
         return true;
     }
-
     if (actualSocketPath_.empty()) {
         actualSocketPath_ = resolveSocketPath(socketPathConfig_);
     }
 
-    // 1. Ensure parent directory exists with mode 0700
     std::filesystem::path sockPath(actualSocketPath_);
     if (sockPath.has_parent_path()) {
         std::error_code ec;
@@ -154,16 +55,13 @@ bool IpcServer::start() {
         }
     }
 
-    // 2. Unlink any stale existing socket file
     ::unlink(actualSocketPath_.c_str());
 
-    // 3. Create non-blocking stream socket
     listenFd_ = ::socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (listenFd_ < 0) {
         return false;
     }
 
-    // 4. Bind socket
     struct sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
     if (actualSocketPath_.length() >= sizeof(addr.sun_path)) {
@@ -179,7 +77,6 @@ bool IpcServer::start() {
         return false;
     }
 
-    // 5. Enforce 0700 socket permissions
     if (::chmod(actualSocketPath_.c_str(), 0700) < 0) {
         ::unlink(actualSocketPath_.c_str());
         ::close(listenFd_);
@@ -187,7 +84,6 @@ bool IpcServer::start() {
         return false;
     }
 
-    // 6. Listen
     if (::listen(listenFd_, SOMAXCONN) < 0) {
         ::unlink(actualSocketPath_.c_str());
         ::close(listenFd_);
@@ -203,7 +99,6 @@ void IpcServer::stop() {
     if (!running_ && listenFd_ < 0 && clients_.empty()) {
         return;
     }
-
     for (auto& [fd, session] : clients_) {
         if (fd >= 0) {
             ::close(fd);
@@ -215,28 +110,19 @@ void IpcServer::stop() {
         ::close(listenFd_);
         listenFd_ = -1;
     }
-
     if (!actualSocketPath_.empty()) {
         ::unlink(actualSocketPath_.c_str());
     }
-
     running_ = false;
 }
-
-// ---------------------------------------------------------------------------
-// Client Management & I/O
-// ---------------------------------------------------------------------------
 
 void IpcServer::acceptClients() {
     while (running_ && listenFd_ >= 0) {
         struct sockaddr_un clientAddr{};
         socklen_t addrLen = sizeof(clientAddr);
         int clientFd = ::accept4(listenFd_, reinterpret_cast<struct sockaddr*>(&clientAddr),
-                                &addrLen, SOCK_NONBLOCK | SOCK_CLOEXEC);
+                                 &addrLen, SOCK_NONBLOCK | SOCK_CLOEXEC);
         if (clientFd < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                break;
-            }
             if (errno == EINTR) {
                 continue;
             }
@@ -245,49 +131,40 @@ void IpcServer::acceptClients() {
 
         ClientSession session;
         session.fd = clientFd;
+        session.id = nextClientId_++;
         session.connectedAt = std::chrono::steady_clock::now();
         clients_[clientFd] = std::move(session);
     }
 }
 
 void IpcServer::handleClientRead(int clientFd) {
-    auto it = clients_.find(clientFd);
-    if (it == clients_.end()) {
-        return;
-    }
-    ClientSession& session = it->second;
-
     char buf[2048];
     while (true) {
+        auto it = clients_.find(clientFd);
+        if (it == clients_.end()) {
+            return;
+        }
+        ClientSession& session = it->second;
+
         ssize_t n = ::recv(clientFd, buf, sizeof(buf), 0);
         if (n > 0) {
             session.inBuffer.append(buf, static_cast<size_t>(n));
-
-            if (session.inBuffer.size() > maxLineLength_) {
+            size_t firstLine = session.inBuffer.find('\n');
+            size_t lineLength = firstLine == std::string::npos ? session.inBuffer.size() : firstLine;
+            if (lineLength > maxLineLength_ || session.inBuffer.size() > maxBuffered_) {
                 queueResponse(session, "ERR line too long\n");
                 char drainBuf[8192];
                 while (::recv(clientFd, drainBuf, sizeof(drainBuf), MSG_DONTWAIT) > 0) {}
                 closeClient(clientFd);
                 return;
             }
-
-            size_t pos;
-            while ((pos = session.inBuffer.find('\n')) != std::string::npos) {
-                std::string line = session.inBuffer.substr(0, pos);
-                session.inBuffer.erase(0, pos + 1);
-
-                std::string response = handleCommandLine(line);
-                if (!queueResponse(session, response)) {
-                    closeClient(clientFd);
-                    return;
-                }
-            }
+            drainClient(clientFd);
         } else if (n == 0) {
             closeClient(clientFd);
             return;
         } else {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                break;
+                return;
             }
             if (errno == EINTR) {
                 continue;
@@ -295,6 +172,44 @@ void IpcServer::handleClientRead(int clientFd) {
             closeClient(clientFd);
             return;
         }
+    }
+}
+
+void IpcServer::drainClient(int clientFd) {
+    if (drainingFd_ == clientFd) {
+        return;
+    }
+    const int saved = drainingFd_;
+    drainingFd_ = clientFd;
+    while (true) {
+        auto it = clients_.find(clientFd);
+        if (it == clients_.end()) break;
+        ClientSession& session = it->second;
+        if (session.busy) break;
+        size_t pos = session.inBuffer.find('\n');
+        if (pos == std::string::npos) break;
+
+        std::string line = session.inBuffer.substr(0, pos);
+        session.inBuffer.erase(0, pos + 1);
+        session.busy = true;
+        const uint64_t id = session.id;
+        handleCommandLine(line, [this, clientFd, id](std::string reply) { completeClient(clientFd, id, reply); });
+    }
+    drainingFd_ = saved;
+}
+
+void IpcServer::completeClient(int clientFd, uint64_t id, const std::string& reply) {
+    auto it = clients_.find(clientFd);
+    if (it == clients_.end() || it->second.id != id) {
+        return;
+    }
+    it->second.busy = false;
+    if (!queueResponse(it->second, reply)) {
+        closeClient(clientFd);
+        return;
+    }
+    if (drainingFd_ != clientFd) {
+        drainClient(clientFd);
     }
 }
 
@@ -340,10 +255,6 @@ void IpcServer::closeClient(int clientFd) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Event Loop Integration
-// ---------------------------------------------------------------------------
-
 void IpcServer::appendPollFds(std::vector<struct pollfd>& pfds) const {
     if (listenFd_ >= 0) {
         pfds.push_back({listenFd_, POLLIN, 0});
@@ -365,57 +276,25 @@ void IpcServer::handleSocketEvent(int fd, short revents) {
         return;
     }
 
-    auto it = clients_.find(fd);
-    if (it == clients_.end()) {
+    if (clients_.find(fd) == clients_.end()) {
         return;
     }
-
-    if (revents & (POLLERR | POLLHUP | POLLNVAL)) {
-        closeClient(fd);
-        return;
-    }
-
     if (revents & POLLOUT) {
         handleClientWrite(fd);
     }
-
     if ((revents & POLLIN) && clients_.find(fd) != clients_.end()) {
         handleClientRead(fd);
+    }
+    if ((revents & (POLLERR | POLLHUP | POLLNVAL)) && clients_.find(fd) != clients_.end()) {
+        closeClient(fd);
     }
 }
 
 void IpcServer::handlePollEvents(std::span<const struct pollfd> pfds) {
-    std::vector<int> clientsToClose;
-
     for (const auto& pfd : pfds) {
-        if (pfd.fd == listenFd_) {
-            if (pfd.revents & (POLLIN | POLLERR)) {
-                acceptClients();
-            }
-            continue;
+        if (pfd.revents != 0) {
+            handleSocketEvent(pfd.fd, pfd.revents);
         }
-
-        auto it = clients_.find(pfd.fd);
-        if (it == clients_.end()) {
-            continue;
-        }
-
-        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
-            clientsToClose.push_back(pfd.fd);
-            continue;
-        }
-
-        if (pfd.revents & POLLOUT) {
-            handleClientWrite(pfd.fd);
-        }
-
-        if ((pfd.revents & POLLIN) && clients_.find(pfd.fd) != clients_.end()) {
-            handleClientRead(pfd.fd);
-        }
-    }
-
-    for (int fd : clientsToClose) {
-        closeClient(fd);
     }
 }
 
@@ -425,7 +304,6 @@ int IpcServer::pollOnce(int timeoutMs) {
     if (pfds.empty()) {
         return 0;
     }
-
     int ret = ::poll(pfds.data(), static_cast<nfds_t>(pfds.size()), timeoutMs);
     if (ret > 0) {
         handlePollEvents(pfds);
@@ -433,258 +311,32 @@ int IpcServer::pollOnce(int timeoutMs) {
     return ret;
 }
 
-// ---------------------------------------------------------------------------
-// Command Execution
-// ---------------------------------------------------------------------------
-
-std::string IpcServer::handleCommandLine(const std::string& line) {
-    if (customHandler_) {
-        return customHandler_(line);
+void IpcServer::handleCommandLine(const std::string& line, IpcReply done) {
+    auto parsed = cmd::parseLine(line, true);
+    if (!parsed.command) {
+        done("ERR " + parsed.error + "\n");
+        return;
     }
-    return handleBuiltinCommand(line);
+    if (!callbacks_.execute) {
+        if (parsed.command->verb == cmd::Verb::Status) {
+            done("{\"schema_version\":3,\"connected\":false,\"last_updated\":0,\"primary\":null,\"headsets\":[]}\n");
+        } else {
+            done("ERR not connected\n");
+        }
+        return;
+    }
+    callbacks_.execute(*parsed.command, [done = std::move(done)](std::string reply) {
+        if (reply.empty() || reply.back() != '\n') {
+            reply.push_back('\n');
+        }
+        done(reply);
+    });
 }
 
-std::string IpcServer::handleBuiltinCommand(const std::string& line) {
-    std::string trimmed = trim(line);
-    if (trimmed.empty()) {
-        return "ERR empty command\n";
-    }
-
-    auto tokens = tokenize(trimmed);
-    if (tokens.empty()) {
-        return "ERR empty command\n";
-    }
-
-    std::string verb = toLower(tokens[0]);
-
-    // 1. status
-    if (verb == "status") {
-        if (callbacks_.getStatusJson) {
-            std::string json = callbacks_.getStatusJson();
-            if (json.empty() || json.back() != '\n') {
-                json += "\n";
-            }
-            return json;
-        }
-        return "{\"schema_version\":1,\"connected\":false}\n";
-    }
-
-    // 2. noise <anc|ambient|wind|off>
-    if (verb == "noise") {
-        if (tokens.size() < 2) {
-            return "ERR missing mode (expected anc|ambient|wind|off)\n";
-        }
-        std::string modeStr = toLower(tokens[1]);
-        if (modeStr != "anc" && modeStr != "ambient" && modeStr != "wind" && modeStr != "off") {
-            return "ERR invalid mode '" + modeStr + "'\n";
-        }
-
-        protocol::NoiseMode mode = protocol::stringToNoiseMode(modeStr);
-        uint8_t ambientLevel = (modeStr == "wind") ? 0 : 0;
-
-        if (callbacks_.setNoiseMode) {
-            std::string err;
-            if (!callbacks_.setNoiseMode(mode, ambientLevel, err)) {
-                return "ERR " + (err.empty() ? "failed to set noise mode" : err) + "\n";
-            }
-        }
-        return "OK\n";
-    }
-
-    // 3. ambient-level <0-20>
-    if (verb == "ambient-level") {
-        if (tokens.size() < 2) {
-            return "ERR missing level (0-20)\n";
-        }
-        int level = 0;
-        if (!parseInt(tokens[1], level)) {
-            return "ERR invalid level '" + tokens[1] + "'\n";
-        }
-        if (level < 0 || level > 20) {
-            return "ERR ambient level out of range [0-20]\n";
-        }
-
-        if (callbacks_.setAmbientLevel) {
-            std::string err;
-            if (!callbacks_.setAmbientLevel(static_cast<uint8_t>(level), err)) {
-                return "ERR " + (err.empty() ? "failed to set ambient level" : err) + "\n";
-            }
-        }
-        return "OK\n";
-    }
-
-    // 4. eq <preset> OR eq custom <b1> <b2> <b3> <b4> <b5> <cb>
-    if (verb == "eq") {
-        if (tokens.size() < 2) {
-            return "ERR missing eq preset\n";
-        }
-        std::string presetStr = toLower(tokens[1]);
-
-        if (presetStr == "custom") {
-            if (tokens.size() < 8) {
-                return "ERR custom eq requires 5 bands and clear bass (6 integers [-10, 10])\n";
-            }
-            std::array<int, 5> bands{};
-            for (size_t i = 0; i < 5; ++i) {
-                int b = 0;
-                if (!parseInt(tokens[2 + i], b)) {
-                    return "ERR invalid custom eq arguments\n";
-                }
-                if (b < -10 || b > 10) {
-                    return "ERR custom eq band out of range [-10, 10]\n";
-                }
-                bands[i] = b;
-            }
-
-            int clearBass = 0;
-            if (!parseInt(tokens[7], clearBass)) {
-                return "ERR invalid custom eq arguments\n";
-            }
-            if (clearBass < -10 || clearBass > 10) {
-                return "ERR clear bass out of range [-10, 10]\n";
-            }
-
-            if (callbacks_.setCustomEq) {
-                std::string err;
-                if (!callbacks_.setCustomEq(bands, clearBass, err)) {
-                    return "ERR " + (err.empty() ? "failed to set custom eq" : err) + "\n";
-                }
-            }
-            return "OK\n";
-        } else {
-            static const std::vector<std::string> validPresets = {
-                "off", "bright", "excited", "mellow", "relaxed", "vocal", "treble", "bass", "speech"
-            };
-            bool found = false;
-            for (const auto& p : validPresets) {
-                if (presetStr == p) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                return "ERR unknown eq preset '" + presetStr + "'\n";
-            }
-
-            protocol::EqPreset preset = protocol::stringToEqPreset(presetStr);
-            if (callbacks_.setEqPreset) {
-                std::string err;
-                if (!callbacks_.setEqPreset(preset, err)) {
-                    return "ERR " + (err.empty() ? "failed to set eq preset" : err) + "\n";
-                }
-            }
-            return "OK\n";
-        }
-    }
-
-    // 5. speak-to-chat <on|off>
-    if (verb == "speak-to-chat") {
-        if (tokens.size() < 2) {
-            return "ERR expected on|off\n";
-        }
-        std::string val = toLower(tokens[1]);
-        if (val != "on" && val != "off") {
-            return "ERR expected on|off\n";
-        }
-        bool enabled = (val == "on");
-        if (callbacks_.setSpeakToChat) {
-            std::string err;
-            if (!callbacks_.setSpeakToChat(enabled, err)) {
-                return "ERR " + (err.empty() ? "failed to set speak-to-chat" : err) + "\n";
-            }
-        }
-        return "OK\n";
-    }
-
-    // 6. dsee <on|off>
-    if (verb == "dsee") {
-        if (tokens.size() < 2) {
-            return "ERR expected on|off\n";
-        }
-        std::string val = toLower(tokens[1]);
-        if (val != "on" && val != "off") {
-            return "ERR expected on|off\n";
-        }
-        bool enabled = (val == "on");
-        if (callbacks_.setDsee) {
-            std::string err;
-            if (!callbacks_.setDsee(enabled, err)) {
-                return "ERR " + (err.empty() ? "failed to set dsee" : err) + "\n";
-            }
-        }
-        return "OK\n";
-    }
-
-    // 7. multipoint <on|off>
-    if (verb == "multipoint") {
-        if (tokens.size() < 2) {
-            return "ERR expected on|off\n";
-        }
-        std::string val = toLower(tokens[1]);
-        if (val != "on" && val != "off") {
-            return "ERR expected on|off\n";
-        }
-        bool enabled = (val == "on");
-        if (callbacks_.setMultipoint) {
-            std::string err;
-            if (!callbacks_.setMultipoint(enabled, err)) {
-                return "ERR " + (err.empty() ? "failed to set multipoint" : err) + "\n";
-            }
-        }
-        return "OK\n";
-    }
-
-    // 8. ear-detect <on|off> or ear-detection <on|off>
-    if (verb == "ear-detect" || verb == "ear-detection") {
-        if (tokens.size() < 2) {
-            return "ERR expected on|off\n";
-        }
-        std::string val = toLower(tokens[1]);
-        if (val != "on" && val != "off") {
-            return "ERR expected on|off\n";
-        }
-        bool enabled = (val == "on");
-        if (callbacks_.setEarDetection) {
-            std::string err;
-            if (!callbacks_.setEarDetection(enabled, err)) {
-                return "ERR " + (err.empty() ? "failed to set ear detection" : err) + "\n";
-            }
-        }
-        return "OK\n";
-    }
-
-    // Internal test helper verbs
-    if (verb == "_set_battery") {
-        int level = 85;
-        bool charging = false;
-        if (tokens.size() >= 2) {
-            parseInt(tokens[1], level);
-        }
-        if (tokens.size() >= 3) {
-            std::string chg = toLower(tokens[2]);
-            charging = (chg == "true" || chg == "1" || chg == "yes");
-        }
-        if (callbacks_.onTestSetBattery) {
-            callbacks_.onTestSetBattery(level, charging);
-        }
-        return "OK\n";
-    }
-
-    if (verb == "_disconnect") {
-        if (callbacks_.onTestDisconnect) {
-            callbacks_.onTestDisconnect();
-        }
-        return "OK\n";
-    }
-
-    if (verb == "_reconnect") {
-        if (callbacks_.onTestReconnect) {
-            callbacks_.onTestReconnect();
-        }
-        return "OK\n";
-    }
-
-    return "ERR unknown command '" + tokens[0] + "'\n";
+std::optional<std::string> IpcServer::handleCommandLineSync(const std::string& line) {
+    auto result = std::make_shared<std::optional<std::string>>();
+    handleCommandLine(line, [result](std::string reply) { *result = std::move(reply); });
+    return *result;
 }
 
 } // namespace omarchy::sony
