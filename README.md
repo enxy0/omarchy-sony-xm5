@@ -1,360 +1,271 @@
-# Sony WH-1000XM5 for Omarchy
+# Sony XM5 for Omarchy
 
-An Omarchy bar widget, a background daemon and a command-line tool
-(`sony-ctl`) to control the Sony WH-1000XM5 headset on Linux.
+English | [Русский](README.ru.md)
 
-The daemon talks to the headset over Bluetooth RFCOMM with the Sony MDR
-protocol, version 2. The widget and `sony-ctl` talk only to the daemon.
+An [Omarchy](https://omarchy.org) bar widget for the Sony WH-1000XM5
+headphones and WF-1000XM5 earbuds. It shows the battery and controls noise
+cancelling, the equalizer and the other headset settings, without the Sony
+app. A background daemon talks to the headset over Bluetooth, and the
+`sony-ctl` command works with the same daemon.
 
-> Screenshot: not available yet.
+| WH-1000XM5 | WF-1000XM5 |
+|---|---|
+| ![Panel with the WH-1000XM5](docs/screenshots/wh-1000xm5.png) | ![Panel with the WF-1000XM5](docs/screenshots/wf-1000xm5.png) |
 
-This is an unofficial project. It is not affiliated with, authorized,
-maintained, sponsored, or endorsed by Sony Corporation or any of its
-subsidiaries. "Sony", "WH-1000XM5", and related marks are registered
-trademarks of Sony Corporation.
-
-## Credits
-
-- This project started as a fork of
-  [andROYdified/omarchy-sony](https://github.com/andROYdified/omarchy-sony)
-  (MIT, Copyright (c) 2026 Roy Kevin De Jesus). Most of the code is now
-  rewritten: the init sequence, the ACK and sequence handling, feature
-  detection from the headset's support list, the status file (schema 2),
-  the new features and the panel.
-- The protocol knowledge comes from
-  [mos9527/SonyHeadphonesClient](https://github.com/mos9527/SonyHeadphonesClient)
-  (MIT). The function name tables in `daemon/src/MDRProtocol.cpp` are taken
-  from it.
-- Some facts (the XM5 feature list and a few byte values) come from
-  [Gadgetbridge](https://codeberg.org/Freeyourgadget/Gadgetbridge). No
-  Gadgetbridge code or text is used.
-
-See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the license texts.
+This is an unofficial project. It is not affiliated with or endorsed by Sony.
+"Sony", "WH-1000XM5" and "WF-1000XM5" are trademarks of Sony Corporation.
 
 ## Features
 
-The daemon asks the headset which features it supports. The widget shows
-only those controls. If the headset does not answer, the daemon uses a
-fixed XM5 list (the first group below).
+Tested on a WH-1000XM5 (firmware 2.5.1) and a WF-1000XM5 (firmware 6.1.0):
+every setting below was changed, read back after a Bluetooth reconnect and
+restored. The results are in [docs/protocol.md](docs/protocol.md), section 10.
+The panel shows only the controls the connected headset reports.
 
-All byte values come from other projects. This project has not yet
-confirmed them with captures from a real XM5. The groups below follow the
-**Confidence** values in [docs/protocol.md](docs/protocol.md).
+| Setting | WH-1000XM5 | WF-1000XM5 |
+|---|---|---|
+| Battery | yes | left, right and case |
+| Noise cancelling, ambient sound, off; ambient level; Focus on Voice | yes | yes |
+| Equalizer presets, custom 5-band equalizer, Clear Bass | yes | yes |
+| DSEE Extreme | yes | yes |
+| Speak-to-Chat, with sensitivity and timeout | yes | yes |
+| Connection priority: sound quality or stable connection | yes | no |
+| Headset volume | yes | yes |
+| Voice guidance | yes | yes, with volume |
+| Auto power off: off or when taken off | yes | yes |
+| Pause when taken off | yes | yes |
+| NC/AMB button: which modes it cycles through | yes | no |
+| Touch panel on or off | yes | no |
+| Quick Access: Spotify on a double or triple press | yes | no |
+| Touch function of each earbud | no | yes |
+| Hear your own voice during calls | no | yes |
+| Multipoint, connected devices, switching the audio source | yes | yes |
+| Codec, model and firmware | yes | yes |
 
-### Verified on an XM5 by other projects
+Both models can be connected at the same time. The panel then has a tab for
+each one.
 
-mos9527/SonyHeadphonesClient users or the Gadgetbridge XM5 support confirm
-these features:
+### In the bar
 
-- Battery level and charging state
-- Noise control: noise cancelling, ambient sound, off
-- Ambient sound level (1 to 20) and Focus on Voice
-- Equalizer presets
-- Custom 5-band equalizer and Clear Bass
-- Speak-to-Chat on/off, sensitivity and timeout
-- Voice guidance on/off
-- Auto power off (timers and "when taken off")
-- NC/AMB button cycle (which modes the button steps through)
-- Pause when taken off
-- Headset volume (0 to 30)
+![Bar tooltip with two headsets](docs/screenshots/bar-tooltip.png)
 
-### Implemented, needs confirmation on a real XM5
+- The icon shows the headset that plays from this computer. If both or
+  neither do, it shows the one connected last. Headphones and earbuds have
+  different icons.
+- The icon turns green while charging and red below 20 %. It hides 3 seconds
+  after the last headset disconnects.
+- The tooltip has one line per headset; `(bar)` marks the one the icon shows.
+- Left click opens the panel. Right click switches the noise mode of that
+  headset: noise cancelling, ambient sound, off.
 
-The code for these features exists, but no source confirms them on an XM5.
-They can fail or be absent:
+Keys in the panel:
 
-- DSEE Extreme
-- Voice guidance volume
-- NC/AMB button function (ambient control, assistants, Quick Access)
-- Quick Access function for a double or triple press (off or Spotify)
-- Touch controls on/off
-- Worn status (headset on the head or not)
-- Connection priority (sound quality or stable connection)
-- Current codec
-- Multipoint on/off
-- Paired device list and switching the active audio source
-- Model name and firmware version
+| Key | Action |
+|---|---|
+| `j` `k` or arrows | move between controls |
+| `h` `l` | change a value, open or close a section |
+| `Enter` `Space` | select |
+| `[` `]` | previous or next headset |
+| `Esc` | close |
 
-### Widget
+## Install
 
-- The bar shows a headphone icon, the same size as the built-in icon
-  widgets. The icon turns green while charging and red below 20 %. The
-  tooltip shows the battery level. With no headset connected, the icon
-  hides after 3 seconds and comes back when a headset connects.
-- Left click opens the panel. Right click cycles the noise mode
-  (ANC, Ambient, Off).
-- Keyboard in the panel: `j`/`k` or arrows to move, `h`/`l` to change a
-  value or to open and close a section, `Enter` or `Space` to select,
-  `Esc` to close.
+You need Omarchy and a headset that is paired and connected (in the Omarchy
+Bluetooth panel or with `bluetoothctl`).
+
+1. Add the widget:
+
+   ```bash
+   omarchy plugin add https://github.com/enxy0/omarchy-sony-xm5 --enable
+   ```
+
+2. Click the headphones icon in the bar and press **Install**. A terminal
+   opens and runs `setup`. You can also run it yourself:
+
+   ```bash
+   ~/.config/omarchy/plugins/io.github.enxy0.sonyxm5/setup
+   ```
+
+`setup` does the following:
+
+- installs the build packages that are missing (`cmake`, `ninja`, `gcc`,
+  `bluez-libs`, `dbus`) with pacman; sudo asks for your password only then;
+- builds the daemon and `sony-ctl` in `~/.cache/omarchy-sony-xm5`;
+- puts `sony-headphones-daemon` and `sony-ctl` in `~/.local/bin`;
+- installs the `sony-headphones.service` systemd user unit, enables it and
+  starts it.
+
+The daemon runs as your user. Apart from the build packages, nothing is
+installed outside your home directory.
+
+### Update
+
+```bash
+omarchy plugin update io.github.enxy0.sonyxm5
+```
+
+If the daemon is now older than the widget, the panel shows "Update the
+daemon" with an **Update** button. It runs `setup` again.
+
+### Remove
+
+```bash
+~/.config/omarchy/plugins/io.github.enxy0.sonyxm5/setup --uninstall
+omarchy plugin remove io.github.enxy0.sonyxm5
+```
+
+`setup --uninstall` stops the service and removes the daemon, `sony-ctl`,
+the unit, the status file and the build directory.
+
+### Arch package instead of setup
+
+If you want pacman to own the daemon, build the package from the
+`PKGBUILD` in this repository. It installs into `/usr`. The widget still
+comes from `omarchy plugin add`.
+
+```bash
+git clone https://github.com/enxy0/omarchy-sony-xm5
+cd omarchy-sony-xm5
+makepkg -si
+systemctl --user enable --now sony-headphones.service
+```
+
+Use either the package or `setup`, not both. To remove the package:
+`systemctl --user disable --now sony-headphones.service`, then
+`sudo pacman -Rns omarchy-sony-xm5`.
+
+### Which headsets the daemon uses
+
+The daemon takes every connected headset whose Bluetooth name contains
+`WH-1000XM5` or `WF-1000XM5`. It never connects a headset itself: connect it
+as usual and the daemon picks it up within a few seconds. To limit it to
+specific headsets, pass `--device <MAC>` (once per headset) in a systemd
+drop-in for `sony-headphones.service` that overrides `ExecStart`.
+
+## Command line
+
+```
+sony-ctl [-s <socket>] [-H <headset>] <verb> [args...]
+```
+
+`-H` takes a Bluetooth address or a model (`wh-1000xm5`, `wf-1000xm5`).
+Without it, the command goes to the headset the bar icon shows.
+
+```bash
+sony-ctl status                      # every headset as one JSON line
+sony-ctl noise anc
+sony-ctl -H wf-1000xm5 ambient-level 12
+sony-ctl eq custom 2 1 0 2 3 1       # 5 bands and Clear Bass, -10..10
+```
+
+| Verb | Arguments |
+|---|---|
+| `status`, `probe` | |
+| `noise` | `anc`, `ambient`, `off` |
+| `ambient-level` | `1`..`20` (also switches to ambient sound) |
+| `focus-voice` | `on`, `off` |
+| `eq` | a preset: `off`, `bright`, `excited`, `mellow`, `relaxed`, `vocal`, `treble`, `bass`, `speech`, `custom`, `user1`, `user2` |
+| `eq custom` | `<400Hz> <1k> <2.5k> <6.3k> <16k> <clear_bass>`, each `-10`..`10` |
+| `dsee` | `on`, `off` |
+| `speak-to-chat` | `on`, `off` |
+| `speak-to-chat-config` | `auto`, `high` or `low`, then `short`, `standard`, `long` or `off` |
+| `voice-guidance` | `on`, `off` |
+| `voice-guidance-volume` | `-2`..`2` |
+| `auto-power-off` | `off`, `when_taken_off` |
+| `nc-amb-button` | `nc_ambient_off`, `nc_ambient`, `nc_off`, `ambient_off` |
+| `ear-detect` | `on`, `off` (pause when taken off) |
+| `volume` | `0`..`30` |
+| `connection-quality` | `sound`, `connection` |
+| `touch-panel` | `on`, `off` |
+| `quick-access` | `double` or `triple`, then `off` or `spotify` |
+| `touch-function` | `left` or `right`, then `ambient_sound_control`, `playback_control` or `none` |
+| `sidetone` | `on`, `off` |
+| `multipoint` | `on`, `off` (the headset may reconnect) |
+| `source` | the Bluetooth address of a connected device |
+
+A setter prints `OK` once the headset acknowledges it. Exit codes: `0`
+success, `1` bad arguments or an error from the daemon, `2` the daemon is not
+running. The full grammar and the status format are in
+[docs/backend-contract.md](docs/backend-contract.md).
 
 ## How it works
 
 ```
-Panel.qml / Service.qml / Model.js  (Omarchy bar widget)
-    |  reads                     |  runs
-    v                            v
-status.json                  sony-ctl
-    ^                            |
-    |  writes                    |  UNIX socket
-    |                            v
-sony-headphones-daemon  <--------+
-    |
-    |  Bluetooth RFCOMM, MDR protocol v2
-    v
-WH-1000XM5
+Omarchy bar widget  ─── runs ───►  sony-ctl
+      │                               │
+    reads                        UNIX socket
+      ▼                               ▼
+status.json  ◄─── writes ───  sony-headphones-daemon
+                                      │
+                          Bluetooth RFCOMM, MDR v2
+                                      ▼
+                           WH-1000XM5, WF-1000XM5
 ```
 
-| Item | Path |
-|---|---|
-| Status file | `$XDG_STATE_HOME/sony-headphones/status.json`, else `~/.local/state/sony-headphones/status.json` |
-| Daemon socket | `$XDG_RUNTIME_DIR/sony-headphones.sock` |
+- Status file: `$XDG_STATE_HOME/sony-headphones/status.json`
+  (`~/.local/state/...` by default).
+- Socket: `$XDG_RUNTIME_DIR/sony-headphones.sock`.
+- Daemon log: `journalctl --user -u sony-headphones -f`.
 
-Documentation:
+A headset allows one control session at a time, so close the Sony app on
+your phone if the widget stays on "reading headset settings".
 
-- [docs/protocol.md](docs/protocol.md): byte-level protocol reference.
-- [docs/backend-contract.md](docs/backend-contract.md): status.json schema
-  and the full `sony-ctl` grammar.
-- [docs/ui-spec.md](docs/ui-spec.md): widget layout and behavior.
+## Reporting a problem
 
-## Requirements
-
-- Omarchy (for the bar widget)
-- BlueZ, with the headset paired to this computer
-- systemd user session
-- Build tools: CMake 3.20 or newer, Ninja, pkg-config, a C++20 compiler
-  (GCC or Clang)
-- Libraries: BlueZ (`bluez` pkg-config module) and D-Bus (`dbus-1`)
-
-Arch Linux / Omarchy:
+With the headset connected, run:
 
 ```bash
-sudo pacman -S --needed base-devel cmake ninja bluez-libs dbus
+sony-ctl probe > probe.json
+sony-ctl status > status.json
+journalctl --user -u sony-headphones -b > daemon.log
 ```
 
-On Arch, `setup` checks for `bluez-libs` (or `bluez`), `dbus`, `cmake`,
-`ninja` and `gcc` (or `clang`), and installs missing ones. On other
-distributions it skips this check. On Debian or Ubuntu the packages are
-`build-essential cmake ninja-build pkg-config libbluetooth-dev
-libdbus-1-dev`.
-
-## Install
-
-```bash
-git clone <repo-url>
-cd <repo-dir>
-./setup
-```
-
-`setup` has no options except `-h` / `--help`. It does these steps:
-
-1. Checks the build dependencies (Arch only, see above).
-2. Builds the daemon and the CLI:
-   `cmake -B build -G Ninja && cmake --build build`.
-3. Installs `sony-headphones-daemon` and `sony-ctl` into `~/.local/bin`.
-4. Copies `daemon/sony-headphones.service` into `~/.config/systemd/user/`,
-   runs `systemctl --user daemon-reload` and
-   `systemctl --user enable sony-headphones.service`.
-5. Copies the plugin files (`manifest.json` and every `*.qml` and `*.js`
-   file in the repository root) into `~/.config/omarchy/plugins/<plugin-id>`,
-   and runs `omarchy plugin enable <plugin-id>`. It does not write into
-   `~/.local/share/omarchy`: that tree belongs to Omarchy, and
-   `omarchy refresh` replaces it. If an older `setup` left a copy in
-   `~/.local/share/omarchy/shell/plugins/<plugin-id>`, `setup` removes it.
-
-`<plugin-id>` is the `id` value in `manifest.json`.
-
-To build without installing:
-
-```bash
-cmake -B build -G Ninja
-cmake --build build
-```
-
-### Start the daemon
-
-`setup` enables the service but does not start it. The service starts with
-the next graphical session. To start it now:
-
-```bash
-systemctl --user start sony-headphones.service
-```
-
-Check the service and its log:
-
-```bash
-systemctl --user status sony-headphones.service
-journalctl --user -u sony-headphones.service -f
-```
-
-The daemon picks a paired headset whose Bluetooth name contains
-`WH-1000XM5`, and prefers one that is connected. It does not pick other Sony
-models (for example WF-1000XM5 earbuds), even though they offer the same
-service. A paired device without a known name is used only when it offers
-the Sony service and no WH-1000XM5 is paired. To use a specific headset, run
-the daemon with `--device <MAC>` (for example in a systemd drop-in that
-overrides `ExecStart`).
-
-### Enable the widget
-
-`setup` enables the widget if the `omarchy` command exists. To do it by
-hand:
-
-```bash
-omarchy plugin enable <plugin-id>
-```
-
-### Uninstall
-
-`setup` has no uninstall step. Remove the files by hand:
-
-```bash
-omarchy plugin disable <plugin-id>
-systemctl --user disable --now sony-headphones.service
-rm ~/.config/systemd/user/sony-headphones.service
-systemctl --user daemon-reload
-rm ~/.local/bin/sony-headphones-daemon ~/.local/bin/sony-ctl
-rm -r ~/.config/omarchy/plugins/<plugin-id>
-rm -r ~/.local/state/sony-headphones
-```
-
-## Command-line tool
-
-```
-sony-ctl [-s <socket>] <verb> [args...]
-```
-
-| Verb | Arguments | Effect |
-|---|---|---|
-| `status` | | Print the status as one JSON line |
-| `probe` | | Print debug data about the headset (see below) |
-| `noise` | `anc`, `ambient`, `off` | Noise control mode |
-| `ambient-level` | `1`..`20` | Ambient level; also switches to ambient mode |
-| `focus-voice` | `on`, `off` | Focus on Voice |
-| `eq` | `off`, `bright`, `excited`, `mellow`, `relaxed`, `vocal`, `treble`, `bass`, `speech`, `custom`, `user1`..`user5` | Equalizer preset |
-| `eq custom` | `<b1> <b2> <b3> <b4> <b5> <clear_bass>`, each `-10`..`10` | Custom equalizer: 400 Hz, 1 kHz, 2.5 kHz, 6.3 kHz, 16 kHz, then Clear Bass |
-| `dsee` | `on`, `off` | DSEE Extreme |
-| `speak-to-chat` | `on`, `off` | Speak-to-Chat |
-| `speak-to-chat-config` | `auto\|high\|low` `short\|standard\|long\|off` | Sensitivity and timeout |
-| `voice-guidance` | `on`, `off` | Voice guidance |
-| `voice-guidance-volume` | `-2`..`2` | Voice guidance volume |
-| `auto-power-off` | `off`, `5min`, `15min`, `30min`, `60min`, `180min`, `when_taken_off` | Auto power off |
-| `nc-amb-button` | `nc_ambient_off`, `nc_ambient`, `nc_off`, `ambient_off` | NC/AMB button cycle |
-| `button-function` | `ambient_sound_control`, `voice_recognition`, `google_assistant`, `amazon_alexa`, `quick_access`, `none` | NC/AMB button function |
-| `ear-detect` | `on`, `off` | Pause when taken off |
-| `volume` | `0`..`30` | Headset volume |
-| `connection-quality` | `sound`, `connection` | Connection priority |
-| `multipoint` | `on`, `off` | Multipoint; the headset reconnects |
-| `source` | Bluetooth address | Make a connected device the audio source |
-| `touch-panel` | `on`, `off` | Touch sensor control panel |
-| `quick-access` | `double` or `triple`, then `off` or `spotify` | Quick Access function for a double or triple press of the NC/AMB button |
-
-Exit codes: `0` success, `1` bad arguments or an error from the daemon,
-`2` the daemon socket is not available. A setter prints `OK` when the
-headset acknowledges the packet. The full grammar, the error texts and the
-status.json fields are in
-[docs/backend-contract.md](docs/backend-contract.md).
-
-## Hardware debugging and bug reports
-
-Most features need confirmation on a real XM5. Reports from XM5 owners help
-a lot.
-
-1. Connect the headset and wait until the widget shows its settings.
-2. Run:
-
-   ```bash
-   sony-ctl probe > probe.json
-   sony-ctl status > status.json
-   journalctl --user -u sony-headphones.service -b > daemon.log
-   ```
-
-   `probe` prints the model, the firmware version, the support function
-   lists the headset reports, and the last 64 protocol frames. It returns
-   `ERR not connected` when the headset is not connected.
-3. If a control does not work, use it once, then run `sony-ctl probe` again.
-   The new frames show what the headset answered.
-
-Put this in the bug report:
-
-- The three files above.
-- What you did, what you expected, and what happened.
-- The headset firmware version (it is also in `probe.json`).
-
-The files contain Bluetooth addresses of the headset and of paired devices.
-You can replace them with `XX:XX:XX:XX:XX:XX`. Do not change other values.
-
-Section 8 of [docs/protocol.md](docs/protocol.md) lists the open questions
-that probe output can answer.
+`probe` prints the model, the firmware, the features the headset reports
+and its last 64 protocol frames. If a control does not work, use it once and
+run `probe` again. Attach the three files to the issue together with what you
+did and what happened. The files contain Bluetooth addresses; you can replace
+them with `XX:XX:XX:XX:XX:XX`.
 
 ## Development
 
-### Tests
-
-Build first, then run the C++ tests:
-
 ```bash
-cmake -B build -G Ninja
-cmake --build build
-ctest --test-dir build --output-on-failure
+cmake -B build -G Ninja && cmake --build build
+ctest --test-dir build --output-on-failure    # protocol, sessions, IPC
+node tests/model.test.js                      # widget logic
+tests/integration.sh                          # daemon, CLI and widget logic end to end
+tests/slider_wheel.sh                         # needs qmltestrunner and the Omarchy shell
 ```
 
-Run the widget model tests (Node.js or Deno):
+None of them need Bluetooth. `--mock` runs the daemon against simulated
+headsets (`--mock-profile both` gives one of each):
 
 ```bash
-node tests/model.test.js
-```
-
-Run the slider wheel test. It sends real wheel, click and drag events to
-the stock Omarchy `PanelSlider` in a row with the panel's wheel layer on top. It
-needs `qmltestrunner` (`qt6-declarative`) and the Omarchy shell; without
-them it skips:
-
-```bash
-tests/slider_wheel.sh
-```
-
-Run the end-to-end suite. It needs `python3` and `jq`, and does not use
-Bluetooth:
-
-```bash
-tests/integration.sh
-```
-
-The suite uses `build/daemon/sony-headphones-daemon --mock` and
-`build/cli/sony-ctl` when they exist. Otherwise it falls back to the Python
-mocks in `tests/`. It also runs the model tests if `node` or `deno` exists.
-
-The suite creates its sandbox in `/tmp`. Set `SANDBOX_PARENT` to use another
-directory, for example when `/tmp` is not writable. Keep the path short:
-`<SANDBOX_PARENT>/e2e.XXXXXX/run/sony-headphones.sock` must fit the UNIX
-socket limit of 107 characters, else the daemon does not start.
-
-```bash
-SANDBOX_PARENT=/path/to/short/dir tests/integration.sh
-```
-
-### Mock daemon
-
-`--mock` runs the daemon against a simulated headset. No Bluetooth is used.
-Use separate directories so the real daemon is not affected. Keep the
-runtime directory path short (see the socket limit above):
-
-```bash
-./build/daemon/sony-headphones-daemon --mock \
+./build/daemon/sony-headphones-daemon --mock --mock-profile both \
   --state-dir /tmp/sony-mock/state --runtime-dir /tmp/sony-mock/run
 ./build/cli/sony-ctl -s /tmp/sony-mock/run/sony-headphones.sock status
 ```
 
-The status file is then `/tmp/sony-mock/state/sony-headphones/status.json`.
+Running `./setup` from a clone installs the daemon and copies the widget into
+`~/.config/omarchy/plugins`. The documentation of the protocol, the status
+format and the panel is in [docs/](docs/).
 
-### Branches
+Branches: `main` holds releases, `develop` is the integration branch, and
+each change is a `feature/<name>` branch from `develop`.
 
-The project uses git-flow:
+## Credits
 
-- `main`: released versions.
-- `develop`: integration branch. New work starts here.
-- `feature/<name>`: one branch per change, created from `develop` and
-  merged back into `develop`.
+- The project started as a fork of
+  [andROYdified/omarchy-sony](https://github.com/andROYdified/omarchy-sony)
+  (MIT) and has since been largely rewritten.
+- The protocol knowledge comes from
+  [mos9527/SonyHeadphonesClient](https://github.com/mos9527/SonyHeadphonesClient)
+  (MIT); the function name tables in `daemon/src/MDRProtocol.cpp` are taken
+  from it.
+- Some facts about the XM5 come from
+  [Gadgetbridge](https://codeberg.org/Freeyourgadget/Gadgetbridge). No
+  Gadgetbridge code is used.
+
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the license texts.
 
 ## License
 
