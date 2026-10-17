@@ -726,9 +726,6 @@ not by D-Bus signals. Every 2 s it runs one blocking `GetManagedObjects`
 call (2 s timeout) on the system bus, so a headset can take up to about
 2 s to appear in or leave `headsets[]`.
 
-The rename of the repository and the plugin id is planned separately in
-[`rename-plan.md`](rename-plan.md); it does not change this contract.
-
 ## 8. Daemon changes for schema 3 (summary for implementers)
 
 | Area | Change |

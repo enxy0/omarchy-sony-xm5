@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "id": "io.github.androydified.omasony",
-  "name": "Sony Headphones",
+  "id": "io.github.enxy0.sonyxm5",
+  "name": "Sony XM5",
   "version": "0.1.0",
-  "author": "Roy Kevin",
+  "author": "Nikita Bushuev",
   "license": "MIT",
-  "description": "Sony WH-1000XM5 Headphone Manager",
+  "description": "Sony WH-1000XM5 and WF-1000XM5 manager",
   "kinds": [
     "bar-widget"
   ],
@@ -13,8 +13,8 @@
     "barWidget": "Panel.qml"
   },
   "barWidget": {
-    "displayName": "Sony Headphones",
-    "description": "Sony WH-1000XM5 Headphone Manager",
+    "displayName": "Sony XM5",
+    "description": "Sony WH-1000XM5 and WF-1000XM5 manager",
     "category": "Audio",
     "allowMultiple": false,
     "defaultSection": "right"
