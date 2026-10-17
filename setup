@@ -142,6 +142,12 @@ copy_widget() {
       install -m 0644 "$file" "$dest/$file"
     done
   )
+  # The panel's Install and Update buttons run <plugin dir>/setup; the copy has
+  # no sources, so that setup runs this clone's.
+  printf '#!/usr/bin/env bash\n# Written by %s/setup: this widget is a copy of that clone.\nexec %q "$@"\n' \
+    "$ROOT_DIR" "$ROOT_DIR/setup" >"$dest/setup.new"
+  chmod 0755 "$dest/setup.new"
+  mv -f "$dest/setup.new" "$dest/setup"
 }
 
 enable_widget() {
