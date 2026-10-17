@@ -663,10 +663,37 @@ Panel {
       selectHeadset(Model.switcherActivation(sony.status, i))
       return
     }
+    if (id === Model.DAEMON_TARGET) {
+      runDaemonAction(i)
+      return
+    }
     var a = Model.targetActivation(st, id, i)
     if (!a) return
     if (a.expand) toggleExpanded(a.expand)
     else sony.send(a.action, a.value, root.st)
+  }
+
+  // Button `index` of the daemon card. "run" closes the popup so the
+  // terminal it opens is in front.
+  property bool daemonCommandCopied: false
+
+  function runDaemonAction(index) {
+    var a = sony.daemonActions[index]
+    if (!a) return
+    if (a.id === "run") {
+      sony.runDaemonSetup()
+      root.close()
+    } else if (a.id === "copy") {
+      sony.copyText(sony.daemonCommand)
+      daemonCommandCopied = true
+      copiedTimer.restart()
+    }
+  }
+
+  Timer {
+    id: copiedTimer
+    interval: 2000
+    onTriggered: root.daemonCommandCopied = false
   }
 
   // Slider release on target `id`.
@@ -679,7 +706,7 @@ Panel {
   property bool cursorActive: false
   property string focusSection: ""
   property int selectedIndex: 0
-  readonly property var cursorSections: Model.panelCursorSections(st, expanded)
+  readonly property var cursorSections: Model.panelCursorSections(st, expanded, sony.daemonActions.length)
 
   function hasCursor(id, index) {
     return cursorActive && focusSection === id && selectedIndex === (index === undefined ? 0 : index)
@@ -729,6 +756,7 @@ Panel {
   function cursorItem(id, index) {
     switch (id) {
     case "switcher": return switcherRow
+    case "daemon": return daemonCardItem
     case "noise": return noiseRow
     case "ambient": return ambientRow
     case "focusVoice": return focusVoiceToggle
@@ -969,7 +997,7 @@ Panel {
                 width: parent.width
                 elide: Text.ElideRight
                 textFormat: Text.PlainText
-                text: Model.heroMeta(root.st).toUpperCase()
+                text: Model.heroMeta(root.st, sony.daemonState).toUpperCase()
                 color: Qt.darker(root.foreground, 1.4)
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -1074,65 +1102,118 @@ Panel {
             font.pixelSize: Style.font.bodySmall
           }
 
-          // -- daemon not installed or older than the widget ------------------
+          // -- daemon not installed or older than the widget (ui-spec 0) ------
           Column {
             width: parent.width
-            visible: sony.daemonNotice !== ""
+            visible: sony.daemonCard !== null
             spacing: Style.space(6)
 
             PanelSeparator { foreground: root.foreground }
 
-            Text {
+            BorderSurface {
+              id: daemonCardItem
               width: parent.width
-              textFormat: Text.PlainText
-              wrapMode: Text.WordWrap
-              text: sony.daemonNotice
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-            }
+              implicitHeight: daemonCardContent.implicitHeight + Style.spacing.rowPaddingX * 2
+              radius: Style.cornerRadius
+              color: Style.normalFillFor(root.foreground, Color.accent)
+              borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
 
-            Item {
-              width: parent.width
-              visible: sony.daemonCommand !== ""
-              implicitHeight: Math.max(commandText.implicitHeight, copyButton.implicitHeight)
-
-              Text {
-                id: commandText
+              Column {
+                id: daemonCardContent
                 anchors.left: parent.left
-                anchors.right: copyButton.left
-                anchors.rightMargin: Style.space(6)
-                anchors.verticalCenter: parent.verticalCenter
-                textFormat: Text.PlainText
-                wrapMode: Text.WrapAnywhere
-                text: sony.daemonCommand
-                color: root.foreground
-                font.family: "monospace"
-                font.pixelSize: Style.font.caption
-              }
-
-              Button {
-                id: copyButton
-                property bool copied: false
                 anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                text: copied ? "Copied" : "Copy"
-                fontSize: Style.font.caption
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                bordered: true
-                horizontalPadding: Style.space(8)
-                verticalPadding: Style.space(6)
-                onClicked: {
-                  sony.copyText(sony.daemonCommand)
-                  copied = true
-                  copiedTimer.restart()
+                anchors.top: parent.top
+                anchors.margins: Style.spacing.rowPaddingX
+                spacing: Style.spacing.lg
+
+                // Glyph, title and, when outdated, "0.1.0 → 0.2.0".
+                Item {
+                  width: parent.width
+                  implicitHeight: Math.max(daemonGlyph.implicitHeight, daemonTitle.implicitHeight)
+
+                  Text {
+                    id: daemonGlyph
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: sony.daemonCard ? sony.daemonCard.glyph : ""
+                    color: Color.accent
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.icon
+                  }
+
+                  Text {
+                    id: daemonTitle
+                    anchors.left: daemonGlyph.right
+                    anchors.leftMargin: Style.spacing.lg
+                    anchors.right: daemonVersions.left
+                    anchors.rightMargin: Style.spacing.lg
+                    anchors.verticalCenter: parent.verticalCenter
+                    textFormat: Text.PlainText
+                    elide: Text.ElideRight
+                    text: sony.daemonCard ? sony.daemonCard.title : ""
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.subtitle
+                    font.bold: true
+                  }
+
+                  Text {
+                    id: daemonVersions
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    textFormat: Text.PlainText
+                    text: sony.daemonCard ? sony.daemonCard.versions : ""
+                    color: Qt.darker(root.foreground, 1.3)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
                 }
 
-                Timer {
-                  id: copiedTimer
-                  interval: 2000
-                  onTriggered: copyButton.copied = false
+                Text {
+                  width: parent.width
+                  textFormat: Text.PlainText
+                  wrapMode: Text.WordWrap
+                  text: sony.daemonCard ? sony.daemonCard.text : ""
+                  color: Qt.darker(root.foreground, 1.3)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                Row {
+                  spacing: Style.spacing.controlGap
+
+                  Repeater {
+                    model: sony.daemonActions
+
+                    Button {
+                      required property var modelData
+                      required property int index
+
+                      text: modelData.id === "copy" && root.daemonCommandCopied ? "Copied" : modelData.label
+                      fontSize: Style.font.caption
+                      foreground: root.foreground
+                      fontFamily: root.fontFamily
+                      bordered: true
+                      // The first button is the main action.
+                      selected: index === 0 && modelData.id === "run"
+                      hasCursor: root.hasCursor(Model.DAEMON_TARGET, index)
+                      horizontalPadding: Style.space(12)
+                      verticalPadding: Style.space(6)
+                      onClicked: root.activate(Model.DAEMON_TARGET, index)
+                      onHovered: function(h) { if (h) root.setCursor(Model.DAEMON_TARGET, index) }
+                    }
+                  }
+                }
+
+                // What the buttons run, so nothing happens unseen.
+                Text {
+                  width: parent.width
+                  textFormat: Text.PlainText
+                  elide: Text.ElideMiddle
+                  text: sony.daemonCommand
+                  color: Qt.darker(root.foreground, 1.5)
+                  font.family: "monospace"
+                  font.pixelSize: Style.font.caption
                 }
               }
             }
@@ -1962,7 +2043,10 @@ Panel {
           }
 
           // -- info footer ------------------------------------------------------
-          PanelSeparator { foreground: root.foreground }
+          PanelSeparator {
+            visible: footerRepeater.count > 0
+            foreground: root.foreground
+          }
 
           Column {
             id: infoFooter

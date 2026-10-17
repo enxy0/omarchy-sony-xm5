@@ -30,10 +30,23 @@ nothing.
 (the Arch package) when the shell starts and whenever the status file turns
 usable or unusable or `daemon_version` changes.
 
-| State | When | Popup | Bar tooltip |
-|---|---|---|---|
-| missing | no `sony-ctl` in either place | `The sony-headphones daemon is not installed. Run this in a terminal:` and the command `<plugin dir>/setup` with a **Copy** button (copies with `wl-copy`). The empty-state block is hidden | `Sony headphones: the daemon is not installed` |
-| outdated | the status is usable and `daemon_version` differs from `version` in the widget's `manifest.json`, or is absent | `The daemon is version X, the widget is version Y. Update the daemon:` and `<plugin dir>/setup`; for a `/usr/bin` daemon `… Rebuild the package in your clone:` and `git pull && makepkg -si`. Shown above the controls, which stay usable | unchanged |
+Both states show a card under the hero, above any controls: a bordered
+surface like a `Toggle`, with a glyph in the accent colour, a bold title,
+for `outdated` the versions `<daemon> → <widget>` on the right (`older`
+when the daemon reports none), a caption, a row of buttons and the command
+in dim monospace, elided in the middle.
+
+| State | When | Card | Buttons | Hero meta, bar tooltip |
+|---|---|---|---|---|
+| missing | no `sony-ctl` in either place | download glyph (U+F01DA), `Install the daemon`; the empty-state block is hidden | **Install**, **Copy command** | `DAEMON NOT INSTALLED`; `Sony headphones: the daemon is not installed` |
+| outdated | the status is usable and `daemon_version` differs from `version` in the widget's `manifest.json`, or is absent | update glyph (U+F06B0), `Update the daemon`; the controls below stay usable | **Update**, **Copy command** | unchanged |
+| outdated, `/usr/bin` daemon | as above, for the Arch package | as above, the caption asks to rebuild the package in the user's clone; the command is `git pull && makepkg -si` | **Copy command** only: the widget does not know the clone | unchanged |
+
+**Install** and **Update** run `<plugin dir>/setup` in Omarchy's floating
+terminal (`omarchy-launch-floating-terminal-with-presentation`) and close
+the popup. **Copy command** copies `~/…/setup` with `wl-copy` and reads
+`Copied` for 2 s. The buttons are one cursor row (`daemon`, after the
+switcher): `h`/`l` move, Enter activates.
 
 ## 1. Bar button
 

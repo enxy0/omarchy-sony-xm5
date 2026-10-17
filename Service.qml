@@ -39,10 +39,19 @@ Item {
   property string widgetVersion: ""
   readonly property string daemonState: Model.daemonState(realStatus, daemonProbe, widgetVersion)
   readonly property string daemonCommand: Model.daemonCommand(daemonState, daemonProbe, pluginDirShort)
-  readonly property string daemonNotice: Model.daemonNotice(daemonState, realStatus, daemonProbe, widgetVersion)
+  readonly property var daemonCard: Model.daemonCard(daemonState, realStatus, daemonProbe, widgetVersion)
+  readonly property var daemonActions: Model.daemonActions(daemonState, daemonProbe)
 
   function copyText(text) {
     if (text) Quickshell.execDetached(["wl-copy", "--", text])
+  }
+
+  // Runs setup in Omarchy's floating terminal: sudo may ask for a password,
+  // and the build output and errors stay readable. The card goes away by
+  // itself once the new daemon writes its status.
+  function runDaemonSetup() {
+    var quoted = "'" + (pluginDir + "/setup").replace(/'/g, "'\\''") + "'"
+    Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation", quoted])
   }
 
   function probeDaemon() {

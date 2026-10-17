@@ -1518,7 +1518,8 @@ function barTooltip(status, daemon) {
   return lines.join("\n");
 }
 
-function heroMeta(status) {
+function heroMeta(status, daemon) {
+  if (daemon === "missing") return "Daemon not installed";
   if (!status || status.ok !== true) return status && status.schemaTooNew ? "Update needed" : "No status";
   if (!status.connected) return "Disconnected";
   if (isReading(status)) return "Reading settings";
@@ -1563,19 +1564,47 @@ function _packagedDaemon(probe) {
   return !!probe && typeof probe.path === "string" && probe.path.indexOf("/usr/") === 0;
 }
 
-// The command the notice offers to copy.
+// The command the card shows and copies.
 function daemonCommand(state, probe, pluginDir) {
   if (state === "outdated" && _packagedDaemon(probe)) return "git pull && makepkg -si";
   if (state === "missing" || state === "outdated") return pluginDir ? pluginDir + "/setup" : "";
   return "";
 }
 
-function daemonNotice(state, status, probe, widgetVersion) {
-  if (state === "missing") return "The sony-headphones daemon is not installed. Run this in a terminal:";
-  if (state !== "outdated") return "";
-  var have = status && status.daemonVersion ? "version " + status.daemonVersion : "an older version";
-  var head = "The daemon is " + have + ", the widget is version " + widgetVersion + ".";
-  return head + (_packagedDaemon(probe) ? " Rebuild the package in your clone:" : " Update the daemon:");
+var GLYPH_DAEMON_INSTALL = "\u{F01DA}";
+var GLYPH_DAEMON_UPDATE = "\u{F06B0}";
+
+// The install / update card above the controls, or null.
+// { glyph, title, versions, text }; `versions` is "" when not outdated.
+function daemonCard(state, status, probe, widgetVersion) {
+  if (state === "missing") {
+    return {
+      glyph: GLYPH_DAEMON_INSTALL,
+      title: "Install the daemon",
+      versions: "",
+      text: "The widget controls the headset through a background service. Setup builds it, puts it in ~/.local/bin and starts it."
+    };
+  }
+  if (state !== "outdated") return null;
+  var have = status && status.daemonVersion ? status.daemonVersion : "older";
+  return {
+    glyph: GLYPH_DAEMON_UPDATE,
+    title: "Update the daemon",
+    versions: have + " → " + widgetVersion,
+    text: _packagedDaemon(probe)
+      ? "The daemon comes from the Arch package. Rebuild the package in your clone."
+      : "The widget was updated, the daemon was not. Setup rebuilds and restarts it."
+  };
+}
+
+// The card's buttons, in cursor order: "run" opens setup in a terminal,
+// "copy" copies the command. A packaged daemon is rebuilt in the user's
+// clone, which the widget does not know, so it gets "copy" only.
+function daemonActions(state, probe) {
+  if (state === "missing") return [{ id: "run", label: "Install" }, { id: "copy", label: "Copy command" }];
+  if (state !== "outdated") return [];
+  if (_packagedDaemon(probe)) return [{ id: "copy", label: "Copy command" }];
+  return [{ id: "run", label: "Update" }, { id: "copy", label: "Copy command" }];
 }
 
 function footerLines(status) {
@@ -1904,12 +1933,17 @@ function switcherActivation(status, index) {
   return index >= 0 && index < list.length ? list[index].id : null;
 }
 
-// Switcher, then status targets: the cursor list of the popup. `status` is
-// the view of the shown headset.
-function panelCursorSections(status, expanded) {
+// The buttons of the daemon card: one cursor row, `h`/`l` walk them.
+var DAEMON_TARGET = "daemon";
+
+// Switcher, the daemon card's buttons, then status targets: the cursor list
+// of the popup. `status` is the view of the shown headset; `daemonButtons`
+// is the length of daemonActions.
+function panelCursorSections(status, expanded, daemonButtons) {
   var list = [];
   if (switcherVisible(status)) {
     list.push({ id: SWITCHER_TARGET, kind: "walk", count: headsetCount(status), preferred: headsetIndex(status, status.id) });
   }
+  if (daemonButtons > 0) list.push({ id: DAEMON_TARGET, kind: "walk", count: daemonButtons });
   return list.concat(cursorSections(status, expanded));
 }

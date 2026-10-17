@@ -962,19 +962,28 @@ suite("Suite 31: Daemon Install State", () => {
     Model.daemonCommand("outdated", packaged, dir),
     Model.daemonCommand("ok", local, dir),
   ], [dir + "/setup", dir + "/setup", "git pull && makepkg -si", ""]);
-  check("Notices", [
-    Model.daemonNotice("missing", none, missing, "0.1.0"),
-    Model.daemonNotice("outdated", ok, local, "0.2.0"),
-    Model.daemonNotice("outdated", old, packaged, "0.1.0"),
-    Model.daemonNotice("ok", ok, local, "0.1.0"),
-  ], [
-    "The sony-headphones daemon is not installed. Run this in a terminal:",
-    "The daemon is version 0.1.0, the widget is version 0.2.0. Update the daemon:",
-    "The daemon is an older version, the widget is version 0.1.0. Rebuild the package in your clone:",
-    "",
-  ]);
-  check("Missing daemon: tooltip and no empty-state text", [Model.barTooltip(none, "missing"), Model.emptyStateText(none, "missing")],
-    ["Sony headphones: the daemon is not installed", ""]);
+  const card = (state, status, probe, version) => {
+    const c = Model.daemonCard(state, status, probe, version);
+    return c === null ? null : [c.title, c.versions];
+  };
+  check("Cards", [
+    card("missing", none, missing, "0.1.0"),
+    card("outdated", ok, local, "0.2.0"),
+    card("outdated", old, packaged, "0.1.0"),
+    card("ok", ok, local, "0.1.0"),
+    card("unknown", ok, null, "0.1.0"),
+  ], [["Install the daemon", ""], ["Update the daemon", "0.1.0 → 0.2.0"], ["Update the daemon", "older → 0.1.0"], null, null]);
+  check("Packaged daemon: rebuild text", Model.daemonCard("outdated", ok, packaged, "0.2.0").text.indexOf("Arch package") >= 0, true);
+  const actions = (state, probe) => Model.daemonActions(state, probe).map((a) => a.id + ":" + a.label);
+  check("Actions", [actions("missing", missing), actions("outdated", local), actions("outdated", packaged), actions("ok", local)],
+    [["run:Install", "copy:Copy command"], ["run:Update", "copy:Copy command"], ["copy:Copy command"], []]);
+  check("Missing daemon: tooltip, hero and no empty-state text",
+    [Model.barTooltip(none, "missing"), Model.heroMeta(none, "missing"), Model.emptyStateText(none, "missing")],
+    ["Sony headphones: the daemon is not installed", "Daemon not installed", ""]);
+  const ids = (sections) => sections.map((s) => s.id + (s.count ? ":" + s.count : ""));
+  check("Daemon buttons are the first cursor row", ids(Model.panelCursorSections(ok, {}, 2)).slice(0, 2), ["daemon:2", "noise:3"]);
+  check("No daemon row without buttons", ids(Model.panelCursorSections(ok, {}, 0))[0], "noise:3");
+  check("Missing daemon: the buttons are the only row", ids(Model.panelCursorSections(none, {}, 2)), ["daemon:2"]);
 });
 
 console.log(`\nSummary: ${passed} passed, ${failed} failed`);
