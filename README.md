@@ -19,12 +19,21 @@ omarchy plugin add https://github.com/enxy0/omarchy-sony-xm5 --enable
 ```
 
 Then click the headphones icon in the bar and press **Install**. It builds and
-starts a small background service for your user; sudo asks for a password
-only if build packages are missing.
+starts a small background service for your user. It needs BlueZ and D-Bus,
+which Omarchy has, and installs the missing build packages (`cmake`, `ninja`,
+`gcc`, `bluez-libs`) with pacman; only then does sudo ask for a password.
 
 To update, run `omarchy plugin update io.github.enxy0.sonyxm5`; the panel
-offers **Update** if the service needs it too. To remove, see
-[docs/install.md](docs/install.md).
+offers **Update** if the service needs it too.
+
+To remove:
+
+```bash
+~/.config/omarchy/plugins/io.github.enxy0.sonyxm5/setup --uninstall
+omarchy plugin remove io.github.enxy0.sonyxm5
+```
+
+More on setup, removal and the Arch package: [docs/install.md](docs/install.md).
 
 ## Use
 
