@@ -13,6 +13,7 @@ license=('MIT')
 depends=('bluez' 'bluez-libs' 'dbus' 'gcc-libs' 'glibc')
 makedepends=('cmake' 'ninja' 'git')
 install=omarchy-sony-xm5.install
+options=('!debug')
 source=("$pkgname::git+$url.git#tag=v$pkgver")
 sha256sums=('SKIP')
 
