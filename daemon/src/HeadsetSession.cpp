@@ -400,7 +400,10 @@ void HeadsetSession::handleEvents(Table table, const Bytes& payload, const Inbou
             request.ackTimeoutMs = timing_.commandAckMs;
             request.maxAttempts = timing_.commandAttempts;
             link_.submit(std::move(request), now_);
-            alertWindowUntil_ = {};
+            // One change can ask several questions in a row: the WF-1000XM5
+            // follows "multipoint reconnects" (07) with "two devices with
+            // LDAC" (70) and drops the change if that one goes unanswered.
+            alertWindowUntil_ = now_ + std::chrono::milliseconds(timing_.alertWindowMs);
         }
     }
     if (events.wearLogLine && state_.supported && state_.supported->worn) {

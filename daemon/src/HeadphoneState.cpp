@@ -655,10 +655,12 @@ std::optional<std::vector<std::string>> HeadphoneState::eqPresetNames() const {
     return names;
 }
 
+// Type 05 (with wearing detection) offers no timers: the WH-1000XM5 (fw 2.5.1)
+// and the WF-1000XM5 (fw 6.1.0) acknowledge a timer write and answer
+// "when taken off" (`29 05 10 00`). Only off and when taken off stick.
 std::vector<std::string> HeadphoneState::autoPowerOffOptions() const {
-    std::vector<std::string> options = {"off", "5min", "15min", "30min", "60min", "180min"};
-    if (variants.autoPowerOffType == 0x05) options.emplace_back("when_taken_off");
-    return options;
+    if (variants.autoPowerOffType == 0x05) return {"off", "when_taken_off"};
+    return {"off", "5min", "15min", "30min", "60min", "180min"};
 }
 
 std::optional<std::string> HeadphoneState::buttonFunctionString() const {
