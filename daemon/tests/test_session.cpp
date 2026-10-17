@@ -160,7 +160,8 @@ struct Harness {
     }
 };
 
-const std::vector<std::string> kVolatile = {"last_updated", "connected_since"};
+// daemon_version follows manifest.json; DaemonVersionFollowsManifest checks it.
+const std::vector<std::string> kVolatile = {"last_updated", "connected_since", "daemon_version"};
 
 std::string fixtureDiff(const Json& document, const char* name) {
     auto fixture = testutil::parseJson(testutil::readFile(std::string(SONY_FIXTURES_DIR "/") + name));
@@ -616,7 +617,12 @@ TEST(OtherModelFallbackIsEmpty) {
 TEST(DisconnectedDocumentMatchesFixture) {
     Harness h;
     CHECK_EQ(fixtureDiff(h.doc(), "status_v3_disconnected.json"), std::string(""));
-    CHECK_EQ(h.doc().keyOrder.size(), size_t{5});
+    CHECK_EQ(h.doc().keyOrder.size(), size_t{6});
+}
+
+TEST(DaemonVersionFollowsManifest) {
+    Harness h;
+    CHECK_EQ(h.doc()["daemon_version"].string, std::string(SONY_XM5_VERSION));
 }
 
 TEST(InitializingStatusMatchesFixture) {

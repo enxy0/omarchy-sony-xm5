@@ -1147,6 +1147,7 @@ std::string statusDocument(const std::vector<const HeadphoneState*>& ordered, co
     json::Writer w;
     w.beginObject();
     w.field("schema_version", 3);
+    w.field("daemon_version", std::string(SONY_XM5_VERSION));
     w.field("connected", !ordered.empty());
     w.field("last_updated", lastUpdated);
     w.field("primary", primary);

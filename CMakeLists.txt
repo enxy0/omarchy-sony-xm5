@@ -1,7 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
 
+# manifest.json holds the one version of the project: the widget reads it,
+# and the daemon and the CLI report it, so the panel can tell when the
+# installed daemon is older than the widget.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/manifest.json" SONY_XM5_MANIFEST)
+string(JSON SONY_XM5_VERSION GET "${SONY_XM5_MANIFEST}" version)
+
 project(omarchy-sony-xm5
-    VERSION 0.1.0
+    VERSION ${SONY_XM5_VERSION}
     DESCRIPTION "Sony WH-1000XM5 and WF-1000XM5 daemon, CLI and Omarchy widget"
     LANGUAGES CXX C
 )
@@ -26,6 +32,8 @@ add_compile_options(
     -pedantic
     -Wno-unused-parameter
 )
+
+add_compile_definitions(SONY_XM5_VERSION="${SONY_XM5_VERSION}")
 
 # Position independent code
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)

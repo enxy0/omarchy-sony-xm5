@@ -32,7 +32,6 @@ using namespace omarchy::sony;
 using namespace omarchy::sony::protocol;
 using Clock = std::chrono::steady_clock;
 
-constexpr const char* DAEMON_VERSION = "0.3.0";
 constexpr auto kBluezPollInterval = std::chrono::seconds(2);
 constexpr uint32_t kMaxLinkAttempts = 6;
 constexpr uint32_t kSlowRetryMs = 60000;
@@ -207,7 +206,7 @@ int main(int argc, char* argv[]) {
         return 0;
     }
     if (opts.showVersion) {
-        std::cout << "sony-headphones-daemon " << DAEMON_VERSION << "\n";
+        std::cout << "sony-headphones-daemon " << SONY_XM5_VERSION << "\n";
         return 0;
     }
 

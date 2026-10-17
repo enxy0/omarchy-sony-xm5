@@ -11,9 +11,71 @@ import "Model.js" as Model
 Item {
   id: root
 
+  // sony-ctl as setup installs it (~/.local/bin) or as the Arch package does
+  // (/usr/bin); daemonProbe finds which one exists.
   readonly property string cliBinary: {
+    if (daemonProbe && daemonProbe.path) return daemonProbe.path
     var home = Quickshell.env("HOME")
     return home ? (home + "/.local/bin/sony-ctl") : "sony-ctl"
+  }
+
+  // The plugin directory; `setup` sits there when the widget came from
+  // `omarchy plugin add`.
+  readonly property string pluginDir: {
+    var url = Qt.resolvedUrl(".").toString()
+    url = url.indexOf("file://") === 0 ? decodeURIComponent(url.substring(7)) : url
+    return url.length > 1 && url.charAt(url.length - 1) === "/" ? url.substring(0, url.length - 1) : url
+  }
+  // pluginDir with $HOME as ~: shorter in the notice, and the shell expands
+  // it when the copied command is pasted.
+  readonly property string pluginDirShort: {
+    var home = Quickshell.env("HOME")
+    return home && pluginDir.indexOf(home + "/") === 0 ? "~" + pluginDir.substring(home.length) : pluginDir
+  }
+
+  // { path, version } of the installed sony-ctl, path null when none is
+  // installed; null until the first lookup finishes.
+  property var daemonProbe: null
+  property string widgetVersion: ""
+  readonly property string daemonState: Model.daemonState(realStatus, daemonProbe, widgetVersion)
+  readonly property string daemonCommand: Model.daemonCommand(daemonState, daemonProbe, pluginDirShort)
+  readonly property string daemonNotice: Model.daemonNotice(daemonState, realStatus, daemonProbe, widgetVersion)
+
+  function copyText(text) {
+    if (text) Quickshell.execDetached(["wl-copy", "--", text])
+  }
+
+  function probeDaemon() {
+    if (!probeProcess.running) probeProcess.running = true
+  }
+
+  Process {
+    id: probeProcess
+    running: false
+    command: ["sh", "-c",
+      'for p in "$HOME/.local/bin/sony-ctl" /usr/bin/sony-ctl; do ' +
+      'if [ -x "$p" ]; then echo "$p"; "$p" --version; exit 0; fi; done; exit 1']
+    stdout: StdioCollector { id: probeOut; waitForEnd: true }
+    onExited: function(exitCode, exitStatus) {
+      var lines = String(probeOut.text).trim().split("\n")
+      root.daemonProbe = exitCode === 0 && lines[0]
+        ? { path: lines[0], version: lines.length > 1 ? lines[1].replace(/^sony-ctl /, "") : null }
+        : { path: null, version: null }
+    }
+  }
+
+  FileView {
+    id: manifestView
+    path: root.pluginDir + "/manifest.json"
+    printErrors: false
+    onLoaded: {
+      try {
+        var m = JSON.parse(typeof manifestView.text === "function" ? manifestView.text() : manifestView.text)
+        root.widgetVersion = typeof m.version === "string" ? m.version : ""
+      } catch (_e) {
+        root.widgetVersion = ""
+      }
+    }
   }
 
   // $XDG_STATE_HOME/sony-headphones/status.json, else ~/.local/state/...
@@ -259,7 +321,11 @@ Item {
     }
     queue = pruned.queue
     pending = next
+    // A daemon that appeared, stopped or changed version: look for sony-ctl
+    // again, so the install notice follows a setup run while the shell runs.
+    var recheck = parsed.ok !== realStatus.ok || parsed.daemonVersion !== realStatus.daemonVersion
     realStatus = parsed
+    if (recheck) probeDaemon()
   }
 
   // Right click on the bar button: the next noise mode of the primary
@@ -274,5 +340,8 @@ Item {
     fileView.reload()
   }
 
-  Component.onCompleted: fileView.reload()
+  Component.onCompleted: {
+    fileView.reload()
+    probeDaemon()
+  }
 }

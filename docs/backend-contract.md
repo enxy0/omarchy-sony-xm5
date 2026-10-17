@@ -178,6 +178,7 @@ the address (`--headset <id>`), never a model, and never relies on
 | Key | Type | Meaning |
 |---|---|---|
 | `schema_version` | int | `3` |
+| `daemon_version` | string | The daemon's version, `version` of `manifest.json` at build time. The widget compares it with its own manifest and asks for a daemon update when they differ. Daemons built before this key existed omit it; the widget reads that as an older daemon |
 | `connected` | bool | `true` when `headsets` is not empty |
 | `last_updated` | int | Unix time in seconds of this write |
 | `primary` | string \| null | `id` of an entry of `headsets` (section 2.4). `null` exactly when `headsets` is empty |
@@ -186,7 +187,7 @@ the address (`--headset <id>`), never a model, and never relies on
 No headset connected:
 
 ```json
-{"schema_version": 3, "connected": false, "last_updated": 1760438400, "primary": null, "headsets": []}
+{"schema_version": 3, "daemon_version": "0.1.0", "connected": false, "last_updated": 1760438400, "primary": null, "headsets": []}
 ```
 
 The daemon writes this on start and whenever the last session closes.

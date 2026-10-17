@@ -18,8 +18,22 @@ pending values, queue, cursor movement, headset selection), `SonyIcon.qml`
 (headphones and earbuds glyphs: Material Design Icons from the Nerd Font,
 `headphones` U+F02CB and `earbuds` U+F184F, the set the first-party widgets
 use; Audio shows the same headphones glyph for a headphone sink).
-`setup` deploys `manifest.json` and every `*.qml` and `*.js` file in the
-repository root, so a new QML file there needs no change in `setup`.
+From a development clone, `setup` copies `manifest.json` and every `*.qml`
+and `*.js` file in the repository root into the plugin directory, so a new
+QML file there needs no change in `setup`. Installed with
+`omarchy plugin add`, the plugin directory is the clone and `setup` copies
+nothing.
+
+## 0. Daemon install notice
+
+`Service.qml` looks for `sony-ctl` in `~/.local/bin` (setup) and `/usr/bin`
+(the Arch package) when the shell starts and whenever the status file turns
+usable or unusable or `daemon_version` changes.
+
+| State | When | Popup | Bar tooltip |
+|---|---|---|---|
+| missing | no `sony-ctl` in either place | `The sony-headphones daemon is not installed. Run this in a terminal:` and the command `<plugin dir>/setup` with a **Copy** button (copies with `wl-copy`). The empty-state block is hidden | `Sony headphones: the daemon is not installed` |
+| outdated | the status is usable and `daemon_version` differs from `version` in the widget's `manifest.json`, or is absent | `The daemon is version X, the widget is version Y. Update the daemon:` and `<plugin dir>/setup`; for a `/usr/bin` daemon `… Rebuild the package in your clone:` and `git pull && makepkg -si`. Shown above the controls, which stay usable | unchanged |
 
 ## 1. Bar button
 
@@ -32,7 +46,7 @@ repository root, so a new QML file there needs no change in `setup`.
 | Vertical position | The glyph sits on the same vertical center as the first-party glyph icons (Audio, Bluetooth) next to it. The old vector outline painted from about 0.12 to 0.92 of its box and sat about 1 px (at scale 1.25) below its neighbours. `SonyIcon` now paints the font glyph through `OpticalGlyph`, the component `BarIconButton` uses, in a box of `Style.bar.iconCanvas`; the icon is exactly that box and centered in the button, as `BarIconButton` centers its canvas. Both Material Design glyphs have their ink centered on the same line as the neighbours' glyphs. Measured at scale 1.25: painted center within 0.1 px of the Audio and Bluetooth glyph centers |
 | Tooltip, one headset | line 1 `device_name`; line 2 noise mode name and codec (`Noise Cancelling · LDAC`); line 3 battery: headphones `Battery 80% (charging)`, earbuds `Battery L 70% · R 65% · case 53%` (each `—` when `null`; `case` part omitted when `battery_case` is unsupported; `(charging)` after a part whose charging flag is `true`) |
 | Tooltip, two or more headsets | one line per headset in `headsets` order: `device_name: noise mode · battery`, for example `WH-1000XM5: Noise Cancelling · 80%` and `WF-1000XM5: Ambient Sound · L 70% R 65% case 53%`. The primary headset's line ends with ` (bar)` |
-| Tooltip, other states | Disconnected: `Sony headphones: disconnected`. Initializing (one headset, `supported: null`): `<device_name>: reading headset settings…`; with two or more headsets an initializing entry has that line. Error states: the error text |
+| Tooltip, other states | Daemon not installed: section 0. Disconnected: `Sony headphones: disconnected`. Initializing (one headset, `supported: null`): `<device_name>: reading headset settings…`; with two or more headsets an initializing entry has that line. Error states: the error text |
 | Left click | open or close the popup |
 | Right click | cycle the noise mode ANC → Ambient → Off (`noise`) on the **primary** headset, with `--headset <primary id>`. Ignored unless that headset's noise control is enabled (section 4) |
 

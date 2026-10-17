@@ -160,7 +160,7 @@ var SECTION_FEATURES = {
 // fields of one headset of `headsets` (the primary one for parseStatus, any
 // one for headsetView). Every gating, label and command function takes a
 // view, so they work the same for one headset or several.
-var FILE_KEYS = ["ok", "lastError", "schemaVersion", "schemaTooNew", "lastUpdated", "primary", "headsets"];
+var FILE_KEYS = ["ok", "lastError", "schemaVersion", "schemaTooNew", "daemonVersion", "lastUpdated", "primary", "headsets"];
 
 function defaultStatus() {
   var out = {
@@ -168,6 +168,7 @@ function defaultStatus() {
     lastError: "",
     schemaVersion: 0,
     schemaTooNew: false,
+    daemonVersion: null,
     connected: false,
     lastUpdated: 0,
     primary: null,
@@ -366,6 +367,7 @@ function parseStatus(raw) {
   var res = defaultStatus();
   res.ok = true;
   res.schemaVersion = version;
+  res.daemonVersion = typeof parsed.daemon_version === "string" && parsed.daemon_version !== "" ? parsed.daemon_version : null;
   res.lastUpdated = clamp(parsed.last_updated, 0, Number.MAX_SAFE_INTEGER, 0);
 
   var headsets = [];
@@ -1492,7 +1494,8 @@ function barNoHeadset(status) {
   return !!status && status.ok === true && status.connected !== true;
 }
 
-function barTooltip(status) {
+function barTooltip(status, daemon) {
+  if (daemon === "missing") return "Sony headphones: the daemon is not installed";
   if (!status || status.ok !== true) {
     if (status && status.schemaTooNew) return "Sony headphones: update the widget\n" + status.lastError;
     return "Sony headphones: " + (status && status.lastError ? status.lastError : "no status");
@@ -1527,7 +1530,8 @@ function heroMeta(status) {
 }
 
 // Body text for the states without controls.
-function emptyStateText(status) {
+function emptyStateText(status, daemon) {
+  if (daemon === "missing") return "";
   if (!status || status.ok !== true) {
     if (status && status.schemaTooNew) {
       var which = status.schemaVersion > 0 ? "status schema " + status.schemaVersion : "an unknown status schema";
@@ -1537,6 +1541,41 @@ function emptyStateText(status) {
   }
   if (!status.connected) return "Turn the headset on or connect it in Bluetooth settings.";
   return "";
+}
+
+// ---------------------------------------------------------------------------
+// Daemon install
+// ---------------------------------------------------------------------------
+
+// `probe` is the sony-ctl lookup of Service.qml: null while it runs, else
+// { path, version }, with path null when no sony-ctl is installed.
+// "outdated": the running daemon reports another version than the widget's
+// manifest.json, or none (a daemon from before daemon_version).
+function daemonState(status, probe, widgetVersion) {
+  if (!probe) return "unknown";
+  if (!probe.path) return "missing";
+  if (status && status.ok === true && widgetVersion && status.daemonVersion !== widgetVersion) return "outdated";
+  return "ok";
+}
+
+// A daemon from the Arch package lives in /usr/bin; setup does not touch it.
+function _packagedDaemon(probe) {
+  return !!probe && typeof probe.path === "string" && probe.path.indexOf("/usr/") === 0;
+}
+
+// The command the notice offers to copy.
+function daemonCommand(state, probe, pluginDir) {
+  if (state === "outdated" && _packagedDaemon(probe)) return "git pull && makepkg -si";
+  if (state === "missing" || state === "outdated") return pluginDir ? pluginDir + "/setup" : "";
+  return "";
+}
+
+function daemonNotice(state, status, probe, widgetVersion) {
+  if (state === "missing") return "The sony-headphones daemon is not installed. Run this in a terminal:";
+  if (state !== "outdated") return "";
+  var have = status && status.daemonVersion ? "version " + status.daemonVersion : "an older version";
+  var head = "The daemon is " + have + ", the widget is version " + widgetVersion + ".";
+  return head + (_packagedDaemon(probe) ? " Rebuild the package in your clone:" : " Update the daemon:");
 }
 
 function footerLines(status) {

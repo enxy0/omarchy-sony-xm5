@@ -33,7 +33,7 @@ const M = new Function(modelSource + "\n; return { " + names.join(", ") + " };")
 const MODEL_KEYS = [...new Set([...modelSource.matchAll(/\bparsed\.([a-z_]+)/g)].map((m) => m[1]))].sort();
 
 // Contract 3.2: the top-level keys.
-const TOP_KEYS = ["schema_version", "connected", "last_updated", "primary", "headsets"];
+const TOP_KEYS = ["schema_version", "daemon_version", "connected", "last_updated", "primary", "headsets"];
 // Removed in schema 3; Model reads them only from schema 1 and 2 files.
 const LEGACY_KEYS = ["charging", "ambient_level", "eq_bands", "dsee"];
 
@@ -299,7 +299,7 @@ function checkSchema(raw, parsed, where) {
     MODEL_KEYS.filter((k) => !known.includes(k)));
   ok(!parsed.schemaTooNew && parsed.lastError === "" && parsed.ok === true, `${where}: parse ok, no schemaTooNew`, parsed.lastError);
   if (!ok(raw && typeof raw === "object", `${where}: status.json is an object`)) return;
-  eq(Object.keys(raw), TOP_KEYS, `${where}: the five top-level keys in order`);
+  eq(Object.keys(raw), TOP_KEYS, `${where}: the six top-level keys in order`);
   eq(raw.schema_version, 3, `${where}: schema_version 3`);
   const list = Array.isArray(raw.headsets) ? raw.headsets : [];
   eq(raw.connected, list.length > 0, `${where}: connected == headsets not empty`);

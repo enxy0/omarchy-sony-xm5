@@ -264,7 +264,7 @@ fi
 # T1.D10: Disconnect state persistence
 kill -USR1 "$DAEMON_PID"
 sleep 0.2
-if jq -e '.schema_version == 3 and .connected == false and .primary == null and .headsets == [] and (keys | length) == 5' "$STATUS_FILE" >/dev/null 2>&1; then
+if jq -e '.schema_version == 3 and .connected == false and .primary == null and .headsets == [] and (keys - ["daemon_version"] | length) == 5' "$STATUS_FILE" >/dev/null 2>&1; then
   pass_test "T1.D10" "Daemon writes the empty headsets list on disconnect without unlinking"
 else
   fail_test "T1.D10" "status.json did not record connected:false on disconnect"

@@ -961,13 +961,14 @@ TEST(FallbackListMatchesContract) {
 // status.json and probe
 // ---------------------------------------------------------------------------
 
-TEST(DisconnectedDocumentHasFiveKeys) {
+TEST(DisconnectedDocumentHasSixKeys) {
     Json j = parsed(statusDocument({}, std::nullopt, 1760438400));
-    const std::vector<std::string> keys = {"schema_version", "connected", "last_updated", "primary", "headsets"};
+    const std::vector<std::string> keys = {"schema_version", "daemon_version", "connected", "last_updated", "primary",
+                                           "headsets"};
     CHECK(j.keyOrder == keys);
     auto fixture = testutil::parseJson(testutil::readFile(SONY_FIXTURES_DIR "/status_v3_disconnected.json"));
     REQUIRE(fixture.has_value());
-    CHECK_EQ(testutil::jsonDiff(j, *fixture, {}), std::string(""));
+    CHECK_EQ(testutil::jsonDiff(j, *fixture, {"daemon_version"}), std::string(""));
 }
 
 TEST(HeadsetEntryHasEveryContractKeyInFixtureOrder) {
